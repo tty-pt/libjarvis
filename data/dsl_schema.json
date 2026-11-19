@@ -1,0 +1,95 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Jarvis DSL Schema",
+  "type": "object",
+  "properties": {
+    "op": {
+      "type": "string",
+      "enum": [
+        "focus_window",
+        "focus_relative_window",
+        "open_terminal",
+        "open_application",
+        "open_url",
+        "search_web",
+        "spawn_shell_command",
+        "type_text",
+        "type_and_enter",
+        "press_key",
+        "click",
+        "scroll",
+        "workspace_switch",
+        "workspace_move_window",
+        "window_fullscreen",
+        "window_float",
+        "window_close",
+        "media_play",
+        "media_pause",
+        "media_next",
+        "media_prev",
+        "media_volume",
+        "record_start",
+        "record_stop",
+        "answer_question",
+        "wm_help",
+        "ask_agent",
+        "wait",
+        "inspect_terminal",
+        "inspect_clipboard",
+        "inspect_system",
+        "run_background_command",
+        "remember_fact",
+        "recall_facts"
+      ]
+    },
+    "target": {
+      "type": "object",
+      "properties": {
+        "kind": {"type": "string", "enum": ["window", "tab", "relative", "coordinates", "application", "url", "shell_command", "media_query"]},
+        "relation": {"type": "string", "enum": ["other", "previous", "next", "master"]},
+        "identifier": {"type": "string"},
+        "title_contains": {"type": "string"},
+        "class_contains": {"type": "string"},
+        "url": {"type": "string"},
+        "command": {"type": "string"},
+        "query": {"type": "string"},
+        "x": {"type": "integer"},
+        "y": {"type": "integer"}
+      },
+      "required": ["kind"]
+    },
+    "args": {
+      "type": "object",
+      "properties": {
+        "text": {"type": "string"},
+        "key_combo": {"type": "string"},
+        "button": {"type": "integer", "minimum": 1, "maximum": 3},
+        "direction": {"type": "string", "enum": ["up", "down", "left", "right"]},
+        "amount": {"type": "integer"},
+        "workspace": {"type": "integer", "minimum": 1, "maximum": 9},
+        "action": {"type": "string", "enum": ["play", "pause", "next", "prev", "mute", "unmute", "volume_up", "volume_down"]},
+        "mode": {"type": "string", "enum": ["screen", "mic", "desktop", "both"]},
+        "seconds": {"type": "number", "minimum": 0}
+      }
+    },
+    "verify": {
+      "type": "object",
+      "properties": {
+        "audio_playing": {"type": "boolean"},
+        "window_focused": {"type": "boolean"},
+        "title_contains": {"type": "string"}
+      }
+    },
+    "meta": {
+      "type": "object",
+      "properties": {
+        "source_ir_cap": {"type": "string"},
+        "source_ir_score": {"type": "number"},
+        "inference_backend": {"type": "string"},
+        "latency_ms": {"type": "integer"}
+      }
+    }
+  },
+  "required": ["op", "target"],
+  "additionalProperties": false
+}

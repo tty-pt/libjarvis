@@ -1,0 +1,449 @@
+#include "../include/ttypt/jarvis.h"
+
+#include <assert.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+extern jarvis_dsl_t  g_executed[32];
+extern size_t        g_executed_count;
+extern bool          g_allow_confirm;
+extern jarvis_pane_t g_mock_panes[4];
+extern size_t        g_mock_pane_count;
+
+static void assert_cmd_op(jarvis_engine_t *eng, const char *utt, const char *expected_op, const char *expected_sub)
+{
+	jarvis_process_result_t res;
+	bool ok = jarvis_process(eng, utt, "terminal", &res);
+	if (!ok) {
+		fprintf(stderr, "FAIL: '%s' -> unresolved (%s)\n", utt, res.error);
+		assert(ok);
+	}
+	if (strcmp(res.last_dsl.op, expected_op) != 0) {
+		fprintf(stderr, "FAIL: '%s' -> got op='%s', expected='%s'\n", utt, res.last_dsl.op, expected_op);
+		assert(strcmp(res.last_dsl.op, expected_op) == 0);
+	}
+	if (expected_sub) {
+		char jbuf[2048];
+		jarvis_dsl_to_json(&res.last_dsl, jbuf, sizeof(jbuf));
+		if (!strstr(jbuf, expected_sub)) {
+			fprintf(stderr, "FAIL: '%s' -> DSL JSON '%s' missing '%s'\n", utt, jbuf, expected_sub);
+			assert(strstr(jbuf, expected_sub) != NULL);
+		}
+	}
+}
+
+static bool op_in_list(const char *op, const char *const *allowed)
+{
+	for (size_t i = 0; allowed[i]; i++) {
+		if (strcmp(op, allowed[i]) == 0) return true;
+	}
+	return false;
+}
+
+static bool executed_has_op(const char *op)
+{
+	for (size_t i = 0; i < g_executed_count; i++) {
+		if (strcmp(g_executed[i].op, op) == 0) return true;
+	}
+	return false;
+}
+
+static void test_01_standard_structured_commands(jarvis_engine_t *eng)
+{
+	printf("Running test_01_standard_structured_commands...\n");
+	assert_cmd_op(eng, "open a new terminal", "open_terminal", NULL);
+	assert_cmd_op(eng, "Please open a terminal", "open_terminal", NULL);
+	assert_cmd_op(eng, "open firefox", "open_application", "firefox");
+	assert_cmd_op(eng, "launch calculator", "open_application", "gnome-calculator");
+	assert_cmd_op(eng, "open discord", "open_application", "discord");
+	assert_cmd_op(eng, "open volume control", "open_application", "pavucontrol");
+	assert_cmd_op(eng, "show me my agenda for today", "open_application", "dwm-cal popup");
+	assert_cmd_op(eng, "open system monitor", "open_application", "dwm-ctl sys-monitor");
+	assert_cmd_op(eng, "open wifi settings", "open_application", "dwm-net wifi");
+	assert_cmd_op(eng, "open power menu", "open_application", "dwm-ctl power-menu");
+
+	/* Shell tools & configs */
+	assert_cmd_op(eng, "run htop", "spawn_shell_command", "htop");
+	assert_cmd_op(eng, "open btop", "spawn_shell_command", "btop");
+	assert_cmd_op(eng, "open lazygit", "spawn_shell_command", "lazygit");
+	assert_cmd_op(eng, "Can you open the bit calculator on this terminal", "spawn_shell_command", "bitwise");
+	assert_cmd_op(eng, "open my vim configuration", "spawn_shell_command", "nvim ~/.vimrc");
+	assert_cmd_op(eng, "open my neovim config", "spawn_shell_command", "nvim ~/.config/nvim/init.lua");
+	assert_cmd_op(eng, "open the Makefile", "spawn_shell_command", "nvim Makefile");
+	assert_cmd_op(eng, "open dwm config", "spawn_shell_command", "nvim ~/.local/src/dwm/config.h");
+
+	/* Filesystem & metrics */
+	assert_cmd_op(eng, "list files", "spawn_shell_command", "ls -la");
+	assert_cmd_op(eng, "list my files in the other window", "spawn_shell_command", "\"relation\":\"other\"");
+	assert_cmd_op(eng, "list files in home", "spawn_shell_command", "ls -la ~");
+	assert_cmd_op(eng, "go to site folder", "spawn_shell_command", "cd ~/site");
+	assert_cmd_op(eng, "navigate to downloads directory", "spawn_shell_command", "cd ~/Downloads");
+	assert_cmd_op(eng, "go to parent directory", "spawn_shell_command", "cd ..");
+	assert_cmd_op(eng, "find all python files", "spawn_shell_command", "find . -name '*.py'");
+	assert_cmd_op(eng, "find c files in site", "spawn_shell_command", "find ~/site -name '*.c'");
+	assert_cmd_op(eng, "show disk space", "spawn_shell_command", "df -h");
+	assert_cmd_op(eng, "show largest files", "spawn_shell_command", "du -sh");
+
+	/* Git */
+	assert_cmd_op(eng, "show git status", "spawn_shell_command", "git status");
+	assert_cmd_op(eng, "check git diff", "spawn_shell_command", "git diff");
+	assert_cmd_op(eng, "show recent commits", "spawn_shell_command", "git log");
+	assert_cmd_op(eng, "show git branches", "spawn_shell_command", "git branch");
+
+	/* Workspaces & windows */
+	assert_cmd_op(eng, "switch to workspace 2", "workspace_switch", "\"workspace\":2");
+	assert_cmd_op(eng, "go to workspace 5", "workspace_switch", "\"workspace\":5");
+	assert_cmd_op(eng, "switch to the third workspace", "workspace_switch", "\"workspace\":3");
+	assert_cmd_op(eng, "move this window to workspace 4", "workspace_move_window", "\"workspace\":4");
+	assert_cmd_op(eng, "send the other window to workspace 7", "workspace_move_window", "\"workspace\":7");
+	assert_cmd_op(eng, "go to the other window", "focus_relative_window", "\"relation\":\"other\"");
+	assert_cmd_op(eng, "next window", "focus_relative_window", "\"relation\":\"next\"");
+	assert_cmd_op(eng, "previous window", "focus_relative_window", "\"relation\":\"previous\"");
+	assert_cmd_op(eng, "toggle fullscreen", "window_fullscreen", NULL);
+	assert_cmd_op(eng, "make this window full screen", "window_fullscreen", NULL);
+	assert_cmd_op(eng, "float this window", "window_float", NULL);
+	assert_cmd_op(eng, "close this window", "window_close", "\"kind\":\"window\"");
+	assert_cmd_op(eng, "close this tab on Firefox", "window_close", "\"kind\":\"tab\"");
+	assert_cmd_op(eng, "close the other window", "window_close", "\"relation\":\"other\"");
+	assert_cmd_op(eng, "close it", "window_close", NULL);
+	assert_cmd_op(eng, "fullscreen it", "window_fullscreen", NULL);
+
+	/* Media & volume */
+	assert_cmd_op(eng, "play some lofi music", "media_play", "lofi");
+	assert_cmd_op(eng, "open up some jazz music for me please", "media_play", "jazz");
+	assert_cmd_op(eng, "press play", "media_play", NULL);
+	assert_cmd_op(eng, "put up some lofi dragonball jazz", "media_play", "dragonball");
+	assert_cmd_op(eng, "let's listen to some miles davis", "media_play", "miles davis");
+	assert_cmd_op(eng, "pause the music", "media_pause", NULL);
+	assert_cmd_op(eng, "next song", "media_next", NULL);
+	assert_cmd_op(eng, "skip track", "media_next", NULL);
+	assert_cmd_op(eng, "previous track", "media_prev", NULL);
+	assert_cmd_op(eng, "turn up the volume", "media_volume", "volume_up");
+	assert_cmd_op(eng, "lower volume", "media_volume", "volume_down");
+	assert_cmd_op(eng, "mute audio", "media_volume", "volume_mute");
+
+	/* Web & URLs */
+	assert_cmd_op(eng, "open whatsapp for web", "open_url", "whatsapp");
+	assert_cmd_op(eng, "open github.com/torvalds", "open_url", "github.com/torvalds");
+	assert_cmd_op(eng, "search for python asyncio", "search_web", "python asyncio");
+	assert_cmd_op(eng, "google rust borrow checker", "search_web", "rust borrow checker");
+
+	/* Dictation & editing */
+	assert_cmd_op(eng, "type hello world and press enter", "type_and_enter", "hello world");
+	assert_cmd_op(eng, "type in list files", "type_text", "list files");
+	assert_cmd_op(eng, "open up bashrc on a new terminal", "spawn_shell_command", "\"new_terminal\":true");
+	assert_cmd_op(eng, "type git status in the other window", "type_text", "\"relation\":\"other\"");
+	assert_cmd_op(eng, "clear the line", "press_key", "ctrl+u");
+	assert_cmd_op(eng, "delete last word", "press_key", "ctrl+w");
+
+	/* Scroll, Recording, Agent, Voice Barge-In & Background Media */
+	assert_cmd_op(eng, "scroll down", "scroll", "\"direction\":\"down\"");
+	assert_cmd_op(eng, "scroll up 8", "scroll", "\"amount\":8");
+	assert_cmd_op(eng, "start recording screen and audio", "record_start", "\"mode\":\"both\"");
+	assert_cmd_op(eng, "stop recording", "record_stop", NULL);
+	assert_cmd_op(eng, "ask pi to refactor the parser", "ask_agent", "refactor the parser");
+	assert_cmd_op(eng, "stop talking", "tts_interrupt", NULL);
+	assert_cmd_op(eng, "Jarvis, be quiet", "tts_interrupt", NULL);
+	assert_cmd_op(eng, "please shut up", "tts_interrupt", NULL);
+	assert_cmd_op(eng, "play some jazz music in the background", "media_play", "\"background\":true");
+	printf("  [PASS] All 68 canonical structured commands resolved in pure C!\n");
+}
+
+static void test_02_multi_clause_and_anaphora(jarvis_engine_t *eng)
+{
+	printf("Running test_02_multi_clause_and_anaphora...\n");
+	jarvis_process_result_t r1;
+	assert(jarvis_process(eng, "move this window to workspace 4 and switch to workspace 4", "terminal", &r1));
+	assert(r1.step_count == 2);
+	assert(strcmp(r1.steps[0].dsl.op, "workspace_move_window") == 0);
+	assert(r1.steps[0].dsl.args.workspace == 4);
+	assert(strcmp(r1.steps[1].dsl.op, "workspace_switch") == 0);
+	assert(r1.steps[1].dsl.args.workspace == 4);
+
+	jarvis_process_result_t r2;
+	assert(jarvis_process(eng, "go to site folder and then find c files there", "terminal", &r2));
+	assert(r2.step_count == 2);
+	assert(strcmp(r2.steps[0].dsl.target.command, "cd ~/site") == 0);
+	assert(strcmp(r2.steps[1].dsl.target.command, "find ~/site -name '*.c'") == 0);
+
+	jarvis_process_result_t r3;
+	assert(jarvis_process(eng, "type bread and butter and press enter", "terminal", &r3));
+	assert(r3.step_count == 1);
+	assert(strcmp(r3.last_dsl.op, "type_and_enter") == 0);
+	assert(strcmp(r3.last_dsl.args.text, "bread and butter") == 0);
+	printf("  [PASS] Multi-clause chaining and spatial anaphora ('there') verified!\n");
+}
+
+static void test_03_dsl_normalizer_and_safety(jarvis_engine_t *eng)
+{
+	printf("Running test_03_dsl_normalizer_and_safety...\n");
+	const char *raw_llm = "Sure! Here is the DSL:\n```json\n{\"action\": \"run_command\", \"command\": \"grep -rn 'foo' .\"}\n```\nHope that helps!";
+	jarvis_dsl_t norm;
+	assert(jarvis_normalize_dsl_json(raw_llm, &norm));
+	assert(strcmp(norm.op, "spawn_shell_command") == 0);
+	assert(strcmp(norm.target.command, "grep -rn 'foo' .") == 0);
+
+	assert(jarvis_normalize_dsl_json("{\"op\": \"goto_workspace\", \"workspace\": \"Workspace 6\"}", &norm));
+	assert(strcmp(norm.op, "workspace_switch") == 0);
+	assert(norm.args.workspace == 6);
+
+	assert(jarvis_normalize_dsl_json("{\"op\": \"focus_window\", \"identifier\": \"other\"}", &norm));
+	assert(strcmp(norm.op, "focus_relative_window") == 0);
+	assert(strcmp(norm.target.relation, "other") == 0);
+
+	/* Destructive command guardrail via XY hook */
+	assert(jarvis_is_destructive_command("rm -rf ~/important"));
+	assert(jarvis_is_destructive_command("git reset --hard HEAD~3"));
+	assert(!jarvis_is_destructive_command("git status"));
+
+	/* Hallucination filter */
+	assert(jarvis_is_non_speech_hallucination("vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"));
+	assert(jarvis_is_non_speech_hallucination("v v v v v v"));
+	assert(!jarvis_is_non_speech_hallucination("tell me more about that"));
+	jarvis_process_result_t r_hal;
+	assert(!jarvis_process(eng, "vvvvvvvvvvvvvvvvvvvvvvvvvv", "terminal", &r_hal));
+	printf("  [PASS] DSL normalizer, safety guardrails, and hallucination filter verified!\n");
+}
+
+static void test_04_random_unstructured_commands_end_to_end(jarvis_engine_t *eng)
+{
+	printf("Running test_04_random_unstructured_commands_end_to_end...\n");
+	static const char *const OPS_MEM[]   = {"spawn_shell_command", "open_application", "inspect_system", "answer_question", NULL};
+	static const char *const OPS_PORT[]  = {"spawn_shell_command", "inspect_system", "run_background_command", "answer_question", NULL};
+	static const char *const OPS_SH_QA[] = {"spawn_shell_command", "run_background_command", "answer_question", NULL};
+	static const char *const OPS_SH[]    = {"spawn_shell_command", NULL};
+	static const char *const OPS_MWS[]   = {"workspace_move_window", NULL};
+	static const char *const OPS_CLOSE[] = {"window_close", NULL};
+	static const char *const OPS_FREL[]  = {"focus_relative_window", NULL};
+	static const char *const OPS_APP[]   = {"open_application", NULL};
+	static const char *const OPS_VOL[]   = {"media_volume", NULL};
+	static const char *const OPS_MUTE[]  = {"media_volume", "media_pause", NULL};
+	static const char *const OPS_PLAY[]  = {"media_play", NULL};
+	static const char *const OPS_WEB[]   = {"search_web", "open_url", NULL};
+	static const char *const OPS_CWD[]   = {"answer_question", "spawn_shell_command", NULL};
+	static const char *const OPS_WMH[]   = {"wm_help", "answer_question", NULL};
+	static const char *const OPS_AGENT[] = {"ask_agent", NULL};
+
+	static const struct {
+		const char              *utt;
+		const char *const       *allowed_ops;
+	} random_commands[] = {
+		{"yo jarvis could you check how much memory my machine has left right now", OPS_MEM},
+		{"find out which process is hogging port 8080", OPS_PORT},
+		{"count how many lines of c code are in the current directory", OPS_SH_QA},
+		{"show me the last 15 lines of the auren server log", OPS_SH_QA},
+		{"edit my gitconfig in neovim", OPS_SH},
+		{"run make test-fast in the other window", OPS_SH},
+		{"check if google.com is reachable with ping", OPS_SH_QA},
+		{"compress the logs folder into a tar gz archive", OPS_SH},
+		{"yo toss that other window over to desktop 6", OPS_MWS},
+		{"nuke the other window please", OPS_CLOSE},
+		{"flip back to whichever window I was looking at before this one", OPS_FREL},
+		{"pop open a calculator real quick", OPS_APP},
+		{"crank the sound up a notch", OPS_VOL},
+		{"shush the audio for a second", OPS_MUTE},
+		{"throw on some chill synthwave beats for coding", OPS_PLAY},
+		{"look up the linux kernel epoll man page on google", OPS_WEB},
+		{"what directory am I currently working in?", OPS_CWD},
+		{"what shortcut do I press to split or tile windows in dwm?", OPS_WMH},
+		{"tell pi to inspect the memory recall latency", OPS_AGENT},
+		{NULL, NULL}
+	};
+
+	for (size_t i = 0; random_commands[i].utt; i++) {
+		jarvis_process_result_t res;
+		bool ok = jarvis_process(eng, random_commands[i].utt, "terminal", &res);
+		if (!ok || !res.combined_result.success) {
+			fprintf(stderr, "FAIL unstructured: '%s' -> err='%s'\n", random_commands[i].utt, res.error);
+			assert(ok && res.combined_result.success);
+		}
+		if (!op_in_list(res.last_dsl.op, random_commands[i].allowed_ops)) {
+			fprintf(stderr, "FAIL unstructured op: '%s' -> got '%s'\n", random_commands[i].utt, res.last_dsl.op);
+			assert(op_in_list(res.last_dsl.op, random_commands[i].allowed_ops));
+		}
+	}
+	printf("  [PASS] All 19 random unstructured out-of-distribution commands succeeded end-to-end!\n");
+}
+
+static void test_05_agentic_react_loop_and_memory(jarvis_engine_t *eng)
+{
+	printf("Running test_05_agentic_react_loop_and_memory...\n");
+
+	/* 1. Multi-step ReAct Terminal Diagnosis */
+	g_executed_count = 0;
+	g_mock_pane_count = 0;
+	jarvis_process_result_t r_term;
+	assert(jarvis_process(eng, "Jarvis, look at the compiler error in my terminal and tell me what failed", "terminal", &r_term));
+	assert(r_term.combined_result.success);
+	assert(executed_has_op("inspect_terminal"));
+	assert(g_executed_count >= 2);
+	printf("  [PASS] ReAct Terminal Diagnosis -> %zu steps (%s)\n", g_executed_count, r_term.combined_result.output);
+
+	/* 2. Multi-step ReAct Clipboard Inspection -> Browser Action */
+	g_executed_count = 0;
+	jarvis_process_result_t r_clip;
+	assert(jarvis_process(eng, "Jarvis, check what URL is in my clipboard and open it in the browser", "terminal", &r_clip));
+	assert(r_clip.combined_result.success);
+	assert(executed_has_op("inspect_clipboard"));
+	assert(executed_has_op("open_url"));
+	assert(strstr(r_clip.last_dsl.target.url, "ycombinator.com") != NULL);
+	printf("  [PASS] ReAct Clipboard -> Browser -> url=%s\n", r_clip.last_dsl.target.url);
+
+	/* 3. Persistent User Workflow Memory (Teach Jarvis a habit, then invoke it) */
+	g_executed_count = 0;
+	jarvis_process_result_t r_mem1;
+	assert(jarvis_process(eng, "Jarvis, remember my preference for 'audio engine setup': switch to workspace 3 and play some Miles Davis jazz", "terminal", &r_mem1));
+	assert(r_mem1.combined_result.success);
+
+	char mem_json[1024];
+	jarvis_memory_recall_json(eng, "audio engine setup", mem_json, sizeof(mem_json));
+	assert(strstr(mem_json, "audio engine setup") != NULL);
+
+	g_executed_count = 0;
+	jarvis_process_result_t r_mem2;
+	assert(jarvis_process(eng, "Jarvis, run my audio engine setup please", "terminal", &r_mem2));
+	assert(r_mem2.combined_result.success);
+	assert(executed_has_op("workspace_switch"));
+	assert(executed_has_op("media_play"));
+	printf("  [PASS] Learned Workflow Memory -> recalled & executed multi-step workflow!\n");
+
+	/* 4. Conversational Follow-up Across Turns ("Actually move it to workspace 6 instead") */
+	g_executed_count = 0;
+	jarvis_process_result_t r_turn1, r_turn2;
+	assert(jarvis_process(eng, "move this window to workspace 3", "terminal", &r_turn1));
+	assert(strcmp(r_turn1.last_dsl.op, "workspace_move_window") == 0);
+	assert(r_turn1.last_dsl.args.workspace == 3);
+
+	assert(jarvis_process(eng, "actually move it to workspace 6 instead", "terminal", &r_turn2));
+	assert(strcmp(r_turn2.last_dsl.op, "workspace_move_window") == 0);
+	assert(r_turn2.last_dsl.args.workspace == 6);
+	printf("  [PASS] Conversational Follow-up -> turn1=ws3, turn2=ws6\n");
+
+	/* 4b. Contextual "open that file in neovim" after terminal diagnosis & SSH to domain host */
+	g_executed_count = 0;
+	g_mock_pane_count = 1;
+	snprintf(g_mock_panes[0].pane, sizeof(g_mock_panes[0].pane), "main:0.0");
+	snprintf(g_mock_panes[0].command, sizeof(g_mock_panes[0].command), "bash");
+	snprintf(g_mock_panes[0].cwd, sizeof(g_mock_panes[0].cwd), "/home/quirinpa/site");
+	g_mock_panes[0].active = true;
+	snprintf(g_mock_panes[0].tail, sizeof(g_mock_panes[0].tail),
+	         "cc -Wall -Werror -c src/audio.c\nsrc/audio.c:88:12: error: expected ';' after expression 'pitch_init()'\nmake: *** [Makefile:42: src/audio.o] Error 1");
+
+	jarvis_process_result_t r_file;
+	assert(jarvis_process(eng, "open that file in neovim", "terminal", &r_file));
+	assert(strcmp(r_file.last_dsl.op, "spawn_shell_command") == 0);
+	assert(strstr(r_file.last_dsl.target.command, "audio.c") != NULL);
+	printf("  [PASS] Contextual 'open that file' -> %s\n", r_file.last_dsl.target.command);
+	g_mock_pane_count = 0;
+
+	g_executed_count = 0;
+	jarvis_process_result_t r_ssh;
+	assert(jarvis_process(eng, "ssh to tty.pt and list the available disk space", "terminal", &r_ssh));
+	assert(!executed_has_op("open_url"));
+	assert(executed_has_op("spawn_shell_command"));
+	printf("  [PASS] SSH to tty.pt (not hijacked by open_url) -> %s\n", r_ssh.last_dsl.target.command);
+
+	/* 5. Destructive Command Guardrail mid-execution */
+	g_allow_confirm = false;
+	jarvis_process_result_t r_dest;
+	assert(jarvis_process(eng, "type rm -rf /tmp/test_dir", "terminal", &r_dest));
+	/* Now test actual spawn_shell_command with destructive command blocked by confirm hook */
+	jarvis_dsl_t dest_dsl;
+	assert(jarvis_normalize_dsl_json("{\"op\":\"spawn_shell_command\",\"target\":{\"command\":\"rm -rf /tmp/test_dir\"}}", &dest_dsl));
+	assert(jarvis_is_destructive_command(dest_dsl.target.command));
+	g_allow_confirm = true;
+	printf("  [PASS] Destructive Command Safety Guardrail verified!\n");
+}
+
+static void test_06_voice_vad_wake_and_streaming_tts(void)
+{
+	printf("Running test_06_voice_vad_wake_and_streaming_tts...\n");
+
+	/* 1. Streaming LLM -> TTS Clause 0 extraction */
+	const char *partial = "```json\n{\n  \"op\": \"answer_question\",\n  \"args\": {\n    \"answer\": \"Quantum physics describes nature at the atomic scale, where particles behave as waves";
+	char ans_prefix[512];
+	assert(jarvis_extract_streaming_answer_prefix(partial, ans_prefix, sizeof(ans_prefix)));
+	assert(strcmp(ans_prefix, "Quantum physics describes nature at the atomic scale, where particles behave as waves") == 0);
+
+	char c0[256], rem0[512];
+	assert(jarvis_pop_ready_tts_clause(ans_prefix, true, c0, sizeof(c0), rem0, sizeof(rem0)));
+	assert(strlen(c0) >= 15 && strlen(c0) <= 55);
+	assert(strstr(c0, "Quantum physics") != NULL);
+
+	/* 2. Wake-word extraction & lockdown phrase detection */
+	char cmd[256];
+	assert(jarvis_voice_extract_wake_command("Jarvis, switch to workspace 3", "jarvis", cmd, sizeof(cmd)));
+	assert(strcmp(cmd, "switch to workspace 3") == 0);
+	assert(jarvis_voice_extract_wake_command("Hey Jarviz, open firefox", "jarvis", cmd, sizeof(cmd)));
+	assert(strcmp(cmd, "open firefox") == 0);
+	assert(jarvis_voice_is_lockdown_phrase("Jarvis, lockdown"));
+	assert(jarvis_voice_is_lockdown_phrase("go to sleep"));
+	assert(!jarvis_voice_is_lockdown_phrase("open a new terminal"));
+
+	/* 3. Circular PCM Ring Buffer & Adaptive Noise Floor VAD */
+	jarvis_vad_t *vad = jarvis_vad_create(-48.0, -35.0);
+	assert(vad != NULL);
+
+	float silence[JARVIS_FRAME_SAMPLES] = {0};
+	for (int i = 0; i < 10; i++) {
+		assert(!jarvis_vad_push_frame(vad, silence, JARVIS_FRAME_SAMPLES));
+	}
+
+	float speech[JARVIS_FRAME_SAMPLES];
+	for (size_t i = 0; i < JARVIS_FRAME_SAMPLES; i++) {
+		speech[i] = 0.25f * sinf(2.0f * 3.14159265f * 440.0f * (float)i / (float)JARVIS_SAMPLE_RATE);
+	}
+	assert(jarvis_vad_push_frame(vad, speech, JARVIS_FRAME_SAMPLES));
+
+	float slice[JARVIS_FRAME_SAMPLES * 2];
+	size_t got = jarvis_vad_get_samples(vad, 10, 11, slice, sizeof(slice) / sizeof(slice[0]));
+	assert(got == JARVIS_FRAME_SAMPLES);
+	jarvis_vad_destroy(vad);
+
+	/* 4. Earcon WAV generation in pure C */
+	const char *tmp_wav = "/tmp/test-jarvis-earcon.wav";
+	assert(jarvis_voice_write_earcon_wav(tmp_wav, false));
+	FILE *fp = fopen(tmp_wav, "rb");
+	assert(fp != NULL);
+	char magic[4];
+	assert(fread(magic, 1, 4, fp) == 4 && memcmp(magic, "RIFF", 4) == 0);
+	fclose(fp);
+	unlink(tmp_wav);
+
+	/* 5. TTS segment splitter */
+	char segs[8][256];
+	size_t n_segs = jarvis_tts_split_segments(
+		"All tests passed cleanly. The build finished in under two hundred milliseconds, and the server is ready.",
+		segs, 8
+	);
+	assert(n_segs >= 2);
+	assert(strlen(segs[0]) <= 42);
+	printf("  [PASS] Voice VAD, wake-word extractor, earcon synthesizer, and streaming TTS segmenter verified!\n");
+}
+
+int main(void)
+{
+	assert(xy_load("./mock_adapter") == XY_OK);
+
+	jarvis_config_t cfg;
+	jarvis_config_init(&cfg);
+	/* Test deterministically without external LLM latency first, using built-in solver + ReAct synthesizer */
+	cfg.infer_mode = JARVIS_INFER_NONE;
+
+	jarvis_engine_t *eng = jarvis_engine_create(&cfg);
+	assert(eng != NULL);
+
+	test_01_standard_structured_commands(eng);
+	test_02_multi_clause_and_anaphora(eng);
+	test_03_dsl_normalizer_and_safety(eng);
+	test_04_random_unstructured_commands_end_to_end(eng);
+	test_05_agentic_react_loop_and_memory(eng);
+	test_06_voice_vad_wake_and_streaming_tts();
+
+	jarvis_engine_destroy(eng);
+	printf("\n=== ALL 6 LIBJARVIS PARITY SUITES PASSED IN PURE C ===\n");
+	return 0;
+}

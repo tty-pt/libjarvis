@@ -1,0 +1,10 @@
+prefix=/usr/local
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: jarvislib
+Description: Universal Compositional Semantic Solver, Cross-Platform Intent IR, Voice Pipeline, and Xylem Environment Adapters
+Version: 1.0.0
+Libs: -L${libdir} -ljarvis -lxylem -lstele -lcorm -lm
+Cflags: -I${includedir}/ttypt

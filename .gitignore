@@ -1,0 +1,13 @@
+/lib
+/bin
+/man
+objects-set.mk
+
+/tests/**
+!/tests/**/
+!/tests/**/*.*
+/tests/*.so
+/tests/*.dll
+
+*.o
+*.d
