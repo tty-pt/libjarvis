@@ -106,7 +106,7 @@ XY_IMPL(int, jarvis_xy_execute, const jarvis_dsl_t *, dsl, jarvis_adapter_result
 				res->output, sizeof(res->output),
 				"{\"window\":{\"id\":\"0x1002\",\"class\":\"st-256color\",\"title\":\"worker-node\"},"
 				"\"cwd\":\"/home/quirinpa/site\","
-				"\"pane_tail\":\"%s\"}",
+				"\"pane_tail\":\"%.1800s\"}",
 				g_mock_other_term_tail
 			);
 			return 0;
@@ -116,7 +116,7 @@ XY_IMPL(int, jarvis_xy_execute, const jarvis_dsl_t *, dsl, jarvis_adapter_result
 				res->output, sizeof(res->output),
 				"{\"window\":{\"id\":\"0x1001\",\"class\":\"st-256color\",\"title\":\"quirinpa@host:~/site\"},"
 				"\"cwd\":\"/home/quirinpa/site\","
-				"\"pane_tail\":\"%s\"}",
+				"\"pane_tail\":\"%.1800s\"}",
 				g_mock_panes[0].tail
 			);
 			return 0;
@@ -140,7 +140,7 @@ XY_IMPL(int, jarvis_xy_execute, const jarvis_dsl_t *, dsl, jarvis_adapter_result
 			"[link] Open Architecture Documentation -> https://tty.pt/docs/architecture";
 		snprintf(
 			res->output, sizeof(res->output),
-			"{\"accessibility_tree\":\"%s\","
+			"{\"accessibility_tree\":\"%.1750s\","
 			"\"open_tabs\":[{\"index\":1,\"title\":\"Project Auren Status Dashboard\",\"url\":\"http://localhost:8080/status\"},"
 			"{\"index\":2,\"title\":\"TTY.PT Architecture Docs\",\"url\":\"https://tty.pt/docs/architecture\"}]}",
 			a11y

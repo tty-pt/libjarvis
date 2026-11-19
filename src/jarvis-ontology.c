@@ -777,8 +777,9 @@ void jarvis_ontology_normalize_asr(
 		}
 	}
 
-	jarvis_live_index_t live_idx;
-	jarvis_ontology_build_live_index(ont, world, &live_idx);
+	jarvis_live_index_t *live_idx = calloc(1, sizeof(*live_idx));
+	if (!live_idx) return;
+	jarvis_ontology_build_live_index(ont, world, live_idx);
 
 	/* 2. Fold two-word compound terms ("low fee" -> "lofi", or split vocab words) */
 	char tok_buf[512];
@@ -814,7 +815,7 @@ void jarvis_ontology_normalize_asr(
 
 			if (ont && jarvis_ontology_is_vocab_word(ont, joined) &&
 			    !jarvis_ontology_find_verb_phrase(ont, pair_clean) &&
-			    !jarvis_live_index_find(&live_idx, pair_clean)) {
+			    !jarvis_live_index_find(live_idx, pair_clean)) {
 				pos += (size_t)snprintf(out + pos, pos < out_sz ? out_sz - pos : 0, "%s%s", pos ? " " : "", joined);
 				i += 2;
 				continue;
@@ -823,4 +824,5 @@ void jarvis_ontology_normalize_asr(
 		pos += (size_t)snprintf(out + pos, pos < out_sz ? out_sz - pos : 0, "%s%s", pos ? " " : "", tokens[i]);
 		i++;
 	}
+	free(live_idx);
 }

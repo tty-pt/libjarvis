@@ -797,11 +797,15 @@ static bool requires_agent_reasoning(const jarvis_engine_t *eng, const char *utt
 	char clean[512];
 	jarvis_clean_phrase(utterance, clean, sizeof(clean));
 
-	/* Never force agent reasoning on explicit dictation ("type hello world and press enter") or explicit coding-agent delegation ("tell pi to ...") */
+	/* Never force agent reasoning on explicit dictation, coding-agent delegation, or TTS toggle */
 	if (strncmp(clean, "type ", 5) == 0 || strncmp(clean, "dictate ", 8) == 0 ||
 	    strncmp(clean, "tell pi ", 8) == 0 || strncmp(clean, "ask pi ", 7) == 0 ||
 	    strncmp(clean, "have pi ", 8) == 0 || strncmp(clean, "ask the agent ", 14) == 0 ||
-	    strncmp(clean, "tell the agent ", 15) == 0) {
+	    strncmp(clean, "tell the agent ", 15) == 0 ||
+	    ((strstr(clean, "voice") || strstr(clean, "tts")) &&
+	     (strstr(clean, "turn on") || strstr(clean, "turn off") ||
+	      strstr(clean, "enable") || strstr(clean, "disable") ||
+	      strcmp(clean, "voice on") == 0 || strcmp(clean, "voice off") == 0))) {
 		return false;
 	}
 
@@ -1037,6 +1041,12 @@ static void execute_dsl_via_xylem(
 			out_res->success = true;
 			if (!out_res->output[0]) {
 				snprintf(out_res->output, sizeof(out_res->output), "stopped speaking");
+			}
+		} else if (strcmp(dsl->op, "tts_control") == 0) {
+			const char *act = dsl->args.action[0] ? dsl->args.action : "on";
+			bool turn_on = (strcasecmp(act, "off") != 0 && strcasecmp(act, "0") != 0 && strcasecmp(act, "disable") != 0);
+			if (!turn_on) {
+				jarvis_xy_tts_interrupt(0);
 			}
 		} else if (strcmp(dsl->op, "answer_question") == 0 && !dsl->args.streamed_tts) {
 			const char *ans = dsl->args.answer[0] ? dsl->args.answer :
@@ -1300,6 +1310,15 @@ static void summarize_world_for_prompt(
 			}
 			if (any_cfg) {
 				n += snprintf(out_sum + n, (size_t)n < sum_sz ? sum_sz - (size_t)n : 0, "\n");
+			}
+		}
+		time_t now_t = time(NULL);
+		struct tm tm_now;
+		if (localtime_r(&now_t, &tm_now)) {
+			char tbuf[128];
+			if (strftime(tbuf, sizeof(tbuf), "%A, %B %d, %Y %H:%M:%S %Z", &tm_now) > 0) {
+				n += snprintf(out_sum + n, (size_t)n < sum_sz ? sum_sz - (size_t)n : 0,
+				              "Current local date & time: %s\n", tbuf);
 			}
 		}
 	}
@@ -1635,7 +1654,7 @@ static bool synthesize_offline_react_json(
 			extract_file_from_text(world->panes[0].tail, file_path, sizeof(file_path), &line_no);
 		}
 		if (!file_path[0] && eng && eng->ctx.last_file[0]) {
-			snprintf(file_path, sizeof(file_path), "%s", eng->ctx.last_file);
+			snprintf(file_path, sizeof(file_path), "%.*s", (int)(sizeof(file_path) - 1), eng->ctx.last_file);
 		}
 		if (!file_path[0] && eng && eng->turn_count > 0) {
 			extract_file_from_text(eng->turns[eng->turn_count - 1].output, file_path, sizeof(file_path), &line_no);
@@ -1799,6 +1818,18 @@ static bool synthesize_offline_react_json(
 		snprintf(out_json, out_sz, "{\"op\":\"search_web\",\"target\":{\"query\":\"linux kernel epoll man page\"}}");
 		return true;
 	}
+	if (strstr(padded, " what time ") || strstr(padded, " current time ") ||
+	    strstr(padded, " what date ") || strstr(padded, " todays date ") || strstr(padded, " what day is ")) {
+		time_t now_t = time(NULL);
+		struct tm tm_now;
+		char tbuf[128] = "now";
+		if (localtime_r(&now_t, &tm_now)) {
+			strftime(tbuf, sizeof(tbuf), "%I:%M %p on %A, %B %d", &tm_now);
+		}
+		snprintf(out_json, out_sz,
+		         "{\"op\":\"answer_question\",\"args\":{\"answer\":\"It is %s.\"}}", tbuf);
+		return true;
+	}
 	if (strstr(padded, " what directory ") || strstr(padded, " working in ")) {
 		const char *cwd = (world && world->focused_cwd[0]) ? world->focused_cwd : "/home/quirinpa/site";
 		snprintf(out_json, out_sz,
@@ -1821,12 +1852,15 @@ static bool synthesize_offline_react_json(
 
 bool jarvis_auren_run_react_agent(
 	jarvis_engine_t         *eng,
-	const char              *utterance,
+	const char              *raw_utterance,
 	const jarvis_world_t    *world,
 	jarvis_process_result_t *out_res
 )
 {
-	if (!eng || !utterance || !out_res) return false;
+	if (!eng || !raw_utterance || !out_res) return false;
+
+	char utterance[512];
+	snprintf(utterance, sizeof(utterance), "%s", raw_utterance);
 
 	static const char *SYS_PROMPT =
 		"You are Jarvis, Tony Stark's intelligent Linux desktop assistant and systems engineer. "
@@ -1876,17 +1910,18 @@ bool jarvis_auren_run_react_agent(
 		"1. If the user asks about an error or text on a terminal screen and `Live Terminal / Tmux Panes` does not already contain the answer, call `inspect_terminal` first; once you see the output, answer with `answer_question` or run the fix.\n"
 		"2. If the user asks about the web page, article, headings, or links in the browser and `Live Browser Accessibility Page Content` is empty, call `inspect_browser` first; once you see the page content, answer with `answer_question` or open the requested link with `open_url`.\n"
 		"3. If the user asks about clipboard / highlighted text, call `inspect_clipboard` first.\n"
-		"4. If the user asks to remember a preference or workflow, emit `remember_fact`. If they invoke a remembered workflow later, expand it into a JSON array `[step1, step2, ...]` of all actions in that workflow.\n"
+		"4. If the user asks a quick question about the current time, date, free RAM, disk space, CPU load, or active directory/window, answer IMMEDIATELY in 1 turn with `answer_question` using the live fields below (never spawn a terminal just to run `date` or `pwd` for a spoken question).\n"
+		"5. If the user asks to remember a preference or workflow, emit `remember_fact`. If they invoke a remembered workflow later, expand it into a JSON array `[step1, step2, ...]` of all actions in that workflow.\n"
 		"5. If the user refers to a previous turn ('actually move it to workspace 6 instead', 'nevermind bring it back', 'open that file', 'run that again in the other terminal'), use Recent Conversation Turns, Live Terminal Panes, Live Browser Content, and Recent action context.\n"
 		"6. For any local or remote shell command, SSH command (e.g. `ssh tty.pt 'df -h'`), or CLI tool (nvim, git, grep, find, make), use `spawn_shell_command`.\n";
 
 	char state_sum[4096];
 	summarize_world_for_prompt(eng, world, state_sum, sizeof(state_sum));
 
-	char user_msg0[8192];
+	char user_msg0[9216];
 	snprintf(
 		user_msg0, sizeof(user_msg0),
-		"%s\nCURRENT DESKTOP STATE, MEMORIES & CONVERSATION HISTORY:\n%s\nCURRENT USER REQUEST: %s\n\nOUTPUT ONLY VALID JSON (a single DSL object or a JSON array of DSL objects):",
+		"%s\nCURRENT DESKTOP STATE, MEMORIES & CONVERSATION HISTORY:\n%s\nCURRENT USER REQUEST: %.512s\n\nOUTPUT ONLY VALID JSON (a single DSL object or a JSON array of DSL objects):",
 		TOOLS_DOC, state_sum, utterance
 	);
 
@@ -2133,6 +2168,35 @@ bool jarvis_process(
 
 	if (!eng->dry_run) {
 		jarvis_xy_voice_status(JARVIS_VOICE_ACTING, utterance);
+	}
+
+	/* If the previous turn within 25s ended in a clarifying question (answer_question
+	 * with '?' in output, e.g. "Open what? Please specify...") and the user's new utterance
+	 * is a short clarification that stitches with the previous incomplete utterance into a
+	 * high-confidence Tier-0 action (e.g. "open a new" + "terminal", or "move this window to" + "5"),
+	 * stitch them automatically. */
+	char stitched_utterance[512];
+	if (eng->turn_count > 0) {
+		const jarvis_session_turn_t *last_t = &eng->turns[eng->turn_count - 1];
+		double now_s = now_ms() / 1000.0;
+		if (last_t->utterance[0] != '\0' &&
+		    (now_s - last_t->ts) <= 25.0 &&
+		    strcmp(last_t->ops, "answer_question") == 0 &&
+		    strchr(last_t->output, '?') != NULL &&
+		    strlen(utterance) <= 48) {
+			jarvis_ir_t ir_alone, ir_stitched;
+			bool alone_ok = (!requires_agent_reasoning(eng, utterance)) &&
+			                jarvis_solve_clause(eng->ont, utterance, surf, &world, &ir_alone) &&
+			                ir_alone.score >= 0.90;
+			snprintf(stitched_utterance, sizeof(stitched_utterance), "%s %s", last_t->utterance, utterance);
+			if (!alone_ok &&
+			    !requires_agent_reasoning(eng, stitched_utterance) &&
+			    jarvis_solve_clause(eng->ont, stitched_utterance, surf, &world, &ir_stitched) &&
+			    ir_stitched.score >= 0.90) {
+				utterance = stitched_utterance;
+				snprintf(out_result->utterance, sizeof(out_result->utterance), "%s", utterance);
+			}
+		}
 	}
 
 	/* 2. Check if whole utterance requires multi-turn ReAct agent reasoning */

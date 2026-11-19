@@ -403,7 +403,7 @@ int main(int argc, char **argv)
 			snprintf(title, sizeof(title), "  Jarvis → %s (%s)",
 			         res.last_dsl.op[0] ? res.last_dsl.op : "action",
 			         res.source[0] ? res.source : "solver");
-			snprintf(body, sizeof(body), "“%s”\n▸ %s", utterance, out_msg);
+			snprintf(body, sizeof(body), "“%.300s”\n▸ %.680s", utterance, out_msg);
 			jarvis_xy_notify(title, body, res.combined_result.success ? 1 : 0);
 		}
 		printf("[%s] %s: %s\n",

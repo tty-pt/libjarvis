@@ -840,11 +840,13 @@ bool jarvis_solve_clause(
 		}
 	}
 
-	jarvis_live_index_t live_idx;
-	jarvis_ontology_build_live_index(ont, world, &live_idx);
+	jarvis_live_index_t *live_idx = calloc(1, sizeof(*live_idx));
+	if (!live_idx) return false;
+	jarvis_ontology_build_live_index(ont, world, live_idx);
 
 	parsed_clause_t p;
-	extract_constituents(ont, stripped, &live_idx, &p);
+	extract_constituents(ont, stripped, live_idx, &p);
+	free(live_idx);
 
 	if (get_verb_weight(&p, "HELP_ASK") > 0.0) {
 		return false;
@@ -999,6 +1001,28 @@ bool jarvis_solve_clause(
 				snprintf(out_ir->cap, sizeof(out_ir->cap), "input.key");
 				snprintf(out_ir->text, sizeof(out_ir->text), "ctrl+c");
 				out_ir->score = 0.96;
+				return true;
+			}
+			/* 5. Voice / TTS enable & disable voice commands ("turn on voice", "turn voice on", "enable voice", "turn off voice", "disable voice") */
+			if (((strstr(padded_raw, " turn on ") || strstr(padded_raw, " enable ") || strstr(padded_raw, " activate ") || strstr(padded_raw, " use ") ||
+			      (strstr(padded_raw, " turn ") && strstr(padded_raw, " on "))) &&
+			     (strstr(padded_raw, " voice ") || strstr(padded_raw, " tts ") || strstr(padded_raw, " speech "))) ||
+			    strcmp(raw_core, "voice on") == 0 || strcmp(raw_core, "tts on") == 0 ||
+			    strcmp(raw_core, "speak to me") == 0 || strcmp(raw_core, "talk to me") == 0) {
+				snprintf(out_ir->cap, sizeof(out_ir->cap), "tts.control");
+				snprintf(out_ir->action, sizeof(out_ir->action), "on");
+				out_ir->score = 0.98;
+				snprintf(out_ir->surface, sizeof(out_ir->surface), "any");
+				return true;
+			}
+			if (((strstr(padded_raw, " turn off ") || strstr(padded_raw, " disable ") || strstr(padded_raw, " deactivate ") ||
+			      (strstr(padded_raw, " turn ") && strstr(padded_raw, " off "))) &&
+			     (strstr(padded_raw, " voice ") || strstr(padded_raw, " tts ") || strstr(padded_raw, " speech "))) ||
+			    strcmp(raw_core, "voice off") == 0 || strcmp(raw_core, "tts off") == 0) {
+				snprintf(out_ir->cap, sizeof(out_ir->cap), "tts.control");
+				snprintf(out_ir->action, sizeof(out_ir->action), "off");
+				out_ir->score = 0.98;
+				snprintf(out_ir->surface, sizeof(out_ir->surface), "any");
 				return true;
 			}
 		}
@@ -1479,7 +1503,9 @@ bool jarvis_compile_ir_to_dsl(
 	}
 	if (strcmp(cap, "input.key") == 0) {
 		snprintf(out_dsl->op, sizeof(out_dsl->op), "press_key");
-		snprintf(out_dsl->args.key_combo, sizeof(out_dsl->args.key_combo), "%s", ir->text[0] ? ir->text : "Return");
+		snprintf(out_dsl->args.key_combo, sizeof(out_dsl->args.key_combo), "%.*s",
+		         (int)(sizeof(out_dsl->args.key_combo) - 1),
+		         ir->text[0] ? ir->text : "Return");
 		APPLY_OTHER_AND_NEW_TERM();
 		return true;
 	}
@@ -1504,6 +1530,11 @@ bool jarvis_compile_ir_to_dsl(
 	}
 	if (strcmp(cap, "tts.interrupt") == 0) {
 		snprintf(out_dsl->op, sizeof(out_dsl->op), "tts_interrupt");
+		return true;
+	}
+	if (strcmp(cap, "tts.control") == 0) {
+		snprintf(out_dsl->op, sizeof(out_dsl->op), "tts_control");
+		snprintf(out_dsl->args.action, sizeof(out_dsl->args.action), "%s", ir->action[0] ? ir->action : "on");
 		return true;
 	}
 	if (strcmp(cap, "media.control") == 0) {

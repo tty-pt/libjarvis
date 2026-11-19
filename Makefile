@@ -13,8 +13,6 @@ LDFLAGS := -L../libxylem/lib -L../libstele/lib -L../libcorm/lib
 
 WASM_SRCS := npm/wasm/jarvis_wasm.c
 WASM_EXTRA_CFLAGS := -Iinclude -I../libxylem/include -I../libstele/include
-WASM_GLOBAL_BASE := 4194304
-WASM_LDFLAGS := -Wl,-z,stack-size=524288
 
 include ../mk/include.mk
 
