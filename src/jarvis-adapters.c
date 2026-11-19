@@ -2,10 +2,12 @@
 #include <ttypt/xy.h>
 
 #if !defined(__wasm__) && !defined(_WIN32)
+#include <ctype.h>
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 static void run_capture(const char *cmd, char *out, size_t out_sz)
@@ -31,18 +33,70 @@ static void add_custom_app(jarvis_world_t *w, const char *phrase, const char *bi
 	snprintf(e->phrase, sizeof(e->phrase), "%s", phrase);
 }
 
+static void populate_native_system_health(char *out, size_t out_sz)
+{
+	if (!out || out_sz == 0) return;
+	out[0] = '\0';
+
+	long mem_total_kb = 0, mem_avail_kb = 0;
+#ifdef __linux__
+	FILE *fp = fopen("/proc/meminfo", "r");
+	if (fp) {
+		char line[128];
+		while (fgets(line, sizeof(line), fp)) {
+			if (strncmp(line, "MemTotal:", 9) == 0) mem_total_kb = atol(line + 9);
+			else if (strncmp(line, "MemAvailable:", 13) == 0) mem_avail_kb = atol(line + 13);
+			if (mem_total_kb > 0 && mem_avail_kb > 0) break;
+		}
+		fclose(fp);
+	}
+#endif
+
+	double disk_used_gb = 0.0, disk_tot_gb = 0.0, disk_avail_gb = 0.0;
+	struct statvfs vfs;
+	if (statvfs("/", &vfs) == 0 && vfs.f_blocks > 0) {
+		disk_tot_gb = (double)(vfs.f_blocks * vfs.f_frsize) / (1024.0 * 1024.0 * 1024.0);
+		disk_avail_gb = (double)(vfs.f_bavail * vfs.f_frsize) / (1024.0 * 1024.0 * 1024.0);
+		disk_used_gb = disk_tot_gb - disk_avail_gb;
+	}
+
+	if (mem_total_kb > 0) {
+		double tot_gib = (double)mem_total_kb / (1024.0 * 1024.0);
+		double avail_gib = (double)mem_avail_kb / (1024.0 * 1024.0);
+		double used_gib = tot_gib - avail_gib;
+		snprintf(out, out_sz,
+		         "RAM: %.1f GiB used / %.1f GiB total (%.1f GiB free) | Disk /: %.1f GiB used / %.1f GiB total (%.1f GiB free)",
+		         used_gib, tot_gib, avail_gib, disk_used_gb, disk_tot_gb, disk_avail_gb);
+	} else if (disk_tot_gb > 0.0) {
+		snprintf(out, out_sz,
+		         "Disk /: %.1f GiB used / %.1f GiB total (%.1f GiB free)",
+		         disk_used_gb, disk_tot_gb, disk_avail_gb);
+	}
+}
+
 /**
- * @brief Built-in desktop observation listener (populates common desktop apps,
- *        system health, and dwm/sway/hyprland state if available).
+ * @brief Built-in desktop observation listener (populates common desktop apps
+ *        and native system health across Linux and macOS).
  */
 void jarvis_desktop_populate_defaults(jarvis_world_t *w)
 {
 	if (!w) return;
+#ifdef __APPLE__
+	add_custom_app(w, "calculator", "Calculator");
+	add_custom_app(w, "safari web browser", "Safari");
+	add_custom_app(w, "firefox web browser", "Firefox");
+	add_custom_app(w, "visual studio code", "Visual Studio Code");
+	add_custom_app(w, "files", "Finder");
+#else
 	add_custom_app(w, "calculator", "gnome-calculator");
 	add_custom_app(w, "firefox web browser", "firefox");
 	add_custom_app(w, "pulseaudio volume control", "pavucontrol");
 	add_custom_app(w, "visual studio code", "code");
 	add_custom_app(w, "files", "thunar");
+#endif
+	if (!w->system_health[0]) {
+		populate_native_system_health(w->system_health, sizeof(w->system_health));
+	}
 }
 
 int jarvis_desktop_execute_fallback(const jarvis_dsl_t *dsl, jarvis_adapter_result_t *res)
@@ -51,21 +105,24 @@ int jarvis_desktop_execute_fallback(const jarvis_dsl_t *dsl, jarvis_adapter_resu
 	const char *op = dsl->op;
 
 	if (strcmp(op, "inspect_system") == 0) {
-		run_capture("free -h | awk '/^Mem:/ {printf \"Mem: %s total, %s used, %s free\", $2, $3, $4}'",
-		            res->output, sizeof(res->output));
+		populate_native_system_health(res->output, sizeof(res->output));
 		res->handled = true;
 		res->success = true;
 		return 0;
 	}
 	if (strcmp(op, "inspect_clipboard") == 0) {
-		run_capture("xclip -o -selection primary 2>/dev/null || xclip -o -selection clipboard 2>/dev/null || wl-paste 2>/dev/null",
+#ifdef __APPLE__
+		run_capture("pbpaste 2>/dev/null", res->output, sizeof(res->output));
+#else
+		run_capture("wl-paste 2>/dev/null || xclip -o -selection primary 2>/dev/null || xclip -o -selection clipboard 2>/dev/null",
 		            res->output, sizeof(res->output));
+#endif
 		res->handled = true;
 		res->success = true;
 		return 0;
 	}
 	if (strcmp(op, "inspect_terminal") == 0) {
-		run_capture("tmux capture-pane -p -S -20 2>/dev/null | tail -n 15",
+		run_capture("tmux capture-pane -p -S -25 2>/dev/null | tail -n 20",
 		            res->output, sizeof(res->output));
 		res->handled = true;
 		res->success = true;
@@ -80,3 +137,4 @@ int jarvis_desktop_execute_fallback(const jarvis_dsl_t *dsl, jarvis_adapter_resu
 	return -1;
 }
 #endif
+

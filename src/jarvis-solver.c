@@ -877,6 +877,133 @@ bool jarvis_solve_clause(
 		return true;
 	}
 
+	/* Tier-0 Casual, Ergonomic & Slang Idiom Fast-Path (< 0.1ms deterministic resolution) */
+	{
+		char padded_raw[528];
+		snprintf(padded_raw, sizeof(padded_raw), " %s ", raw_core);
+		if (!strstr(padded_raw, " what ") && !strstr(padded_raw, " whats ") &&
+		    !strstr(padded_raw, " why ") && !strstr(padded_raw, " how ") &&
+		    !strstr(padded_raw, " explain ") && !strstr(padded_raw, " diagnose ")) {
+			/* 1. Font / Zoom / Readability complaints */
+			if (strstr(padded_raw, " too small ") || strstr(padded_raw, " cant read ") ||
+			    strstr(padded_raw, " cannot read ") || strstr(padded_raw, " barely read ") ||
+			    strstr(padded_raw, " text is tiny ") || strstr(padded_raw, " font is tiny ") ||
+			    strstr(padded_raw, " my eyes ")) {
+				if (strstr(padded_raw, " fullscreen ") || strstr(padded_raw, " full screen ") ||
+				    strstr(padded_raw, " maximize ") || strstr(padded_raw, " bigger window ")) {
+					snprintf(out_ir->cap, sizeof(out_ir->cap), "window.control");
+					snprintf(out_ir->action, sizeof(out_ir->action), "fullscreen");
+				} else {
+					snprintf(out_ir->cap, sizeof(out_ir->cap), "input.key");
+					snprintf(out_ir->text, sizeof(out_ir->text), "ctrl+plus");
+				}
+				out_ir->score = 0.96;
+				snprintf(out_ir->surface, sizeof(out_ir->surface), "%s", eff_surface);
+				out_ir->target_other = target_other;
+				return true;
+			}
+			if (strstr(padded_raw, " zoom in ") || strstr(padded_raw, " bump the font ") ||
+			    strstr(padded_raw, " make the font bigger ") || strstr(padded_raw, " increase font ")) {
+				snprintf(out_ir->cap, sizeof(out_ir->cap), "input.key");
+				snprintf(out_ir->text, sizeof(out_ir->text), "ctrl+plus");
+				out_ir->score = 0.96;
+				snprintf(out_ir->surface, sizeof(out_ir->surface), "%s", eff_surface);
+				out_ir->target_other = target_other;
+				return true;
+			}
+			if (strstr(padded_raw, " zoom out ") || strstr(padded_raw, " font smaller ") ||
+			    strstr(padded_raw, " shrink the font ") || strstr(padded_raw, " decrease font ")) {
+				snprintf(out_ir->cap, sizeof(out_ir->cap), "input.key");
+				snprintf(out_ir->text, sizeof(out_ir->text), "ctrl+minus");
+				out_ir->score = 0.96;
+				snprintf(out_ir->surface, sizeof(out_ir->surface), "%s", eff_surface);
+				out_ir->target_other = target_other;
+				return true;
+			}
+			/* 2. Browser reload / back */
+			if ((strstr(padded_raw, " reload ") || strstr(padded_raw, " refresh ")) &&
+			    (strstr(padded_raw, " page ") || strstr(padded_raw, " browser ") || strstr(padded_raw, " tab "))) {
+				snprintf(out_ir->cap, sizeof(out_ir->cap), "input.key");
+				snprintf(out_ir->text, sizeof(out_ir->text), "ctrl+r");
+				out_ir->score = 0.96;
+				snprintf(out_ir->surface, sizeof(out_ir->surface), "browser");
+				return true;
+			}
+			if (strstr(padded_raw, " go back a page ") || strstr(padded_raw, " previous page in ")) {
+				snprintf(out_ir->cap, sizeof(out_ir->cap), "input.key");
+				snprintf(out_ir->text, sizeof(out_ir->text), "alt+Left");
+				out_ir->score = 0.96;
+				snprintf(out_ir->surface, sizeof(out_ir->surface), "browser");
+				return true;
+			}
+			/* 3. Audio / Volume ergonomic complaints */
+			if (strstr(padded_raw, " too loud ") || strstr(padded_raw, " ears are ") ||
+			    strstr(padded_raw, " blasting ") || strstr(padded_raw, " turn it down ") ||
+			    strstr(padded_raw, " make it quieter ")) {
+				snprintf(out_ir->cap, sizeof(out_ir->cap), "media.control");
+				snprintf(out_ir->action, sizeof(out_ir->action), "volume_down");
+				out_ir->score = 0.96;
+				snprintf(out_ir->surface, sizeof(out_ir->surface), "any");
+				return true;
+			}
+			if (strstr(padded_raw, " barely hear ") || strstr(padded_raw, " cant hear ") ||
+			    strstr(padded_raw, " cannot hear ") || strstr(padded_raw, " too quiet ") ||
+			    strstr(padded_raw, " turn it up ") || strstr(padded_raw, " make it louder ")) {
+				snprintf(out_ir->cap, sizeof(out_ir->cap), "media.control");
+				snprintf(out_ir->action, sizeof(out_ir->action), "volume_up");
+				out_ir->score = 0.96;
+				snprintf(out_ir->surface, sizeof(out_ir->surface), "any");
+				return true;
+			}
+			/* 4. Casual window close / move / focus / fullscreen */
+			if ((strstr(padded_raw, " get rid of ") || strstr(padded_raw, " ditch ") || strstr(padded_raw, " trash ")) &&
+			    (strstr(padded_raw, " window ") || strstr(padded_raw, " tab ") || strstr(padded_raw, " this "))) {
+				snprintf(out_ir->cap, sizeof(out_ir->cap), "window.control");
+				snprintf(out_ir->action, sizeof(out_ir->action), "close");
+				snprintf(out_ir->kind, sizeof(out_ir->kind), "%s", strstr(padded_raw, " tab ") ? "tab" : "window");
+				out_ir->target_other = strstr(padded_raw, " other ") != NULL;
+				out_ir->score = 0.96;
+				return true;
+			}
+			if ((strstr(padded_raw, " banish ") || strstr(padded_raw, " stash ") || strstr(padded_raw, " throw ")) &&
+			    (strstr(padded_raw, " workspace ") || strstr(padded_raw, " desktop ") || strstr(padded_raw, " tag "))) {
+				int ws = 1;
+				for (const char *d = raw_core; *d; d++) {
+					if (*d >= '1' && *d <= '9' && (d == raw_core || isspace((unsigned char)d[-1]))) {
+						ws = *d - '0';
+						break;
+					}
+				}
+				snprintf(out_ir->cap, sizeof(out_ir->cap), "workspace.move_window");
+				out_ir->workspace = ws;
+				out_ir->target_other = strstr(padded_raw, " other ") != NULL;
+				out_ir->score = 0.96;
+				return true;
+			}
+			if (strstr(padded_raw, " hop over ") &&
+			    (strstr(padded_raw, " other window ") || strstr(padded_raw, " other terminal "))) {
+				snprintf(out_ir->cap, sizeof(out_ir->cap), "window.focus_relative");
+				snprintf(out_ir->relation, sizeof(out_ir->relation), "other");
+				out_ir->score = 0.96;
+				return true;
+			}
+			if (strstr(padded_raw, " make this window huge ") || strstr(padded_raw, " blow up this window ") ||
+			    strstr(padded_raw, " fill the screen ")) {
+				snprintf(out_ir->cap, sizeof(out_ir->cap), "window.control");
+				snprintf(out_ir->action, sizeof(out_ir->action), "fullscreen");
+				out_ir->score = 0.96;
+				return true;
+			}
+			if (strstr(padded_raw, " stop whatever is running ") || strstr(padded_raw, " kill whatever is running ") ||
+			    strstr(padded_raw, " abort the running command ")) {
+				snprintf(out_ir->cap, sizeof(out_ir->cap), "input.key");
+				snprintf(out_ir->text, sizeof(out_ir->text), "ctrl+c");
+				out_ir->score = 0.96;
+				return true;
+			}
+		}
+	}
+
 	/* Guard against interrogative questions unless fully covered fs/git inspection */
 	static const char *INTERROGATIVES[] = {
 		"what", "whats", "why", "how", "who", "when", "where", "which",
@@ -1347,6 +1474,12 @@ bool jarvis_compile_ir_to_dsl(
 			else if (strcmp(u, "process") == 0) kc = "ctrl+c";
 		}
 		snprintf(out_dsl->args.key_combo, sizeof(out_dsl->args.key_combo), "%s", kc);
+		APPLY_OTHER_AND_NEW_TERM();
+		return true;
+	}
+	if (strcmp(cap, "input.key") == 0) {
+		snprintf(out_dsl->op, sizeof(out_dsl->op), "press_key");
+		snprintf(out_dsl->args.key_combo, sizeof(out_dsl->args.key_combo), "%s", ir->text[0] ? ir->text : "Return");
 		APPLY_OTHER_AND_NEW_TERM();
 		return true;
 	}

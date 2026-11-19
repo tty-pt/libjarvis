@@ -12,3 +12,4 @@ objects-set.mk
 
 *.o
 *.d
+mods/*/*.so

@@ -797,8 +797,11 @@ static bool requires_agent_reasoning(const jarvis_engine_t *eng, const char *utt
 	char clean[512];
 	jarvis_clean_phrase(utterance, clean, sizeof(clean));
 
-	/* Never force agent reasoning on explicit dictation ("type hello world and press enter") */
-	if (strncmp(clean, "type ", 5) == 0 || strncmp(clean, "dictate ", 8) == 0) {
+	/* Never force agent reasoning on explicit dictation ("type hello world and press enter") or explicit coding-agent delegation ("tell pi to ...") */
+	if (strncmp(clean, "type ", 5) == 0 || strncmp(clean, "dictate ", 8) == 0 ||
+	    strncmp(clean, "tell pi ", 8) == 0 || strncmp(clean, "ask pi ", 7) == 0 ||
+	    strncmp(clean, "have pi ", 8) == 0 || strncmp(clean, "ask the agent ", 14) == 0 ||
+	    strncmp(clean, "tell the agent ", 15) == 0) {
 		return false;
 	}
 
@@ -821,13 +824,10 @@ static bool requires_agent_reasoning(const jarvis_engine_t *eng, const char *utt
 		" what did you ", " say that again ",
 		" open that file ", " that file ", " failing file ", " file mentioned ", " failing line ", " at that line ", " at line ", " ssh ",
 		" nelvim ", " near of him ", " vam ",
-		" my eyes ", " killing me ", " i am bored ", " im bored ", " set up my ", " setup my ",
+		" killing me ", " i am bored ", " im bored ", " set up my ", " setup my ",
 		" on the page ", " on that page ", " web page ", " webpage ", " in the browser ", " on my browser ", " browser page ",
 		" heading ", " article ", " link on ", " button on ", " read the page ", " on the screen ", " terminal screen ", " other terminal ",
-		" too small ", " cant read ", " cannot read ", " barely read ", " tiny ", " zoom in ", " zoom out ", " bump the font ", " font smaller ", " font bigger ",
-		" reload ", " refresh ", " go back a page ", " previous page ",
-		" too loud ", " ears ", " blasting ", " barely hear ", " quieter ", " louder ", " turn it down ", " turn it up ",
-		" get rid of ", " ditch ", " trash ", " banish ", " stash ", " pull back ", " hop over ",
+		" pull back ",
 		NULL
 	};
 	for (size_t i = 0; i < sizeof(TRIGGERS) / sizeof(TRIGGERS[0]) && TRIGGERS[i]; i++) {
@@ -1446,8 +1446,10 @@ static bool synthesize_offline_react_json(
 			return true;
 		}
 		if (strstr(user_obs_turn1, "OBSERVATION (inspect_system)")) {
+			char esc_s[320];
+			jjson_escape_str(user_obs_turn1 + 29, esc_s, sizeof(esc_s));
 			snprintf(out_json, out_sz,
-			         "{\"op\":\"answer_question\",\"args\":{\"answer\":\"Your system has 32 GiB total RAM with 4.0 GiB currently free.\"}}");
+			         "{\"op\":\"answer_question\",\"args\":{\"answer\":\"System status: %.220s\"}}", esc_s);
 			return true;
 		}
 		return false;
@@ -1487,6 +1489,18 @@ static bool synthesize_offline_react_json(
 	/* 1b. Multi-step ReAct Clipboard -> Browser */
 	if (strstr(padded, " clipboard ") || strstr(padded, " highlighted ") || strstr(padded, " selected ")) {
 		snprintf(out_json, out_sz, "{\"op\":\"inspect_clipboard\",\"target\":{}}");
+		return true;
+	}
+
+	/* 1c. Multi-step ReAct System Health / RAM / CPU / Disk / Ports Inspection */
+	if ((strstr(padded, " eating ") || strstr(padded, " hogging ") || strstr(padded, " how much ") ||
+	     strstr(padded, " what ") || strstr(padded, " whats ") || strstr(padded, " check ") || strstr(padded, " inspect ")) &&
+	    (strstr(padded, " ram ") || strstr(padded, " memory ") || strstr(padded, " cpu ") ||
+	     strstr(padded, " disk ") || strstr(padded, " storage ") || strstr(padded, " system "))) {
+		const char *aspect = "all";
+		if (strstr(padded, " disk ") || strstr(padded, " storage ")) aspect = "disk";
+		else if (strstr(padded, " ram ") || strstr(padded, " memory ") || strstr(padded, " cpu ")) aspect = "memory";
+		snprintf(out_json, out_sz, "{\"op\":\"inspect_system\",\"args\":{\"aspect\":\"%s\"}}", aspect);
 		return true;
 	}
 
@@ -2143,6 +2157,31 @@ bool jarvis_process(
 	}
 
 	double tier0_thresh = (eng->infer_mode != JARVIS_INFER_EMBEDDING) ? 0.90 : 0.85;
+
+	/* If a 2-clause utterance was split on a casual comma ("this text is tiny, I can't read it")
+	 * and the whole utterance deterministically resolves as a single high-confidence Tier-0 action
+	 * (or both clauses resolve to the same IR capability), treat it as a single 1-step utterance. */
+	if (n_clauses == 2 && strstr(utterance, ", ") &&
+	    !strstr(utterance, ", and ") && !strstr(utterance, ", then ")) {
+		jarvis_ir_t ir_full, ir0, ir1;
+		if (!requires_agent_reasoning(eng, utterance) &&
+		    jarvis_solve_clause(eng->ont, utterance, surf, &world, &ir_full) &&
+		    ir_full.score >= tier0_thresh &&
+		    (!jarvis_solve_clause(eng->ont, clauses[1], surf, &world, &ir1) ||
+		     ir1.score < tier0_thresh ||
+		     strcmp(ir_full.cap, ir1.cap) == 0)) {
+			snprintf(clauses[0], sizeof(clauses[0]), "%s", utterance);
+			n_clauses = 1;
+		} else if (jarvis_solve_clause(eng->ont, clauses[0], surf, &world, &ir0) &&
+		           jarvis_solve_clause(eng->ont, clauses[1], surf, &world, &ir1) &&
+		           ir0.score >= tier0_thresh && ir1.score >= tier0_thresh &&
+		           strcmp(ir0.cap, ir1.cap) == 0 &&
+		           strcmp(ir0.action, ir1.action) == 0 &&
+		           strcmp(ir0.text, ir1.text) == 0) {
+			snprintf(clauses[0], sizeof(clauses[0]), "%s", utterance);
+			n_clauses = 1;
+		}
+	}
 
 	/* If multi-clause and any clause cannot be deterministically solved at high confidence,
 	 * route the entire utterance to the ReAct agent so cross-clause context is preserved. */
