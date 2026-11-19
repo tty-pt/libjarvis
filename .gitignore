@@ -6,6 +6,7 @@ objects-set.mk
 /tests/**
 !/tests/**/
 !/tests/**/*.*
+!/tests/Makefile
 /tests/*.so
 /tests/*.dll
 
