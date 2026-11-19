@@ -135,6 +135,10 @@ typedef struct {
 	char   last_window_id[JARVIS_ID_LEN];
 	char   last_window_class[JARVIS_NAME_LEN];
 	int    last_workspace;
+	int    prev_workspace;
+	char   last_url[JARVIS_CLAUSE_LEN];
+	char   last_file[JARVIS_STR_LEN];
+	int    last_line;
 } jarvis_context_t;
 
 /**
@@ -147,6 +151,7 @@ typedef struct {
 	char                 focused_cwd[JARVIS_STR_LEN];
 	char                 focused_process[JARVIS_NAME_LEN];
 	char                 system_health[JARVIS_STR_LEN];
+	char                 browser_page[JARVIS_OUTPUT_LEN];
 
 	jarvis_window_t      clients[JARVIS_MAX_CLIENTS];
 	size_t               client_count;

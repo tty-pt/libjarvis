@@ -64,6 +64,26 @@ XY_DECL(int, jarvis_xy_tts_interrupt, int, dummy);
  */
 XY_DECL(int, jarvis_xy_voice_status, int, state, const char *, partial_text);
 
+/**
+ * @brief Interactive omni-bar / command palette prompt hook (e.g. dmenu, web modal, CLI stdin).
+ *
+ * @param prompt_label     Label to show in the prompt UI (e.g. "Jarvis:").
+ * @param candidates_lines Newline-delimited candidate strings.
+ * @param out_selection    Output buffer to receive the user's selected/typed utterance.
+ * @param out_sz           Capacity of @p out_selection.
+ * @return 1 if an utterance was selected, 0 if cancelled or unhandled.
+ */
+XY_DECL(int, jarvis_xy_prompt, const char *, prompt_label, const char *, candidates_lines, char *, out_selection, size_t, out_sz);
+
+/**
+ * @brief Environment feedback notification & earcon hook (e.g. Dunst toast + audio earcon).
+ *
+ * @param title       Notification title.
+ * @param body        Notification body text.
+ * @param play_earcon 1 to play completion earcon chime, 0 otherwise.
+ */
+XY_DECL(int, jarvis_xy_notify, const char *, title, const char *, body, int, play_earcon);
+
 /* ---------------------------------------------------------------------------
  * Core Ontology & Text Normalization API
  * ------------------------------------------------------------------------- */

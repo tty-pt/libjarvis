@@ -5,7 +5,7 @@ libjarvis-obj-y := src/jarvis-json.o src/jarvis-ontology.o src/jarvis-solver.o s
 jarvis-obj-y := src/jarvis-cli-adapter.o
 LDLIBS-libjarvis := -lxylem -lstele -lcorm -lm
 LDLIBS-jarvis := -Llib -ljarvis -lxylem -lstele -lcorm -lm
-LDFLAGS-jarvis-Linux := -Wl,-rpath,${CURDIR}/lib
+LDFLAGS-jarvis-Linux := -Wl,-rpath,${CURDIR}/lib -Wl,-rpath,${HOME}/.local/lib -Wl,-rpath,${CURDIR}/../libxylem/lib -Wl,-rpath,${CURDIR}/../libstele/lib -Wl,-rpath,${CURDIR}/../libcorm/lib
 CFLAGS-BIN-Windows :=
 
 CFLAGS := -g -O2 -Iinclude -I../libxylem/include -I../libstele/include -I../libcorm/include

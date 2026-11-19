@@ -12,6 +12,10 @@ extern size_t        g_executed_count;
 extern bool          g_allow_confirm;
 extern jarvis_pane_t g_mock_panes[4];
 extern size_t        g_mock_pane_count;
+extern char          g_mock_browser_page[JARVIS_OUTPUT_LEN];
+extern jarvis_tab_t  g_mock_tabs[4];
+extern size_t        g_mock_tab_count;
+extern char          g_mock_other_term_tail[JARVIS_OUTPUT_LEN];
 
 static void assert_cmd_op(jarvis_engine_t *eng, const char *utt, const char *expected_op, const char *expected_sub)
 {
@@ -424,6 +428,203 @@ static void test_06_voice_vad_wake_and_streaming_tts(void)
 	printf("  [PASS] Voice VAD, wake-word extractor, earcon synthesizer, and streaming TTS segmenter verified!\n");
 }
 
+static void test_07_casual_conversational_and_ergonomic_requests(jarvis_engine_t *eng)
+{
+	printf("Running test_07_casual_conversational_and_ergonomic_requests...\n");
+
+	static const struct {
+		const char *utt;
+		const char *expected_op;
+		const char *expected_sub;
+	} casual_cases[] = {
+		/* Ergonomic / vision / zoom / fullscreen complaints */
+		{"this text is tiny, I can't read it", "press_key", "ctrl+plus"},
+		{"bump the font size up a bit", "press_key", "ctrl+plus"},
+		{"zoom in on this page", "press_key", "ctrl+plus"},
+		{"zoom out a little", "press_key", "ctrl+minus"},
+		{"make the font smaller", "press_key", "ctrl+minus"},
+		{"my eyes are killing me, make it fullscreen", "window_fullscreen", NULL},
+		/* Browser navigation via casual speech */
+		{"refresh the page please", "press_key", "ctrl+r"},
+		{"reload the browser page", "press_key", "ctrl+r"},
+		{"go back a page", "press_key", "alt+Left"},
+		{"get rid of this tab", "window_close", "\"kind\":\"tab\""},
+		/* Window management via slang / casual complaints */
+		{"ditch the other window", "window_close", "\"relation\":\"other\""},
+		{"kill this window", "window_close", "\"kind\":\"window\""},
+		{"banish this window to workspace 8", "workspace_move_window", "\"workspace\":8"},
+		{"stash the other window on workspace 5", "workspace_move_window", "\"workspace\":5"},
+		{"hop over to workspace 4", "workspace_switch", "\"workspace\":4"},
+		/* Audio / volume complaints & boredom */
+		{"that's way too loud, my ears are ringing", "media_volume", "volume_down"},
+		{"turn it down a bit", "media_volume", "volume_down"},
+		{"I can barely hear that", "media_volume", "volume_up"},
+		{"I'm bored, throw on some music", "media_play", NULL},
+		{NULL, NULL, NULL}
+	};
+
+	for (size_t i = 0; casual_cases[i].utt; i++) {
+		assert_cmd_op(eng, casual_cases[i].utt, casual_cases[i].expected_op, casual_cases[i].expected_sub);
+	}
+	printf("  [PASS] All 19 casual, indirect, and ergonomic requests resolved cleanly!\n");
+}
+
+static void test_08_browser_accessibility_and_terminal_screen_inspection(jarvis_engine_t *eng)
+{
+	printf("Running test_08_browser_accessibility_and_terminal_screen_inspection...\n");
+
+	/* Configure mock AT-SPI2 browser page and open tabs */
+	snprintf(g_mock_browser_page, sizeof(g_mock_browser_page),
+	         "[frame] Project Auren Status Dashboard - Mozilla Firefox\n"
+	         "[document web] Project Auren Status Dashboard\n"
+	         "[heading] Project Auren Status Dashboard\n"
+	         "[paragraph] Active deployment node: auren-node-07\n"
+	         "[paragraph] Build pipeline status: ALL_TESTS_GREEN (42 suites passed in 0.18s)\n"
+	         "[link] Open Architecture Documentation -> https://tty.pt/docs/architecture");
+
+	g_mock_tab_count = 2;
+	g_mock_tabs[0].index = 1;
+	snprintf(g_mock_tabs[0].title, sizeof(g_mock_tabs[0].title), "Project Auren Status Dashboard");
+	snprintf(g_mock_tabs[0].url, sizeof(g_mock_tabs[0].url), "http://localhost:8080/status");
+	g_mock_tabs[1].index = 2;
+	snprintf(g_mock_tabs[1].title, sizeof(g_mock_tabs[1].title), "TTY.PT Architecture Docs");
+	snprintf(g_mock_tabs[1].url, sizeof(g_mock_tabs[1].url), "https://tty.pt/docs/architecture");
+
+	/* 1. Ask what is on the web page right now -> must invoke inspect_browser and answer with AT-SPI2 content */
+	g_executed_count = 0;
+	jarvis_process_result_t r_page;
+	assert(jarvis_process(eng, "what does the web page in my browser say right now?", "terminal", &r_page));
+	assert(r_page.combined_result.success);
+	assert(executed_has_op("inspect_browser"));
+	assert(strcmp(r_page.last_dsl.op, "answer_question") == 0);
+	assert(strstr(r_page.combined_result.output, "auren-node-07") != NULL ||
+	       strstr(r_page.combined_result.output, "ALL_TESTS_GREEN") != NULL);
+	printf("  [PASS] Browser AT-SPI2 page query -> '%s'\n", r_page.combined_result.output);
+
+	/* 2. Ask to open the link on the page -> inspects browser accessibility tree, extracts link URL, opens it */
+	g_executed_count = 0;
+	jarvis_process_result_t r_link;
+	assert(jarvis_process(eng, "open the architecture docs link on the page", "terminal", &r_link));
+	assert(r_link.combined_result.success);
+	assert(strcmp(r_link.last_dsl.op, "open_url") == 0);
+	assert(strcmp(r_link.last_dsl.target.url, "https://tty.pt/docs/architecture") == 0);
+	printf("  [PASS] Browser AT-SPI2 link extraction -> open_url('%s')\n", r_link.last_dsl.target.url);
+
+	/* 3. Ask what tabs are open in the browser */
+	g_executed_count = 0;
+	jarvis_process_result_t r_tabs;
+	assert(jarvis_process(eng, "what tabs do I have open in firefox?", "terminal", &r_tabs));
+	assert(r_tabs.combined_result.success);
+	assert(executed_has_op("inspect_browser"));
+	assert(strcmp(r_tabs.last_dsl.op, "answer_question") == 0);
+	printf("  [PASS] Browser tabs inspection -> '%s'\n", r_tabs.combined_result.output);
+
+	/* 4. Ask what the other terminal screen says (via _ST_SCREEN_TEXT / inspect_terminal relation=other) */
+	snprintf(g_mock_other_term_tail, sizeof(g_mock_other_term_tail),
+	         "worker-02: Listening on 127.0.0.1:9091 — 0 pending jobs, health=READY");
+	g_executed_count = 0;
+	jarvis_process_result_t r_oterm;
+	assert(jarvis_process(eng, "what does the other terminal screen say?", "terminal", &r_oterm));
+	assert(r_oterm.combined_result.success);
+	assert(executed_has_op("inspect_terminal"));
+	assert(strcmp(r_oterm.last_dsl.op, "answer_question") == 0);
+	assert(strstr(r_oterm.combined_result.output, "9091") != NULL ||
+	       strstr(r_oterm.combined_result.output, "READY") != NULL);
+	printf("  [PASS] Other terminal screen inspection -> '%s'\n", r_oterm.combined_result.output);
+	g_mock_other_term_tail[0] = '\0';
+
+	/* 5. Ask to open the crashing file at the exact line shown on the focused terminal screen */
+	g_mock_pane_count = 1;
+	snprintf(g_mock_panes[0].pane, sizeof(g_mock_panes[0].pane), "st:0x1001");
+	snprintf(g_mock_panes[0].command, sizeof(g_mock_panes[0].command), "cc");
+	snprintf(g_mock_panes[0].cwd, sizeof(g_mock_panes[0].cwd), "/home/quirinpa/site");
+	g_mock_panes[0].active = true;
+	snprintf(g_mock_panes[0].tail, sizeof(g_mock_panes[0].tail),
+	         "cc -Wall -O2 -c src/reactor.c\n"
+	         "src/reactor.c:142:9: error: undefined symbol 'xy_flux_capacitor'\n"
+	         "make: *** [Makefile:58: src/reactor.o] Error 1");
+
+	g_executed_count = 0;
+	jarvis_process_result_t r_crash;
+	assert(jarvis_process(eng, "open the file where it crashed at that line", "terminal", &r_crash));
+	assert(r_crash.combined_result.success);
+	assert(strcmp(r_crash.last_dsl.op, "spawn_shell_command") == 0);
+	assert(strstr(r_crash.last_dsl.target.command, "+142") != NULL);
+	assert(strstr(r_crash.last_dsl.target.command, "src/reactor.c") != NULL);
+	printf("  [PASS] Terminal screen error file+line extraction -> '%s'\n", r_crash.last_dsl.target.command);
+	g_mock_pane_count = 0;
+}
+
+static void test_09_continuous_multi_turn_interaction(jarvis_engine_t *eng)
+{
+	printf("Running test_09_continuous_multi_turn_interaction...\n");
+
+	/* Set up live desktop state: browser with AT-SPI2 dashboard + terminal with compiler error */
+	snprintf(g_mock_browser_page, sizeof(g_mock_browser_page),
+	         "[frame] Project Auren Status Dashboard - Mozilla Firefox\n"
+	         "[document web] Project Auren Status Dashboard\n"
+	         "[heading] Project Auren Status Dashboard\n"
+	         "[paragraph] Active deployment node: auren-node-07\n"
+	         "[paragraph] Build pipeline status: ALL_TESTS_GREEN\n"
+	         "[link] Architecture Specification -> https://tty.pt/docs/architecture");
+
+	g_mock_pane_count = 1;
+	snprintf(g_mock_panes[0].pane, sizeof(g_mock_panes[0].pane), "st:0x1001");
+	snprintf(g_mock_panes[0].command, sizeof(g_mock_panes[0].command), "make");
+	snprintf(g_mock_panes[0].cwd, sizeof(g_mock_panes[0].cwd), "/home/quirinpa/site");
+	g_mock_panes[0].active = true;
+	snprintf(g_mock_panes[0].tail, sizeof(g_mock_panes[0].tail),
+	         "src/net_loop.c:215:4: error: 'epoll_fd' undeclared (first use in this function)\n"
+	         "make: *** [Makefile:31: src/net_loop.o] Error 1");
+
+	jarvis_process_result_t t1, t2, t3, t4, t5, t6, t7, t8;
+
+	/* Turn 1: User asks what's on the browser page */
+	assert(jarvis_process(eng, "hey jarvis, what's on the browser page right now?", "terminal", &t1));
+	assert(strcmp(t1.last_dsl.op, "answer_question") == 0);
+	assert(strstr(t1.combined_result.output, "auren-node-07") != NULL);
+
+	/* Turn 2: Follow-up referring to the link on that page */
+	assert(jarvis_process(eng, "follow the link on that page", "terminal", &t2));
+	assert(strcmp(t2.last_dsl.op, "open_url") == 0);
+	assert(strcmp(t2.last_dsl.target.url, "https://tty.pt/docs/architecture") == 0);
+
+	/* Turn 3: Switch focus to terminal problem — ask what failed on the terminal screen */
+	assert(jarvis_process(eng, "what's the error on my terminal screen?", "terminal", &t3));
+	assert(strcmp(t3.last_dsl.op, "answer_question") == 0);
+	assert(strstr(t3.combined_result.output, "src/net_loop.c:215") != NULL);
+
+	/* Turn 4: Follow-up referring to "that file" and "that line" from Turn 3 */
+	assert(jarvis_process(eng, "open that file at the failing line in neovim", "terminal", &t4));
+	assert(strcmp(t4.last_dsl.op, "spawn_shell_command") == 0);
+	assert(strstr(t4.last_dsl.target.command, "nvim +215 src/net_loop.c") != NULL);
+
+	/* Turn 5: Run a test command in the terminal */
+	assert(jarvis_process(eng, "run make test-fast in the other window", "terminal", &t5));
+	assert(strcmp(t5.last_dsl.op, "spawn_shell_command") == 0);
+	assert(strcmp(t5.last_dsl.target.command, "make test-fast") == 0);
+
+	/* Turn 6: Follow-up "run that again" */
+	assert(jarvis_process(eng, "run that command again", "terminal", &t6));
+	assert(strcmp(t6.last_dsl.op, "spawn_shell_command") == 0);
+	assert(strcmp(t6.last_dsl.target.command, "make test-fast") == 0);
+
+	/* Turn 7: Move window to workspace 5 */
+	assert(jarvis_process(eng, "banish this window to workspace 5", "terminal", &t7));
+	assert(strcmp(t7.last_dsl.op, "workspace_move_window") == 0);
+	assert(t7.last_dsl.args.workspace == 5);
+
+	/* Turn 8: Correction / undo "nevermind, bring it back" -> restores to previous workspace (1) */
+	assert(jarvis_process(eng, "nevermind, bring it back", "terminal", &t8));
+	assert(strcmp(t8.last_dsl.op, "workspace_move_window") == 0);
+	assert(t8.last_dsl.args.workspace == 1);
+
+	g_mock_pane_count = 0;
+	g_mock_browser_page[0] = '\0';
+	g_mock_tab_count = 0;
+	printf("  [PASS] Continuous 8-turn multi-modal conversation (browser -> link -> terminal -> editor -> replay -> undo) passed!\n");
+}
+
 int main(void)
 {
 	assert(xy_load("./mock_adapter") == XY_OK);
@@ -442,8 +643,11 @@ int main(void)
 	test_04_random_unstructured_commands_end_to_end(eng);
 	test_05_agentic_react_loop_and_memory(eng);
 	test_06_voice_vad_wake_and_streaming_tts();
+	test_07_casual_conversational_and_ergonomic_requests(eng);
+	test_08_browser_accessibility_and_terminal_screen_inspection(eng);
+	test_09_continuous_multi_turn_interaction(eng);
 
 	jarvis_engine_destroy(eng);
-	printf("\n=== ALL 6 LIBJARVIS PARITY SUITES PASSED IN PURE C ===\n");
+	printf("\n=== ALL 9 LIBJARVIS PARITY & CONTINUOUS INTERACTION SUITES PASSED IN PURE C ===\n");
 	return 0;
 }

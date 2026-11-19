@@ -70,7 +70,7 @@ bool               jarvis_normalize_dsl_val(const jjson_val_t *raw, jarvis_dsl_t
  * Ontology Data Structures & Named Capacities
  * ------------------------------------------------------------------------- */
 
-#define JARVIS_MAX_STOPWORDS          96
+#define JARVIS_MAX_STOPWORDS          256
 #define JARVIS_MAX_CLAUSE_SEPS        16
 #define JARVIS_MAX_VERB_MAP           512
 #define JARVIS_MAX_VERB_CONCEPTS      6
