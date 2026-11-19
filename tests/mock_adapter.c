@@ -53,22 +53,25 @@ XY_IMPL(int, jarvis_xy_observe, jarvis_world_t *, w)
 		w->panes[w->pane_count++] = g_mock_panes[i];
 	}
 
-	static const struct { const char *phrase; const char *bin; } apps[] = {
-		{"calculator", "gnome-calculator"},
-		{"firefox web browser", "firefox"},
-		{"pulseaudio volume control", "pavucontrol"},
-		{"visual studio code", "code"},
-		{"files", "thunar"},
-		/* Custom domain entities: Music site & NeverDark */
-		{"fado nocturnal poem", "poem:fado-nocturnal"},
-		{"shadow goblin", "nd:mob:goblin"},
-		{NULL, NULL}
+	static const struct { const char *type; const char *phrase; const char *id; } custom[] = {
+		{"gui.application", "calculator", "gnome-calculator"},
+		{"gui.application", "firefox web browser", "firefox"},
+		{"gui.application", "pulseaudio volume control", "pavucontrol"},
+		{"gui.application", "visual studio code", "code"},
+		{"gui.application", "files", "thunar"},
+		/* Custom domain entities: Music site & NeverDark & Filesystem */
+		{"gui.application", "fado nocturnal poem", "poem:fado-nocturnal"},
+		{"gui.application", "shadow goblin", "nd:mob:goblin"},
+		{"fs.location", "site", "~/site"},
+		{"fs.location", "site folder", "~/site"},
+		{"fs.location", "site directory", "~/site"},
+		{NULL, NULL, NULL}
 	};
-	for (size_t i = 0; apps[i].phrase && w->custom_entity_count < JARVIS_MAX_APPS; i++) {
+	for (size_t i = 0; custom[i].phrase && w->custom_entity_count < JARVIS_MAX_APPS; i++) {
 		jarvis_live_entity_t *ce = &w->custom_entities[w->custom_entity_count++];
-		snprintf(ce->type, sizeof(ce->type), "gui.application");
-		snprintf(ce->id, sizeof(ce->id), "%s", apps[i].bin);
-		snprintf(ce->phrase, sizeof(ce->phrase), "%s", apps[i].phrase);
+		snprintf(ce->type, sizeof(ce->type), "%s", custom[i].type);
+		snprintf(ce->id, sizeof(ce->id), "%s", custom[i].id);
+		snprintf(ce->phrase, sizeof(ce->phrase), "%s", custom[i].phrase);
 	}
 	return 0;
 }

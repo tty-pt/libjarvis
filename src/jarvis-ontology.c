@@ -626,6 +626,25 @@ void jarvis_ontology_build_live_index(
 		}
 	}
 
+	/* Standard XDG user directories */
+	static const struct { const char *name; const char *path; } xdg_dirs[] = {
+		{"downloads", "~/Downloads"},
+		{"documents", "~/Documents"},
+		{"desktop", "~/Desktop"},
+		{"pictures", "~/Pictures"},
+		{"music", "~/Music"},
+		{"videos", "~/Videos"},
+		{NULL, NULL}
+	};
+	for (size_t i = 0; xdg_dirs[i].name; i++) {
+		char p_folder[64], p_dir[64];
+		snprintf(p_folder, sizeof(p_folder), "%s folder", xdg_dirs[i].name);
+		snprintf(p_dir, sizeof(p_dir), "%s directory", xdg_dirs[i].name);
+		live_index_add(out_idx, xdg_dirs[i].name, "fs.location", xdg_dirs[i].path);
+		live_index_add(out_idx, p_folder, "fs.location", xdg_dirs[i].path);
+		live_index_add(out_idx, p_dir, "fs.location", xdg_dirs[i].path);
+	}
+
 #ifndef __wasm__
 	/* Dynamically add $HOME subdirectories as fs.location */
 	const char *home = getenv("HOME");
