@@ -17,6 +17,10 @@ size_t jarvis_clean_phrase(const char *text, char *out, size_t out_sz)
 
 	for (const unsigned char *p = (const unsigned char *)text; *p && w + 1 < out_sz; p++) {
 		unsigned char c = *p;
+		if ((c == '\'' || c == '`') && p > (const unsigned char *)text &&
+		    isalnum(p[-1]) && isalnum(p[1])) {
+			continue;
+		}
 		if (isalnum(c) || c >= 0x80) {
 			out[w++] = (char)tolower(c);
 			prev_space = false;
@@ -664,7 +668,9 @@ void jarvis_ontology_build_live_index(
 						snprintf(rel, sizeof(rel), "~/%s", de->d_name);
 						snprintf(p_folder, sizeof(p_folder), "%s folder", ec);
 						snprintf(p_dir, sizeof(p_dir), "%s directory", ec);
-						live_index_add(out_idx, ec, "fs.location", rel);
+						if (!ont || (!jarvis_ontology_find_verb_phrase(ont, ec) && !jarvis_live_index_find(out_idx, ec))) {
+							live_index_add(out_idx, ec, "fs.location", rel);
+						}
 						live_index_add(out_idx, p_folder, "fs.location", rel);
 						live_index_add(out_idx, p_dir, "fs.location", rel);
 					}

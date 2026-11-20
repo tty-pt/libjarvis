@@ -25,6 +25,10 @@ static void assert_cmd_op(jarvis_engine_t *eng, const char *utt, const char *exp
 		fprintf(stderr, "FAIL: '%s' -> unresolved (%s)\n", utt, res.error);
 		assert(ok);
 	}
+	if (strcmp(res.source, "solver:low_confidence") == 0) {
+		fprintf(stderr, "FAIL: '%s' -> got low_confidence solver score\n", utt);
+		assert(strcmp(res.source, "solver:low_confidence") != 0);
+	}
 	if (strcmp(res.last_dsl.op, expected_op) != 0) {
 		fprintf(stderr, "FAIL: '%s' -> got op='%s', expected='%s'\n", utt, res.last_dsl.op, expected_op);
 		assert(strcmp(res.last_dsl.op, expected_op) == 0);
@@ -145,7 +149,9 @@ static void test_01_standard_structured_commands(jarvis_engine_t *eng)
 
 	/* Scroll, Recording, Agent, Voice Barge-In & Background Media */
 	assert_cmd_op(eng, "scroll down", "scroll", "\"direction\":\"down\"");
-	assert_cmd_op(eng, "scroll up 8", "scroll", "\"amount\":8");
+	assert_cmd_op(eng, "scroll up 8", "scroll", "\"direction\":\"up\",\"amount\":8");
+	assert_cmd_op(eng, "switch to workspace two", "workspace_switch", "\"workspace\":2");
+	assert_cmd_op(eng, "move this window to workspace three", "workspace_move_window", "\"workspace\":3");
 	assert_cmd_op(eng, "start recording screen and audio", "record_start", "\"mode\":\"both\"");
 	assert_cmd_op(eng, "stop recording", "record_stop", NULL);
 	assert_cmd_op(eng, "ask pi to refactor the parser", "ask_agent", "refactor the parser");

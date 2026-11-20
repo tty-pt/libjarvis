@@ -1820,12 +1820,14 @@ static bool synthesize_offline_react_json(
 	}
 	if (strstr(padded, " what time ") || strstr(padded, " current time ") ||
 	    strstr(padded, " what date ") || strstr(padded, " todays date ") || strstr(padded, " what day is ")) {
+		char tbuf[128] = "now";
+#ifndef __wasm__
 		time_t now_t = time(NULL);
 		struct tm tm_now;
-		char tbuf[128] = "now";
 		if (localtime_r(&now_t, &tm_now)) {
 			strftime(tbuf, sizeof(tbuf), "%I:%M %p on %A, %B %d", &tm_now);
 		}
+#endif
 		snprintf(out_json, out_sz,
 		         "{\"op\":\"answer_question\",\"args\":{\"answer\":\"It is %s.\"}}", tbuf);
 		return true;

@@ -253,10 +253,17 @@ static void extract_constituents(
 	/* Skip leading polite stopwords configured in ontology */
 	size_t v_start = 0;
 	while (v_start < n && jarvis_ontology_is_stopword(ont, words[v_start])) {
-		char probe[128];
-		size_t plen = (n - v_start < 3) ? (n - v_start) : 3;
-		join_words(words, v_start, plen, probe, sizeof(probe));
-		if (jarvis_ontology_find_verb_phrase(ont, probe)) break;
+		bool found_lead_vp = false;
+		size_t max_p = (n - v_start < 4) ? (n - v_start) : 4;
+		for (size_t pl = max_p; pl >= 1; pl--) {
+			char probe[128];
+			join_words(words, v_start, pl, probe, sizeof(probe));
+			if (jarvis_ontology_find_verb_phrase(ont, probe)) {
+				found_lead_vp = true;
+				break;
+			}
+		}
+		if (found_lead_vp) break;
 		v_start++;
 	}
 
@@ -449,6 +456,11 @@ static void extract_after_verb(
 					break;
 				}
 			}
+			if (!stripped_p && (starts_with_ci(q, "let's ") || starts_with_ci(q, "lets "))) {
+				q += starts_with_ci(q, "let's ") ? 6 : 5;
+				while (*q && isspace((unsigned char)*q)) q++;
+				stripped_p = true;
+			}
 		}
 	}
 
@@ -499,7 +511,34 @@ static void extract_after_verb(
 
 static bool is_digit_1_to_9(const char *s)
 {
-	return s && s[0] >= '1' && s[0] <= '9' && s[1] == '\0';
+	if (!s) return false;
+	if (s[0] >= '1' && s[0] <= '9' && s[1] == '\0') return true;
+	static const char *const WORDS[] = {
+		"one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+		"first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth",
+		NULL
+	};
+	for (size_t i = 0; WORDS[i]; i++) {
+		if (strcmp(s, WORDS[i]) == 0) return true;
+	}
+	return false;
+}
+
+static int parse_digit_1_to_9(const char *s)
+{
+	if (!s) return 0;
+	if (s[0] >= '1' && s[0] <= '9' && s[1] == '\0') return s[0] - '0';
+	static const struct { const char *w; int v; } MAP[] = {
+		{"one", 1}, {"two", 2}, {"three", 3}, {"four", 4}, {"five", 5},
+		{"six", 6}, {"seven", 7}, {"eight", 8}, {"nine", 9},
+		{"first", 1}, {"second", 2}, {"third", 3}, {"fourth", 4}, {"fifth", 5},
+		{"sixth", 6}, {"seventh", 7}, {"eighth", 8}, {"ninth", 9},
+		{NULL, 0}
+	};
+	for (size_t i = 0; MAP[i].w; i++) {
+		if (strcmp(s, MAP[i].w) == 0) return MAP[i].v;
+	}
+	return 0;
 }
 
 static bool is_all_digits(const char *s)
@@ -627,8 +666,9 @@ static bool build_intent_ir(
 			ws = atoi(get_first_entity_id(p, "ui.workspace", "1"));
 		} else {
 			for (size_t i = 0; i < p->residual_count; i++) {
-				if (is_digit_1_to_9(p->residual[i])) {
-					ws = atoi(p->residual[i]);
+				int v = parse_digit_1_to_9(p->residual[i]);
+				if (v >= 1 && v <= 9) {
+					ws = v;
 					break;
 				}
 			}
@@ -657,7 +697,13 @@ static bool build_intent_ir(
 	}
 	if (strcmp(cid, "ui.scroll") == 0) {
 		out_ir->explicit_terminal = false;
-		const char *dir = get_first_entity_id(p, "ui.scroll_direction", "down");
+		const char *dir = get_first_entity_id(p, "ui.scroll_direction", "");
+		if (!dir[0]) {
+			if (strstr(p->lead_verb_span, "up") != NULL) dir = "up";
+			else if (strstr(p->lead_verb_span, "left") != NULL) dir = "left";
+			else if (strstr(p->lead_verb_span, "right") != NULL) dir = "right";
+			else dir = "down";
+		}
 		snprintf(out_ir->direction, sizeof(out_ir->direction), "%s", dir);
 		int amt = 5;
 		for (size_t i = 0; i < p->residual_count; i++) {
@@ -761,7 +807,7 @@ static bool build_intent_ir(
 			snprintf(out_ir->action, sizeof(out_ir->action), "%s", m0);
 			return true;
 		}
-		static const char *PREPS[] = {"a bit of ", "a little ", "some ", "the ", "a ", "an ", NULL};
+		static const char *PREPS[] = {"listen to ", "a bit of ", "a little ", "some ", "the ", "a ", "an ", NULL};
 		char q_clean[512];
 		extract_after_verb(ont, raw_stripped, p->lead_verb_span, PREPS, q_clean, sizeof(q_clean));
 		if (!q_clean[0]) {
@@ -1220,13 +1266,15 @@ bool jarvis_solve_clause(
 			continue;
 		}
 
-		double ctx_bonus = (strcmp(cap->surface, eff_surface) == 0 || explicit_term) ? 0.04 : 0.0;
-		double req_bonus = (cap->req_ent_count > 0) ? 0.03 : 0.0;
+		double ctx_bonus = (strcmp(cap->surface, "any") == 0 || strcmp(cap->surface, eff_surface) == 0 || explicit_term) ? 0.04 : 0.0;
+		double req_bonus = (cap->req_ent_count > 0 || cap->req_any_count > 0) ? 0.03 : 0.0;
 		bool is_open_arg = (strcmp(cid, "media.play") == 0 ||
 		                    strcmp(cid, "web.search") == 0 ||
 		                    strcmp(cid, "input.dictate") == 0 ||
 		                    strcmp(cid, "agent.ask") == 0);
-		size_t eff_res = (is_open_arg || (strcmp(cid, "window.control") == 0 && p.residual_count == 1 && strcmp(p.residual[0], "it") == 0))
+		size_t eff_res = (is_open_arg ||
+		                  (strcmp(cid, "window.control") == 0 && p.residual_count == 1 && strcmp(p.residual[0], "it") == 0) ||
+		                  (strcmp(cid, "ui.scroll") == 0 && p.residual_count == 1 && is_all_digits(p.residual[0])))
 			? 0 : p.residual_count;
 		double res_penalty = 0.18 * (double)eff_res;
 		double lead_penalty = (p.lead_verb_span[0] || p.verb_count == 0 ||
@@ -1255,6 +1303,10 @@ bool jarvis_solve_clause(
 		}
 		if (strcmp(cid, "workspace.switch") == 0 && get_verb_weight(&p, "WORKSPACE_MOVE") >= 0.80) {
 			continue;
+		}
+		if (strcmp(cid, "workspace.switch") == 0 &&
+		    (get_verb_weight(&p, "WORKSPACE_SWITCH") >= 0.80 || has_entity_type(&p, "ui.workspace"))) {
+			score = 0.99;
 		}
 		if (strcmp(cid, "window.control") == 0 &&
 		    (has_entity_type(&p, "ui.window_action") || get_verb_weight(&p, "WINDOW_CONTROL") >= 0.80)) {

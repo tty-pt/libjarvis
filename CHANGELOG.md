@@ -2,6 +2,25 @@
 
 All notable changes to `libjarvis` (`@tty-pt/jarvis`) are documented in this file.
 
+## [1.1.0] - 2026-11-20
+
+### Added
+- **Sway & Hyprland Window Manager Modules (`mods/sway/mod_sway.c`, `mods/hyprland/mod_hyprland.c`)**:
+  - Dedicated `libxylem` dynamic window manager plugins for Sway (`swaymsg`) and Hyprland (`hyprctl`) supporting workspace switching, window movement, fullscreen/floating toggles, focus navigation, and layout inspection.
+- **Browser Accessibility, Terminal Screen Inspection & Continuous Multi-Turn Interaction (`libjarvis.c`, `jarvis.c`, `jarvis-cli-adapter.c`)**:
+  - Browser element/link accessibility targeting (`browser.click`, hint/text matching) and live terminal pane screen inspection (`terminal.inspect`).
+  - Continuous multi-turn dialogue state (`jarvis_should_continue_listen`) for follow-up questions and clarifications without repeating the wake word.
+  - Spoken cardinal (`"one"`..`"nine"`) and ordinal (`"first"`..`"ninth"`) workspace resolution in Tier-0 Intent IR compilation (`"switch to workspace two"`, `"move this window to workspace three"`).
+
+### Changed
+- **Tier-0 Compositional Solver Disambiguation & Ontology Hardening (`jarvis-solver.c`, `jarvis-ontology.c`)**:
+  - Granted surface-agnostic context bonus (`+0.04`) for capabilities with `surface: "any"`, satisfied `required_any` constraints, or numeric `ui.scroll` line counts, and boosted `workspace.switch` disambiguation (`0.99`) so cross-surface commands clear the `0.90` Tier-0 confidence threshold without falling back to LLM round-trips.
+  - Extracted scroll direction (`up`/`down`/`left`/`right`) directly from composite multi-word lead verb spans (e.g., `"scroll up 8"`).
+  - Protected built-in ontology entity phrases (such as `"other"` -> `ui.relative_window`) from being shadowed by bare `$HOME` subdirectory names during live filesystem indexing, and normalized mid-word apostrophes (`"let's"` -> `"lets"`) before stopword stripping.
+- **Remote LLM Default & Fallback Deduplication (`libjarvis.c`)**:
+  - Defaulted remote `axil-auren` inference to the fast `qwen3.5-4b` model and deduplicated the fallback model chain.
+  - Guarded native `<time.h>` calls in `libjarvis.c` so freestanding WebAssembly (`npm/dist/jarvis.wasm`) compiles cleanly under `clang --target=wasm32`.
+
 ## [1.0.0] - 2026-11-19
 
 ### Added
