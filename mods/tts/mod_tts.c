@@ -248,6 +248,53 @@ static void trim_trailing(char *s)
 	while (l > 0 && isspace((unsigned char)s[l - 1])) s[--l] = '\0';
 }
 
+static bool rc_lookup(const char *key, char *out, size_t out_sz)
+{
+	if (!out || out_sz == 0) return false;
+	out[0] = '\0';
+	const char *env_rc = getenv("JARVISRC");
+	const char *home = getenv("HOME");
+	char rc_path[512];
+	if (env_rc && *env_rc) {
+		snprintf(rc_path, sizeof(rc_path), "%s", env_rc);
+	} else if (home && *home) {
+		snprintf(rc_path, sizeof(rc_path), "%s/.jarvisrc", home);
+		if (access(rc_path, R_OK) != 0)
+			snprintf(rc_path, sizeof(rc_path), "%s/.config/jarvis/jarvisrc", home);
+	} else {
+		return false;
+	}
+	FILE *fp = fopen(rc_path, "r");
+	if (!fp) return false;
+	bool found = false;
+	char line[512];
+	while (fgets(line, sizeof(line), fp)) {
+		char *p = line;
+		while (*p && isspace((unsigned char)*p)) p++;
+		if (!*p || *p == '#' || *p == ';') continue;
+		char *eq = strchr(p, '=');
+		if (!eq) continue;
+		*eq = '\0';
+		size_t kl = strlen(p);
+		while (kl > 0 && isspace((unsigned char)p[kl - 1])) p[--kl] = '\0';
+		if (strcasecmp(p, key) != 0) continue;
+		char *v = eq + 1;
+		while (*v && isspace((unsigned char)*v)) v++;
+		trim_trailing(v);
+		size_t vl = strlen(v);
+		if (vl >= 2 && ((v[0] == '"' && v[vl - 1] == '"') || (v[0] == '\'' && v[vl - 1] == '\''))) {
+			v[vl - 1] = '\0';
+			v++;
+		}
+		if (v[0]) {
+			snprintf(out, out_sz, "%s", v);
+			found = true;
+		}
+	}
+	fclose(fp);
+	return found;
+}
+
 static bool is_tts_enabled(void)
 {
 	const char *no_tts = getenv("JARVIS_NO_TTS");
@@ -255,23 +302,12 @@ static bool is_tts_enabled(void)
 	const char *env_tts = getenv("JARVIS_TTS");
 	if (env_tts) return strcmp(env_tts, "0") != 0;
 
-	const char *home = getenv("HOME");
-	if (home && *home) {
-		char path[512];
-		snprintf(path, sizeof(path), "%s/.config/dwm-voice/tts_enabled", home);
-		FILE *fp = fopen(path, "r");
-		if (fp) {
-			char buf[32] = {0};
-			if (fgets(buf, sizeof(buf), fp)) {
-				trim_trailing(buf);
-				fclose(fp);
-				return (strcmp(buf, "1") == 0 || strcasecmp(buf, "true") == 0 ||
-				        strcasecmp(buf, "on") == 0 || strcasecmp(buf, "yes") == 0);
-			}
-			fclose(fp);
-		}
+	char buf[32];
+	if (rc_lookup("tts_enabled", buf, sizeof(buf))) {
+		return (strcmp(buf, "1") == 0 || strcasecmp(buf, "true") == 0 ||
+		        strcasecmp(buf, "on") == 0 || strcasecmp(buf, "yes") == 0);
 	}
-	return false;
+	return true;
 }
 
 static void get_tts_voice(char *out, size_t out_sz)
@@ -281,32 +317,17 @@ static void get_tts_voice(char *out, size_t out_sz)
 		snprintf(out, out_sz, "%s", env_v);
 		return;
 	}
-	const char *home = getenv("HOME");
-	if (home && *home) {
-		char path[512];
-		snprintf(path, sizeof(path), "%s/.config/dwm-voice/tts_voice", home);
-		FILE *fp = fopen(path, "r");
-		if (fp) {
-			char buf[64] = {0};
-			if (fgets(buf, sizeof(buf), fp)) {
-				trim_trailing(buf);
-				if (buf[0]) {
-					snprintf(out, out_sz, "%s", buf);
-					fclose(fp);
-					return;
-				}
-			}
-			fclose(fp);
-		}
+	if (rc_lookup("tts_voice", out, out_sz) && out[0]) {
+		return;
 	}
-	snprintf(out, out_sz, "bm_daniel");
+	snprintf(out, out_sz, "pm_alex");
 }
 
 static void set_mic_mute(bool muted)
 {
 	/* Never mute the user's microphone source during TTS synthesis or playback so
 	 * barge-in commands and speech while Jarvis is talking are always captured!
-	 * Self-speech echo is suppressed via /tmp/dwm-tts-active-$USER.state in dwm-whisperd.
+	 * Self-speech echo is suppressed via /tmp/jarvis-tts-active-$USER.state in jarvisd.
 	 */
 	(void)muted;
 }
@@ -317,7 +338,7 @@ static void write_tts_active_state(const char *text, bool active)
 	const char *u = getenv("USER");
 	if (!u || !*u) u = "quirinpa";
 	char path[256], tmp[280];
-	snprintf(path, sizeof(path), "/tmp/dwm-tts-active-%s.state", u);
+	snprintf(path, sizeof(path), "/tmp/jarvis-tts-active-%s.state", u);
 	if (!active) {
 		s_accum[0] = '\0';
 		unlink(path);
@@ -329,7 +350,7 @@ static void write_tts_active_state(const char *text, bool active)
 		if (cur == 0) {
 			snprintf(s_accum, sizeof(s_accum), "%s", text);
 		} else if (cur + 1 + add < sizeof(s_accum)) {
-			snprintf(s_accum + cur, sizeof(s_accum) - cur, " %s", text);
+			snprintf(s_accum + cur, sizeof(s_accum) - cur, " %.*s", (int)(sizeof(s_accum) - cur - 2), text);
 		} else {
 			snprintf(s_accum, sizeof(s_accum), "%s", text);
 		}
@@ -749,29 +770,14 @@ static bool tts_engine_ensure_loaded(const char *voice)
 
 static void resolve_espeak_lang(const char *voice, bool is_piper, char *out_lang, size_t out_sz)
 {
-	/* 1. Explicit override via JARVIS_TTS_LANG or ~/.config/dwm-voice/tts_lang */
+	/* 1. Explicit override via JARVIS_TTS_LANG or ~/.jarvisrc tts_lang */
 	const char *env_l = getenv("JARVIS_TTS_LANG");
 	if (env_l && *env_l) {
 		snprintf(out_lang, out_sz, "%s", env_l);
 		return;
 	}
-	const char *home = getenv("HOME");
-	if (home && *home) {
-		char path[512];
-		snprintf(path, sizeof(path), "%s/.config/dwm-voice/tts_lang", home);
-		FILE *fp = fopen(path, "r");
-		if (fp) {
-			char buf[32] = {0};
-			if (fgets(buf, sizeof(buf), fp)) {
-				trim_trailing(buf);
-				if (buf[0]) {
-					snprintf(out_lang, out_sz, "%s", buf);
-					fclose(fp);
-					return;
-				}
-			}
-			fclose(fp);
-		}
+	if (rc_lookup("tts_lang", out_lang, out_sz) && out_lang[0]) {
+		return;
 	}
 
 	/* 2. Derive from Piper voice model prefix or Kokoro voice language prefix */
@@ -782,7 +788,7 @@ static void resolve_espeak_lang(const char *voice, bool is_piper, char *out_lang
 			return;
 		}
 		if (strncmp(p, "pt_BR", 5) == 0) { snprintf(out_lang, out_sz, "pt-br"); return; }
-		if (strncmp(p, "pt_", 3) == 0)   { snprintf(out_lang, out_sz, "pt"); return; }
+		if (strncmp(p, "pt_", 3) == 0)   { snprintf(out_lang, out_sz, "pt-pt"); return; }
 		if (strncmp(p, "es_", 3) == 0)   { snprintf(out_lang, out_sz, "es"); return; }
 		if (strncmp(p, "fr_", 3) == 0)   { snprintf(out_lang, out_sz, "fr-fr"); return; }
 		if (strncmp(p, "de_", 3) == 0)   { snprintf(out_lang, out_sz, "de"); return; }
@@ -793,20 +799,20 @@ static void resolve_espeak_lang(const char *voice, bool is_piper, char *out_lang
 	}
 
 	/* Kokoro-82M standard 1-character language code prefix:
-	 * 'a' = American English, 'b' = British English, 'p' = Brazilian Portuguese,
+	 * 'a' = American English, 'b' = British English, 'p' = European Portuguese (pt-pt),
 	 * 'e' = Spanish, 'f' = French, 'i' = Italian, 'h' = Hindi, 'j' = Japanese, 'z' = Mandarin
 	 */
-	switch (voice && voice[0] ? tolower((unsigned char)voice[0]) : 'b') {
+	switch (voice && voice[0] ? tolower((unsigned char)voice[0]) : 'p') {
 	case 'a': snprintf(out_lang, out_sz, "en-us"); break;
 	case 'b': snprintf(out_lang, out_sz, "en-gb-x-rp"); break;
-	case 'p': snprintf(out_lang, out_sz, "pt-br"); break;
+	case 'p': snprintf(out_lang, out_sz, "pt-pt"); break;
 	case 'e': snprintf(out_lang, out_sz, "es"); break;
 	case 'f': snprintf(out_lang, out_sz, "fr-fr"); break;
 	case 'i': snprintf(out_lang, out_sz, "it"); break;
 	case 'h': snprintf(out_lang, out_sz, "hi"); break;
 	case 'j': snprintf(out_lang, out_sz, "ja"); break;
 	case 'z': snprintf(out_lang, out_sz, "cmn"); break;
-	default:  snprintf(out_lang, out_sz, "en-gb-x-rp"); break;
+	default:  snprintf(out_lang, out_sz, "pt-pt"); break;
 	}
 }
 

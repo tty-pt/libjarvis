@@ -67,7 +67,7 @@ install-extra: ${DESTDIR}${PREFIX}/lib/pkgconfig/jarvis.pc ${DESTDIR}${PREFIX}/l
 		install -d ${DESTDIR}${PREFIX}/bin; \
 		install -m 755 bin/jarvisd ${DESTDIR}${PREFIX}/bin/jarvisd; \
 		install -m 755 bin/jarvisd $(HOME)/.local/bin/jarvisd; \
-		install -m 755 bin/jarvisd $(HOME)/.local/bin/dwm-whisperd; \
+		ln -sf jarvisd $(HOME)/.local/bin/dwm-whisperd; \
 	fi
 
 install: install-extra

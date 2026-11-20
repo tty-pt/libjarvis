@@ -207,7 +207,8 @@ notify_bar(void)
 	FILE *fp;
 	int pid = 0;
 
-	snprintf(path, sizeof(path), "/tmp/dwm-bar-%s.pid", get_username());
+	if (!jarvis_rc_get("status_notify_pid_file", NULL, path, sizeof(path)) || !path[0])
+		snprintf(path, sizeof(path), "/tmp/dwm-bar-%s.pid", get_username());
 	fp = fopen(path, "r");
 	if (!fp)
 		return;
@@ -281,14 +282,12 @@ play_chime_async(const char *chime_wav)
 	}
 }
 
-/* Dynamically resolve "kbd" language from /tmp/dwm-kbd-$USER.state so switching
- * X11 keyboard layout (Mod+Space) updates Whisper language mid-flight.
- */
+/* Dynamically resolve "kbd" language or normalize ISO tags ("pt-pt" -> "pt") for Whisper. */
 static void
 resolve_lang(const char *req_lang, char *out, size_t out_sz)
 {
 	const char *def_lang = jarvis_ontology_get_lang(get_daemon_ont());
-	if (!def_lang || !*def_lang) def_lang = "en";
+	if (!def_lang || !*def_lang) def_lang = "pt";
 
 	if (!req_lang || !*req_lang || strcmp(req_lang, "kbd") == 0) {
 		char path[256], buf[32] = {0};
@@ -322,6 +321,20 @@ resolve_lang(const char *req_lang, char *out, size_t out_sz)
 			fclose(fp);
 		}
 		snprintf(out, out_sz, "%s", def_lang);
+		return;
+	}
+	if (strcasecmp(req_lang, "auto") == 0) {
+		snprintf(out, out_sz, "auto");
+		return;
+	}
+	/* Normalize regional tags such as "pt-pt", "pt_PT", "en-gb" to 2-letter Whisper code */
+	if (strlen(req_lang) >= 2 && (req_lang[2] == '-' || req_lang[2] == '_')) {
+		char base[4] = {
+			(char)tolower((unsigned char)req_lang[0]),
+			(char)tolower((unsigned char)req_lang[1]),
+			'\0', '\0'
+		};
+		snprintf(out, out_sz, "%s", base);
 		return;
 	}
 	snprintf(out, out_sz, "%s", req_lang);
@@ -1332,7 +1345,7 @@ is_tts_currently_speaking(char *out_text, size_t out_sz)
 	if (out_text && out_sz > 0)
 		out_text[0] = '\0';
 	char path[256];
-	snprintf(path, sizeof(path), "/tmp/dwm-tts-active-%s.state", get_username());
+	snprintf(path, sizeof(path), "/tmp/jarvis-tts-active-%s.state", get_username());
 	FILE *fp = fopen(path, "r");
 	if (fp) {
 		char buf[1024] = {0};
@@ -1378,9 +1391,13 @@ jarvis_set_active(int active)
 {
 	const char *u = get_username();
 	char state_file[256], jpid_file[256], apid_file[256];
-	snprintf(state_file, sizeof(state_file), "/tmp/dwm-voice-%s.state", u);
-	snprintf(jpid_file, sizeof(jpid_file), "/tmp/dwm-jarvis-%s.pid", u);
-	snprintf(apid_file, sizeof(apid_file), "/tmp/dwm-acting-%s.pid", u);
+	char legacy_state[256], legacy_jpid[256], legacy_apid[256];
+	snprintf(state_file, sizeof(state_file), "/tmp/jarvis-voice-%s.state", u);
+	snprintf(jpid_file, sizeof(jpid_file), "/tmp/jarvis-%s.pid", u);
+	snprintf(apid_file, sizeof(apid_file), "/tmp/jarvis-acting-%s.pid", u);
+	snprintf(legacy_state, sizeof(legacy_state), "/tmp/dwm-voice-%s.state", u);
+	snprintf(legacy_jpid, sizeof(legacy_jpid), "/tmp/dwm-jarvis-%s.pid", u);
+	snprintf(legacy_apid, sizeof(legacy_apid), "/tmp/dwm-acting-%s.pid", u);
 	if (active) {
 		g_jarvis_active = 1;
 		FILE *fp = fopen(jpid_file, "w");
@@ -1397,6 +1414,9 @@ jarvis_set_active(int active)
 		unlink(jpid_file);
 		unlink(apid_file);
 		unlink(state_file);
+		unlink(legacy_jpid);
+		unlink(legacy_apid);
+		unlink(legacy_state);
 		notify_bar();
 	}
 }
@@ -2462,49 +2482,36 @@ read_jarvis_runtime_cfg(char *lang, size_t lang_sz,
                         int *out_followup_ms,
                         char *llm_mode, size_t mode_sz)
 {
-	const char *home = getenv("HOME");
-	if (!home || !*home)
-		home = "/home/quirinpa";
-
 	const char *ont_lang = jarvis_ontology_get_lang(get_daemon_ont());
-	snprintf(lang, lang_sz, "%s", (ont_lang && *ont_lang) ? ont_lang : "pt");
-	*out_followup_ms = 8000;
-	snprintf(llm_mode, mode_sz, "remote");
+	const char *def_lang = (ont_lang && *ont_lang) ? ont_lang : "pt";
 
-	char path[512], buf[128];
-	FILE *fp;
+	jarvis_rc_get("lang", def_lang, lang, lang_sz);
+	*out_followup_ms = jarvis_rc_get_int("followup_ms", 8000);
+	if (*out_followup_ms < 0 || *out_followup_ms > 3600000)
+		*out_followup_ms = 8000;
+	jarvis_rc_get("llm_mode", "auto", llm_mode, mode_sz);
+}
 
-	snprintf(path, sizeof(path), "%s/.config/dwm-voice/lang", home);
-	fp = fopen(path, "r");
-	if (fp) {
-		if (fgets(buf, sizeof(buf), fp)) {
-			trim_inplace(buf);
-			if (buf[0])
-				snprintf(lang, lang_sz, "%.*s", (int)(lang_sz - 1), buf);
-		}
-		fclose(fp);
+static void
+load_xy_mod_name(const char *home, const char *mod)
+{
+	if (!mod || !*mod)
+		return;
+	char clean[512];
+	if (mod[0] == '/' || mod[0] == '.') {
+		snprintf(clean, sizeof(clean), "%s", mod);
+	} else {
+		snprintf(clean, sizeof(clean), "%s/.local/lib/%s", home, mod);
 	}
-
-	snprintf(path, sizeof(path), "%s/.config/dwm-voice/followup_ms", home);
-	fp = fopen(path, "r");
-	if (fp) {
-		if (fgets(buf, sizeof(buf), fp)) {
-			int v = atoi(buf);
-			if (v >= 0 && v <= 3600000)
-				*out_followup_ms = v;
-		}
-		fclose(fp);
-	}
-
-	snprintf(path, sizeof(path), "%s/.config/dwm/llm-mode", home);
-	fp = fopen(path, "r");
-	if (fp) {
-		if (fgets(buf, sizeof(buf), fp)) {
-			trim_inplace(buf);
-			if (buf[0])
-				snprintf(llm_mode, mode_sz, "%.*s", (int)(mode_sz - 1), buf);
-		}
-		fclose(fp);
+	size_t l = strlen(clean);
+	if (l > 3 && strcmp(clean + l - 3, ".so") == 0)
+		clean[l - 3] = '\0';
+	if (xy_load(clean) != XY_OK && mod[0] != '/') {
+		snprintf(clean, sizeof(clean), "%s", mod);
+		l = strlen(clean);
+		if (l > 3 && strcmp(clean + l - 3, ".so") == 0)
+			clean[l - 3] = '\0';
+		xy_load(clean);
 	}
 }
 
@@ -2517,11 +2524,22 @@ init_jarvis_xylem_runtime(void)
 
 	xy_init();
 
-	char mod_path[512];
-	snprintf(mod_path, sizeof(mod_path), "%s/.local/lib/mod_dwm", home);
-	xy_load(mod_path);
-	snprintf(mod_path, sizeof(mod_path), "%s/.local/lib/mod_tts", home);
-	xy_load(mod_path);
+	static char wm_buf[64];
+	jarvis_rc_get("wm", "dwm", wm_buf, sizeof(wm_buf));
+
+	char mods_cfg[512];
+	if (jarvis_rc_get("mods", NULL, mods_cfg, sizeof(mods_cfg)) && mods_cfg[0]) {
+		char *save = NULL;
+		for (char *tok = strtok_r(mods_cfg, ":, ", &save); tok; tok = strtok_r(NULL, ":, ", &save)) {
+			if (*tok)
+				load_xy_mod_name(home, tok);
+		}
+	} else {
+		char wm_mod[128];
+		snprintf(wm_mod, sizeof(wm_mod), "mod_%s", wm_buf[0] ? wm_buf : "dwm");
+		load_xy_mod_name(home, wm_mod);
+		load_xy_mod_name(home, "mod_tts");
+	}
 
 	char cfg_path[512];
 	snprintf(cfg_path, sizeof(cfg_path), "%s/.config/jarvis/mods.load", home);
@@ -2531,39 +2549,42 @@ init_jarvis_xylem_runtime(void)
 		while (fgets(mline, sizeof(mline), mfp)) {
 			trim_inplace(mline);
 			if (mline[0] && mline[0] != '#')
-				xy_load(mline);
+				load_xy_mod_name(home, mline);
 		}
 		fclose(mfp);
 	}
 
 	const char *u = get_username();
 	char chime_wav[256], done_wav[256];
-	snprintf(chime_wav, sizeof(chime_wav), "/tmp/dwm-voice-chime-%s.wav", u);
-	snprintf(done_wav, sizeof(done_wav), "/tmp/dwm-voice-done-%s.wav", u);
+	snprintf(chime_wav, sizeof(chime_wav), "/tmp/jarvis-chime-%s.wav", u);
+	snprintf(done_wav, sizeof(done_wav), "/tmp/jarvis-done-%s.wav", u);
 	if (access(chime_wav, R_OK) != 0)
 		jarvis_voice_write_earcon_wav(chime_wav, 0);
 	if (access(done_wav, R_OK) != 0)
 		jarvis_voice_write_earcon_wav(done_wav, 1);
 
-	static char ont_path[512], int_path[512], ctx_path[512], sess_path[512], mem_path[512], emb_path[512];
+	static char ont_path[512], int_path[512], ctx_path[512], sess_path[512], mem_path[512], emb_path[512], auren_url[256];
 	char mode[64], lang[32];
 	int fms = 0;
 	read_jarvis_runtime_cfg(lang, sizeof(lang), &fms, mode, sizeof(mode));
 
-	snprintf(ont_path, sizeof(ont_path), "%s/.config/jarvis/ontology.json", home);
-	if (access(ont_path, R_OK) != 0)
-		snprintf(ont_path, sizeof(ont_path), "%s/.config/dwm/ontology.json", home);
-	snprintf(int_path, sizeof(int_path), "%s/.config/jarvis/few_shots.json", home);
-	if (access(int_path, R_OK) != 0)
-		snprintf(int_path, sizeof(int_path), "%s/.config/dwm/intents.conf", home);
+	char def_ont[512], def_int[512], def_mem[512], def_emb[512];
+	snprintf(def_ont, sizeof(def_ont), "%s/.config/jarvis/ontology.json", home);
+	snprintf(def_int, sizeof(def_int), "%s/.config/jarvis/few_shots.json", home);
+	snprintf(def_mem, sizeof(def_mem), "%s/.config/jarvis/memories.json", home);
+	snprintf(def_emb, sizeof(def_emb), "%s/.cache/jarvis/embeddings.json", home);
+
+	jarvis_rc_get("ontology_path", def_ont, ont_path, sizeof(ont_path));
+	jarvis_rc_get("few_shot_path", def_int, int_path, sizeof(int_path));
 	snprintf(ctx_path, sizeof(ctx_path), "/tmp/jarvis-%s.context.json", u);
 	snprintf(sess_path, sizeof(sess_path), "/tmp/jarvis-%s.session.json", u);
-	snprintf(mem_path, sizeof(mem_path), "%s/.config/jarvis/memories.json", home);
-	snprintf(emb_path, sizeof(emb_path), "%s/.cache/jarvis/embeddings.json", home);
+	jarvis_rc_get("memory_path", def_mem, mem_path, sizeof(mem_path));
+	jarvis_rc_get("embed_cache_path", def_emb, emb_path, sizeof(emb_path));
+	jarvis_rc_get("auren_url", "http://127.0.0.1:4242", auren_url, sizeof(auren_url));
 
 	jarvis_config_t jcfg;
 	jarvis_config_init(&jcfg);
-	jcfg.wm = "dwm";
+	jcfg.wm = wm_buf[0] ? wm_buf : "dwm";
 	jcfg.ontology_path = ont_path;
 	if (access(int_path, R_OK) == 0)
 		jcfg.few_shot_path = int_path;
@@ -2571,7 +2592,7 @@ init_jarvis_xylem_runtime(void)
 	jcfg.session_path = sess_path;
 	jcfg.memory_path = mem_path;
 	jcfg.embed_cache_path = emb_path;
-	jcfg.auren_url = "http://127.0.0.1:4242";
+	jcfg.auren_url = auren_url;
 	jcfg.llm_model = "fast";
 	if (strcmp(mode, "off") == 0 || strcmp(mode, "none") == 0)
 		jcfg.infer_mode = JARVIS_INFER_NONE;
@@ -2604,15 +2625,16 @@ run_inprocess_jarvis_turn(int srv, struct whisper_context *ctx_wake, int n_threa
 {
 	const char *u = get_username();
 	char state_file[256], chime_wav[256], done_wav[256], last_txt[256], acting_pid[256];
-	snprintf(state_file, sizeof(state_file), "/tmp/dwm-voice-%s.state", u);
-	snprintf(chime_wav, sizeof(chime_wav), "/tmp/dwm-voice-chime-%s.wav", u);
-	snprintf(done_wav, sizeof(done_wav), "/tmp/dwm-voice-done-%s.wav", u);
-	snprintf(last_txt, sizeof(last_txt), "/tmp/dwm-voice-%s.last.txt", u);
-	snprintf(acting_pid, sizeof(acting_pid), "/tmp/dwm-acting-%s.pid", u);
+	snprintf(state_file, sizeof(state_file), "/tmp/jarvis-voice-%s.state", u);
+	snprintf(chime_wav, sizeof(chime_wav), "/tmp/jarvis-chime-%s.wav", u);
+	snprintf(done_wav, sizeof(done_wav), "/tmp/jarvis-done-%s.wav", u);
+	snprintf(last_txt, sizeof(last_txt), "/tmp/jarvis-voice-%s.last.txt", u);
+	snprintf(acting_pid, sizeof(acting_pid), "/tmp/jarvis-acting-%s.pid", u);
 
-	char lang[32], llm_mode[64];
+	char lang[32], llm_mode[64], wm_surface[64];
 	int fcfg = 0;
 	read_jarvis_runtime_cfg(lang, sizeof(lang), &fcfg, llm_mode, sizeof(llm_mode));
+	jarvis_rc_get("wm", "dwm", wm_surface, sizeof(wm_surface));
 
 	static char s_pending_frag[512] = {0};
 	static long s_pending_ms = 0;
@@ -2624,13 +2646,15 @@ run_inprocess_jarvis_turn(int srv, struct whisper_context *ctx_wake, int n_threa
 
 	write_state_file(state_file, (next_followup > 0) ? "jarvis-cmd" : "jarvis", NULL, NULL);
 
+	char wake_buf[64];
 	const char *ont_wake = jarvis_ontology_get_wake_word(get_daemon_ont());
 	if (!ont_wake || !*ont_wake)
-		ont_wake = "jarvis";
+		ont_wake = "jarbas";
+	jarvis_rc_get("wake_word", ont_wake, wake_buf, sizeof(wake_buf));
 
 	char cmd_text[4096] = {0};
 	int rc = handle_jarvis_wait(srv, -1, ctx_wake, n_threads,
-	                            lang, -35.0, 460, ont_wake,
+	                            lang, -35.0, 460, wake_buf,
 	                            state_file, chime_wav, next_followup,
 	                            cmd_text, sizeof(cmd_text));
 	int was_followup = next_followup;
@@ -2654,11 +2678,13 @@ run_inprocess_jarvis_turn(int srv, struct whisper_context *ctx_wake, int n_threa
 
 		if (jarvis_voice_is_lockdown_phrase(cmd_text)) {
 			jarvis_set_active(0);
-			jarvis_xy_notify(jarvis_ontology_get_ui_string(get_daemon_ont(), "lockdown_title", "  Jarvis Lockdown"),
-			                 jarvis_ontology_get_ui_string(get_daemon_ont(), "lockdown_body", "Always-on listening disabled. Locking screen."), 0);
-			if (fork() == 0) {
+			jarvis_xy_notify(jarvis_ontology_get_ui_string(get_daemon_ont(), "lockdown_title", "  Jarbas Bloqueio"),
+			                 jarvis_ontology_get_ui_string(get_daemon_ont(), "lockdown_body", "Escuta contínua desativada. A bloquear o ecrã."), 0);
+			char lock_cmd[256];
+			jarvis_rc_get("lock_cmd", "slock", lock_cmd, sizeof(lock_cmd));
+			if (lock_cmd[0] && fork() == 0) {
 				setsid();
-				execlp("slock", "slock", (char *)NULL);
+				execl("/bin/sh", "sh", "-c", lock_cmd, (char *)NULL);
 				_exit(0);
 			}
 			return;
@@ -2684,11 +2710,11 @@ run_inprocess_jarvis_turn(int srv, struct whisper_context *ctx_wake, int n_threa
 			}
 			jarvis_process_result_t res;
 			memset(&res, 0, sizeof(res));
-			bool ok = jarvis_process(g_jarvis_eng, eff_cmd, "dwm", &res);
+			bool ok = jarvis_process(g_jarvis_eng, eff_cmd, wm_surface, &res);
 			if (!ok && strcmp(eff_cmd, cmd_text) != 0) {
 				memset(&res, 0, sizeof(res));
 				snprintf(eff_cmd, sizeof(eff_cmd), "%s", cmd_text);
-				ok = jarvis_process(g_jarvis_eng, eff_cmd, "dwm", &res);
+				ok = jarvis_process(g_jarvis_eng, eff_cmd, wm_surface, &res);
 			}
 			if (ok) {
 				s_pending_frag[0] = '\0';
@@ -3029,14 +3055,64 @@ serve_client_request(int srv, int cli, char *buf,
 	close(cli);
 }
 
+static void
+resolve_default_whisper_models(char *main_out, size_t main_sz, char *wake_out, size_t wake_sz)
+{
+	const char *home = getenv("HOME");
+	if (!home || !*home)
+		home = "/home/quirinpa";
+
+	if (!jarvis_rc_get("whisper_model", NULL, main_out, main_sz) || !main_out[0] || access(main_out, R_OK) != 0) {
+		static const char *const main_cands[] = {
+			"ggml-base-q8_0.bin",
+			"ggml-small-q8_0.bin",
+			"ggml-small-q5_1.bin",
+			"ggml-base-q5_1.bin",
+			"ggml-base.bin",
+			"ggml-base.en-q8_0.bin",
+			"ggml-small.en-q5_1.bin",
+			NULL
+		};
+		main_out[0] = '\0';
+		for (size_t i = 0; main_cands[i]; i++) {
+			char cand[512];
+			snprintf(cand, sizeof(cand), "%s/.local/share/whisper/%s", home, main_cands[i]);
+			if (access(cand, R_OK) == 0) {
+				snprintf(main_out, main_sz, "%s", cand);
+				break;
+			}
+		}
+	}
+
+	if (!jarvis_rc_get("whisper_wake_model", NULL, wake_out, wake_sz) || !wake_out[0] || access(wake_out, R_OK) != 0) {
+		static const char *const wake_cands[] = {
+			"ggml-base-q8_0.bin",
+			"ggml-base-q5_1.bin",
+			"ggml-base.bin",
+			NULL
+		};
+		wake_out[0] = '\0';
+		for (size_t i = 0; wake_cands[i]; i++) {
+			char cand[512];
+			snprintf(cand, sizeof(cand), "%s/.local/share/whisper/%s", home, wake_cands[i]);
+			if (access(cand, R_OK) == 0) {
+				snprintf(wake_out, wake_sz, "%s", cand);
+				break;
+			}
+		}
+		if (!wake_out[0])
+			snprintf(wake_out, wake_sz, "%s", main_out);
+	}
+}
+
 int
 main(int argc, char *argv[])
 {
 	const char *main_model_path = NULL;
 	const char *wake_model_path = NULL;
 	const char *client_req      = NULL;
-	int port = 8179;
-	int n_threads = 4;
+	int port = jarvis_rc_get_int("port", 8179);
+	int n_threads = jarvis_rc_get_int("threads", 6);
 	int start_jarvis = 0;
 	int opt;
 
@@ -3051,7 +3127,7 @@ main(int argc, char *argv[])
 		default:
 			fprintf(stderr,
 				"Usage:\n"
-				"  Daemon: %s -m <main-model.bin> [-w <wake-model.bin>] [-p port] [-t threads] [-j]\n"
+				"  Daemon: %s [-m <main-model.bin>] [-w <wake-model.bin>] [-p port] [-t threads] [-j]\n"
 				"  Client: %s [-p port] -c \"<COMMAND|...>\"\n",
 				argv[0], argv[0]);
 			return 1;
@@ -3061,15 +3137,22 @@ main(int argc, char *argv[])
 	if (client_req)
 		return run_client_mode(port, client_req);
 
-	if (!main_model_path) {
-		fprintf(stderr, "dwm-whisperd: -m <main-model.bin> is required\n");
+	static char s_main_model[512], s_wake_model[512];
+	resolve_default_whisper_models(s_main_model, sizeof(s_main_model), s_wake_model, sizeof(s_wake_model));
+	if (!main_model_path || !*main_model_path)
+		main_model_path = s_main_model;
+	if (!wake_model_path || !*wake_model_path)
+		wake_model_path = s_wake_model;
+
+	if (!main_model_path || !*main_model_path) {
+		fprintf(stderr, "jarvisd: no whisper model found in ~/.jarvisrc or ~/.local/share/whisper/\n");
 		return 1;
 	}
 
-	/* Kernel-level singleton lock so duplicate dwm-whisperd daemons can never start */
+	/* Kernel-level singleton lock so duplicate jarvisd daemons can never start */
 	char lock_path[256], pid_path[256];
-	snprintf(lock_path, sizeof(lock_path), "/tmp/dwm-whisperd-%s.lock", get_username());
-	snprintf(pid_path, sizeof(pid_path), "/tmp/dwm-whisper-srv-%s.pid", get_username());
+	snprintf(lock_path, sizeof(lock_path), "/tmp/jarvisd-%s.lock", get_username());
+	snprintf(pid_path, sizeof(pid_path), "/tmp/jarvisd-%s.pid", get_username());
 	int lock_fd = open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
 	struct flock fl;
 	memset(&fl, 0, sizeof(fl));
@@ -3109,7 +3192,7 @@ main(int argc, char *argv[])
 
 	struct whisper_context *ctx_main = whisper_init_from_file_with_params(main_model_path, cparams);
 	if (!ctx_main) {
-		fprintf(stderr, "dwm-whisperd: failed to load main model %s\n", main_model_path);
+		fprintf(stderr, "jarvisd: failed to load main model %s\n", main_model_path);
 		return 1;
 	}
 

@@ -68,10 +68,10 @@ static void test_01_standard_structured_commands(jarvis_engine_t *eng)
 	assert_cmd_op(eng, "launch calculator", "open_application", "gnome-calculator");
 	assert_cmd_op(eng, "open discord", "open_application", "discord");
 	assert_cmd_op(eng, "open volume control", "open_application", "pavucontrol");
-	assert_cmd_op(eng, "show me my agenda for today", "open_application", "dwm-cal popup");
-	assert_cmd_op(eng, "open system monitor", "open_application", "dwm-ctl sys-monitor");
-	assert_cmd_op(eng, "open wifi settings", "open_application", "dwm-net wifi");
-	assert_cmd_op(eng, "open power menu", "open_application", "dwm-ctl power-menu");
+	assert_cmd_op(eng, "show me my agenda for today", "open_application", "calendar");
+	assert_cmd_op(eng, "open system monitor", "open_application", "sys_monitor");
+	assert_cmd_op(eng, "open wifi settings", "open_application", "wifi");
+	assert_cmd_op(eng, "open power menu", "open_application", "power_menu");
 
 	/* Shell tools & configs */
 	assert_cmd_op(eng, "run htop", "spawn_shell_command", "htop");

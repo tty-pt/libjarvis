@@ -1760,17 +1760,9 @@ bool jarvis_compile_ir_to_dsl(
 			APPLY_OTHER_AND_NEW_TERM();
 			return true;
 		}
-		const char *app_cmd = NULL;
-		if (strcmp(k, "sys_monitor") == 0) app_cmd = "dwm-ctl sys-monitor";
-		else if (strcmp(k, "calendar") == 0) app_cmd = "dwm-cal popup";
-		else if (strcmp(k, "control_center") == 0) app_cmd = "dwm-ctl";
-		else if (strcmp(k, "wifi") == 0) app_cmd = "dwm-net wifi";
-		else if (strcmp(k, "battery") == 0) app_cmd = "dwm-ctl battery-info";
-		else if (strcmp(k, "power_menu") == 0) app_cmd = "dwm-ctl power-menu";
-		else if (strcmp(k, "shortcuts_help") == 0) app_cmd = "dwm-help show";
-		if (app_cmd) {
+		if (k[0]) {
 			snprintf(out_dsl->op, sizeof(out_dsl->op), "open_application");
-			snprintf(out_dsl->target.identifier, sizeof(out_dsl->target.identifier), "%s", app_cmd);
+			snprintf(out_dsl->target.identifier, sizeof(out_dsl->target.identifier), "%s", k);
 			return true;
 		}
 		return false;

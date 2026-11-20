@@ -575,16 +575,172 @@ size_t jarvis_split_clauses(
 }
 
 /* ---------------------------------------------------------------------------
- * Engine Lifecycle, Persistence & Context
+ * Engine Lifecycle, Persistence, ~/.jarvisrc & Context
  * ------------------------------------------------------------------------- */
+
+static void resolve_jarvisrc_path(char *out, size_t out_sz, bool for_write)
+{
+	const char *env_rc = getenv("JARVISRC");
+	if (env_rc && *env_rc) {
+		snprintf(out, out_sz, "%s", env_rc);
+		return;
+	}
+	const char *home = getenv("HOME");
+	if (!home || !*home) home = "/tmp";
+	snprintf(out, out_sz, "%s/.jarvisrc", home);
+#ifndef __wasm__
+	if (!for_write && access(out, R_OK) != 0) {
+		char alt[512];
+		snprintf(alt, sizeof(alt), "%s/.config/jarvis/jarvisrc", home);
+		if (access(alt, R_OK) == 0) {
+			snprintf(out, out_sz, "%s", alt);
+		}
+	}
+#else
+	(void)for_write;
+#endif
+}
+
+static void expand_tilde_path(const char *val, char *out, size_t out_sz)
+{
+	if (!val || !out || out_sz == 0) return;
+	if (val[0] == '~' && (val[1] == '/' || val[1] == '\0')) {
+		const char *home = getenv("HOME");
+		if (home && *home) {
+			snprintf(out, out_sz, "%s%s", home, val + 1);
+			return;
+		}
+	}
+	snprintf(out, out_sz, "%s", val);
+}
+
+bool jarvis_rc_get(const char *key, const char *fallback, char *out, size_t out_sz)
+{
+	if (!out || out_sz == 0) return false;
+	if (fallback) {
+		expand_tilde_path(fallback, out, out_sz);
+	} else {
+		out[0] = '\0';
+	}
+	if (!key || !*key) return false;
+#ifndef __wasm__
+	char rc_path[512];
+	resolve_jarvisrc_path(rc_path, sizeof(rc_path), false);
+	FILE *fp = fopen(rc_path, "r");
+	if (!fp) return false;
+
+	bool found = false;
+	char line[1024];
+	while (fgets(line, sizeof(line), fp)) {
+		char *p = line;
+		while (*p && isspace((unsigned char)*p)) p++;
+		if (!*p || *p == '#' || *p == ';') continue;
+		char *eq = strchr(p, '=');
+		if (!eq) continue;
+		*eq = '\0';
+		char *k = p;
+		size_t kl = strlen(k);
+		while (kl > 0 && isspace((unsigned char)k[kl - 1])) k[--kl] = '\0';
+		if (strcasecmp(k, key) != 0) continue;
+
+		char *v = eq + 1;
+		while (*v && isspace((unsigned char)*v)) v++;
+		size_t vl = strlen(v);
+		while (vl > 0 && (isspace((unsigned char)v[vl - 1]) || v[vl - 1] == '\r' || v[vl - 1] == '\n')) {
+			v[--vl] = '\0';
+		}
+		if (vl >= 2 && ((v[0] == '"' && v[vl - 1] == '"') || (v[0] == '\'' && v[vl - 1] == '\''))) {
+			v[vl - 1] = '\0';
+			v++;
+		}
+		expand_tilde_path(v, out, out_sz);
+		found = true;
+	}
+	fclose(fp);
+	return found;
+#else
+	return false;
+#endif
+}
+
+int jarvis_rc_get_int(const char *key, int fallback)
+{
+	char buf[64];
+	if (!jarvis_rc_get(key, NULL, buf, sizeof(buf)) || !buf[0]) {
+		return fallback;
+	}
+	if (strcasecmp(buf, "true") == 0 || strcasecmp(buf, "yes") == 0 || strcasecmp(buf, "on") == 0) {
+		return 1;
+	}
+	if (strcasecmp(buf, "false") == 0 || strcasecmp(buf, "no") == 0 || strcasecmp(buf, "off") == 0) {
+		return 0;
+	}
+	return atoi(buf);
+}
+
+bool jarvis_rc_set(const char *key, const char *value)
+{
+	if (!key || !*key || !value) return false;
+#ifndef __wasm__
+	char rc_path[512];
+	resolve_jarvisrc_path(rc_path, sizeof(rc_path), true);
+
+	char lines[128][1024];
+	size_t n_lines = 0;
+	bool replaced = false;
+
+	FILE *fp = fopen(rc_path, "r");
+	if (fp) {
+		while (n_lines < 127 && fgets(lines[n_lines], sizeof(lines[0]), fp)) {
+			char copy[1024];
+			snprintf(copy, sizeof(copy), "%s", lines[n_lines]);
+			char *p = copy;
+			while (*p && isspace((unsigned char)*p)) p++;
+			if (*p && *p != '#' && *p != ';') {
+				char *eq = strchr(p, '=');
+				if (eq) {
+					*eq = '\0';
+					size_t kl = strlen(p);
+					while (kl > 0 && isspace((unsigned char)p[kl - 1])) p[--kl] = '\0';
+					if (strcasecmp(p, key) == 0) {
+						snprintf(lines[n_lines], sizeof(lines[0]), "%s = %s\n", key, value);
+						replaced = true;
+					}
+				}
+			}
+			n_lines++;
+		}
+		fclose(fp);
+	}
+	if (!replaced && n_lines < 128) {
+		snprintf(lines[n_lines++], sizeof(lines[0]), "%s = %s\n", key, value);
+	}
+
+	char tmp_path[540];
+	snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", rc_path);
+	FILE *out = fopen(tmp_path, "w");
+	if (!out) return false;
+	for (size_t i = 0; i < n_lines; i++) {
+		fputs(lines[i], out);
+	}
+	fclose(out);
+	return rename(tmp_path, rc_path) == 0;
+#else
+	return false;
+#endif
+}
 
 void jarvis_config_init(jarvis_config_t *cfg)
 {
 	if (!cfg) return;
 	memset(cfg, 0, sizeof(*cfg));
-	cfg->wm         = "dwm";
-	cfg->auren_url  = "http://127.0.0.1:4242";
-	cfg->llm_model  = "kilo-auto/free";
+	static char s_wm[64], s_auren[256], s_llm[64];
+	jarvis_rc_get("wm", "dwm", s_wm, sizeof(s_wm));
+	jarvis_rc_get("auren_url", "http://127.0.0.1:4242", s_auren, sizeof(s_auren));
+	jarvis_rc_get("llm_model", "kilo-auto/free", s_llm, sizeof(s_llm));
+	cfg->wm         = s_wm;
+	cfg->auren_url  = s_auren;
+	cfg->llm_model  = s_llm;
 	cfg->infer_mode = JARVIS_INFER_AUTO;
 	cfg->dry_run    = false;
 }
@@ -1505,9 +1661,9 @@ static void summarize_world_for_prompt(
 #ifndef __wasm__
 	{
 		static const char *const cfg_cands[] = {
-			"~/.vimrc", "~/.config/nvim/init.lua", "~/.config/nvim/init.vim",
+			"~/.jarvisrc", "~/.vimrc", "~/.config/nvim/init.lua", "~/.config/nvim/init.vim",
 			"~/.bashrc", "~/.zshrc", "~/.tmux.conf", "~/.Xresources",
-			"~/.local/src/dwm/config.h", "~/.config/jarvis/ontology.json", NULL
+			"~/.config/jarvis/ontology.json", NULL
 		};
 		const char *home = getenv("HOME");
 		if (home && *home) {
@@ -1962,7 +2118,7 @@ bool jarvis_auren_run_react_agent(
 	snprintf(
 		sys_prompt, sizeof(sys_prompt),
 		"You are Jarvis, Tony Stark's intelligent Linux desktop assistant and systems engineer. "
-		"You control a live Linux desktop (dwm, terminals, tmux, Firefox, audio, shell, and coding tools). "
+		"You control a live Linux desktop (window manager, terminals, tmux, browser, audio, shell, and coding tools). "
 		"You operate in a ReAct Observe-Reason-Act loop: you can either call an OBSERVATION tool first to inspect "
 		"live terminal panes, browser accessibility page content, clipboard, system health, or command output, OR immediately emit one or more ACTION DSL objects (or a JSON array of DSL objects) to fulfill the user's intent. "
 		"When using `answer_question`, keep your spoken reply crisp, natural, and concise (1 to 2 short sentences, under 180 characters) in %s (or the language of the user's request). "
@@ -2004,7 +2160,7 @@ bool jarvis_auren_run_react_agent(
 		"- record_start: {\"op\": \"record_start\", \"target\": {}, \"args\": {\"mode\": \"screen|mic|both\"}}\n"
 		"- record_stop: {\"op\": \"record_stop\", \"target\": {}}\n"
 		"- answer_question: {\"op\": \"answer_question\", \"target\": {}, \"args\": {\"answer\": \"<concise Jarvis reply>\"}}\n"
-		"- wm_help: {\"op\": \"wm_help\", \"target\": {\"query\": \"<dwm_or_shortcut_question>\"}}\n"
+		"- wm_help: {\"op\": \"wm_help\", \"target\": {\"query\": \"<wm_or_shortcut_question>\"}}\n"
 		"- ask_agent: {\"op\": \"ask_agent\", \"target\": {\"query\": \"<coding_agent_task>\"}}\n\n"
 		"DECISION GUIDELINES:\n"
 		"1. If the user asks about an error or text on a terminal screen and `Live Terminal / Tmux Panes` does not already contain the answer, call `inspect_terminal` first; once you see the output, answer with `answer_question` or run the fix.\n"

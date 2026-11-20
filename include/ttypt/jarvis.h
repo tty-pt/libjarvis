@@ -276,6 +276,24 @@ typedef struct {
 void jarvis_config_init(jarvis_config_t *cfg);
 
 /**
+ * @brief Read a string setting from `~/.jarvisrc` (or `~/.config/jarvis/jarvisrc`).
+ *
+ * Expands leading `~/` to `$HOME/`. If @p key is not found, writes @p fallback
+ * into @p out and returns false.
+ */
+bool jarvis_rc_get(const char *key, const char *fallback, char *out, size_t out_sz);
+
+/**
+ * @brief Read an integer setting from `~/.jarvisrc`.
+ */
+int jarvis_rc_get_int(const char *key, int fallback);
+
+/**
+ * @brief Update or insert a `key = value` pair in `~/.jarvisrc`.
+ */
+bool jarvis_rc_set(const char *key, const char *value);
+
+/**
  * @brief Create a Jarvis orchestrator engine instance.
  */
 jarvis_engine_t *jarvis_engine_create(const jarvis_config_t *cfg);
