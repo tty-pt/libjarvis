@@ -507,7 +507,6 @@ static const char *const JARVIS_ABSTRACT_CAPABILITIES_JSON =
 	"{\"id\":\"window.control\",\"verbs\":[\"WINDOW_CONTROL\",\"CLOSE_QUIT\",\"TOGGLE_SET\"],\"forbid_entities\":[\"media.object\",\"shell.program\",\"git.object\",\"fs.collection\",\"fs.metric\",\"fs.file_type\",\"fs.location\",\"edit.unit\",\"ui.workspace\"],\"forbid_residual\":true},"
 	"{\"id\":\"ui.scroll\",\"verbs\":[\"SCROLL_NAV\",\"SCROLL_PAN\"],\"required_entities\":[\"ui.scroll_direction\"],\"forbid_entities\":[\"media.object\",\"shell.program\",\"git.object\",\"fs.collection\",\"fs.metric\",\"fs.file_type\",\"fs.location\"],\"forbid_residual\":true},"
 	"{\"id\":\"input.dictate\",\"verbs\":[\"INPUT_TYPE\",\"TYPE_WRITE\",\"TYPE_SUBMIT\"],\"forbid_entities\":[\"media.object\",\"shell.program\",\"git.object\",\"fs.collection\",\"fs.metric\",\"fs.file_type\",\"fs.location\",\"ui.container_kind\",\"ui.relative_window\",\"record.object\"],\"forbid_residual\":false},"
-	"{\"id\":\"agent.ask\",\"verbs\":[\"AGENT_ASK\",\"ASK_DELEGATE\"],\"forbid_residual\":false},"
 	"{\"id\":\"app.launch\",\"verbs\":[\"OPEN_LAUNCH\",\"FOCUS_NAV\"],\"required_entities\":[\"gui.application\"],\"forbid_entities\":[\"media.object\",\"shell.program\",\"git.object\",\"fs.collection\",\"fs.metric\",\"fs.file_type\",\"fs.location\",\"ui.container_kind\",\"ui.relative_window\",\"record.object\",\"edit.unit\",\"web.shortcut\"],\"forbid_residual\":true}"
 	"]";
 
@@ -635,6 +634,7 @@ jarvis_ontology_t *jarvis_ontology_create_from_json(const char *json_str)
 					char c[JARVIS_ID_LEN];
 					jarvis_clean_phrase(dst->phrases[k], c, sizeof(c));
 					snprintf(dst->phrases[k], sizeof(dst->phrases[k]), "%s", c);
+					add_vocab_words_from_phrase(ont, c);
 				}
 				load_short_str_list(jjson_obj_get(it, "require_any"), dst->require_any, JARVIS_MAX_IDIOM_REQ_ANY, &dst->require_any_count);
 				for (size_t k = 0; k < dst->require_any_count; k++) {
@@ -1712,8 +1712,7 @@ static bool is_open_arg_verb_token(const jarvis_ontology_t *ont, const char *w_c
 		    strcmp(c, "TYPE_WRITE") == 0 ||
 		    strcmp(c, "TYPE_SUBMIT") == 0 ||
 		    strcmp(c, "SEARCH_WEB") == 0 ||
-		    strcmp(c, "PLAY_STREAM") == 0 ||
-		    strcmp(c, "AGENT_ASK") == 0) {
+		    strcmp(c, "PLAY_STREAM") == 0) {
 			return true;
 		}
 	}

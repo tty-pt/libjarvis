@@ -13,3 +13,5 @@ objects-set.mk
 *.o
 *.d
 mods/*/*.so
+submodules/whisper.cpp
+/third_party

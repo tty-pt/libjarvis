@@ -18,9 +18,29 @@ WASM_EXTRA_CFLAGS := -Iinclude -I../libmm/include -I../libxylem/include -I../lib
 include ../mk/include.mk
 
 WM_MODS := mods/sway/mod_sway.so mods/hyprland/mod_hyprland.so mods/tts/mod_tts.so
-WHISPER_LIB := $(HOME)/.local/lib/libwhisper.so.1
-GGML_LIB := $(HOME)/.local/lib/libggml.so.0
-JARVISD_BIN := $(if $(wildcard $(WHISPER_LIB)),bin/jarvisd,)
+whispercpp := submodules/whisper.cpp/build
+WHISPER_A := $(whispercpp)/src/libwhisper.a
+JARVISD_BIN := bin/jarvisd
+
+VULKAN_SDK := third_party/1.4.328.1
+VULKAN_SDK_URL := https://sdk.lunarg.com/sdk/download/1.4.328.1/linux/vulkansdk-linux-x86_64-1.4.328.1.tar.xz
+
+$(VULKAN_SDK)/x86_64/share/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake:
+	mkdir -p third_party
+	(curl -fsSL "$(VULKAN_SDK_URL)" -o third_party/vulkan-sdk.tar.xz || wget -qO third_party/vulkan-sdk.tar.xz "$(VULKAN_SDK_URL)")
+	tar -xf third_party/vulkan-sdk.tar.xz -C third_party
+
+$(whispercpp)/Makefile: $(VULKAN_SDK)/x86_64/share/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake
+	@echo "[INFO] Vulkan SDK extracted at $(VULKAN_SDK)"
+	@mkdir -p $(whispercpp)
+	cd $(whispercpp) && cmake .. \
+		-DCMAKE_PREFIX_PATH=$(CURDIR)/$(VULKAN_SDK)/x86_64 \
+		-DGGML_VULKAN=ON \
+		-DBUILD_SHARED_LIBS=OFF \
+		-DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+		-DWHISPER_BUILD_EXAMPLES=OFF \
+		-DWHISPER_BUILD_TESTS=OFF \
+		-DWHISPER_BUILD_SERVER=OFF
 
 all: $(WM_MODS) $(JARVISD_BIN)
 
@@ -33,9 +53,29 @@ mods/hyprland/mod_hyprland.so: mods/hyprland/mod_hyprland.c include/ttypt/jarvis
 mods/tts/mod_tts.so: mods/tts/mod_tts.c include/ttypt/jarvis-types.h
 	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/tts/mod_tts.c $(LDFLAGS) -lxylem -ldl -lpthread -lm
 
-bin/jarvisd: src/jarvisd.c src/whisper.h lib/libjarvis.so
+$(whispercpp)/Makefile:
+	@mkdir -p $(whispercpp)
+	cd $(whispercpp) && cmake .. \
+		-DCMAKE_PREFIX_PATH=/home/quirinpa/site/external/axil-auren/third_party/1.4.328.1/x86_64 \
+		-DGGML_VULKAN=ON \
+		-DBUILD_SHARED_LIBS=OFF \
+		-DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+		-DWHISPER_BUILD_EXAMPLES=OFF \
+		-DWHISPER_BUILD_TESTS=OFF \
+		-DWHISPER_BUILD_SERVER=OFF
+
+$(WHISPER_A): $(whispercpp)/Makefile
+	$(MAKE) -C $(whispercpp) -j4 whisper
+
+bin/jarvisd: src/jarvisd.c $(WHISPER_A) lib/libjarvis.so
 	@mkdir -p bin
-	$(CC) -Iinclude -Isrc -I$(HOME)/.local/include $(CFLAGS) -o $@ src/jarvisd.c $(WHISPER_LIB) $(GGML_LIB) -Llib -ljarvis $(LDFLAGS) -lmm -lxylem -lstele -lcorm -lpthread -ldl -lm $(LDFLAGS-libjarvis-Linux)
+	$(CC) -Iinclude -Isrc -I$(whispercpp)/../include -I$(whispercpp)/../ggml/include $(CFLAGS) -o $@ src/jarvisd.c \
+		$(WHISPER_A) \
+		$(whispercpp)/ggml/src/libggml.a \
+		$(whispercpp)/ggml/src/ggml-vulkan/libggml-vulkan.a \
+		$(whispercpp)/ggml/src/libggml-cpu.a \
+		$(whispercpp)/ggml/src/libggml-base.a \
+		-Llib -ljarvis $(LDFLAGS) -lmm -lxylem -lstele -lcorm -lvulkan -lstdc++ -lgomp -lpthread -ldl -lm $(LDFLAGS-libjarvis-Linux)
 
 test: all
 	$(MAKE) -C tests test

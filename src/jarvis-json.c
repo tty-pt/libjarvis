@@ -358,7 +358,6 @@ static const struct {
 	{"answer", "answer_question"},
 	{"reply", "answer_question"},
 	{"help", "wm_help"},
-	{"pi_ask", "ask_agent"},
 	{"read_terminal", "inspect_terminal"},
 	{"capture_terminal", "inspect_terminal"},
 	{"read_tmux", "inspect_terminal"},
@@ -392,6 +391,9 @@ static const struct {
 	{"stop_talking", "tts_interrupt"},
 	{"be_quiet", "tts_interrupt"},
 	{"silence_tts", "tts_interrupt"},
+	{"conversation", "conversation_control"},
+	{"conv_control", "conversation_control"},
+	{"end_conversation", "conversation_control"},
 	{NULL, NULL}
 };
 
@@ -470,6 +472,7 @@ bool jarvis_normalize_dsl_val(const jjson_val_t *raw, jarvis_dsl_t *out_dsl)
 	out_dsl->args.speak = jjson_obj_get_bool(a_obj, "speak", jjson_obj_get_bool(raw, "speak", false));
 	out_dsl->args.background = jjson_obj_get_bool(a_obj, "background", jjson_obj_get_bool(raw, "background", false));
 	out_dsl->args.streamed_tts = jjson_obj_get_bool(a_obj, "streamed_tts", false);
+	out_dsl->args.expect_reply = jjson_obj_get_bool(a_obj, "expect_reply", jjson_obj_get_bool(raw, "expect_reply", false));
 
 	/* Cross-heal fields placed in wrong slots by LLM */
 	if (strcmp(out_dsl->op, "spawn_shell_command") == 0 || strcmp(out_dsl->op, "run_background_command") == 0) {
@@ -509,7 +512,7 @@ bool jarvis_normalize_dsl_val(const jjson_val_t *raw, jarvis_dsl_t *out_dsl)
 			else if (out_dsl->target.query[0]) copy_str(out_dsl->target.url, sizeof(out_dsl->target.url), out_dsl->target.query);
 		}
 	} else if (strcmp(out_dsl->op, "search_web") == 0 || strcmp(out_dsl->op, "media_play") == 0 ||
-	           strcmp(out_dsl->op, "wm_help") == 0 || strcmp(out_dsl->op, "ask_agent") == 0) {
+	           strcmp(out_dsl->op, "wm_help") == 0) {
 		if (!out_dsl->target.query[0]) {
 			if (out_dsl->args.text[0]) copy_str(out_dsl->target.query, sizeof(out_dsl->target.query), out_dsl->args.text);
 			else if (out_dsl->target.identifier[0]) copy_str(out_dsl->target.query, sizeof(out_dsl->target.query), out_dsl->target.identifier);
@@ -666,6 +669,10 @@ size_t jarvis_dsl_to_json(const jarvis_dsl_t *dsl, char *out_json, size_t out_sz
 	}
 	if (dsl->args.background) {
 		n += snprintf(out_json + n, (size_t)n < out_sz ? out_sz - (size_t)n : 0, "%s\"background\":true", first_a ? "" : ",");
+		first_a = false;
+	}
+	if (dsl->args.expect_reply) {
+		n += snprintf(out_json + n, (size_t)n < out_sz ? out_sz - (size_t)n : 0, "%s\"expect_reply\":true", first_a ? "" : ",");
 		first_a = false;
 	}
 	#undef ADD_A_STR

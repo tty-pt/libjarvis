@@ -335,7 +335,7 @@ static void set_mic_mute(bool muted)
 
 static void write_tts_active_state(const char *text, bool active)
 {
-	static char s_accum[1024] = {0};
+	static char s_accum[2048] = {0};
 	const char *u = getenv("USER");
 	if (!u || !*u) u = "quirinpa";
 	char path[256], tmp[280];
@@ -353,7 +353,16 @@ static void write_tts_active_state(const char *text, bool active)
 		} else if (cur + 1 + add < sizeof(s_accum)) {
 			snprintf(s_accum + cur, sizeof(s_accum) - cur, " %.*s", (int)(sizeof(s_accum) - cur - 2), text);
 		} else {
-			snprintf(s_accum, sizeof(s_accum), "%s", text);
+			/* Keep most recent tail so self-echo matching spans across clause transitions */
+			size_t keep_budget = (add + 2 < sizeof(s_accum)) ? (sizeof(s_accum) - 1 - add - 1) : 0;
+			if (keep_budget > 256 && cur > keep_budget) {
+				size_t shift = cur - keep_budget;
+				memmove(s_accum, s_accum + shift, keep_budget);
+				s_accum[keep_budget] = '\0';
+				snprintf(s_accum + keep_budget, sizeof(s_accum) - keep_budget, " %s", text);
+			} else {
+				snprintf(s_accum, sizeof(s_accum), "%.*s", (int)(sizeof(s_accum) - 1), text);
+			}
 		}
 	}
 	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
@@ -400,10 +409,10 @@ static void clean_speech_text(const char *src, char *dst, size_t dst_sz)
 	}
 	if (w > 0 && dst[w - 1] == ' ') w--;
 	dst[w] = '\0';
-	if (w > 260) {
-		dst[260] = '\0';
+	if (w > 1000) {
+		dst[1000] = '\0';
 		char *dot = strrchr(dst, '.');
-		if (dot && (dot - dst) > 60) *(dot + 1) = '\0';
+		if (dot && (dot - dst) > 200) *(dot + 1) = '\0';
 	}
 }
 
@@ -1189,7 +1198,7 @@ static int ensure_persistent_player_locked(int sample_rate)
 		}
 		execlp("pw-cat", "pw-cat", "-p", "--raw", rate_arg,
 		       "--channels=1", "--format=s16",
-		       "--properties=media.role=Communication", "-", (char *)NULL);
+		       "--media-role=Communication", "-P", "application.name=jarvis-tts", "-", (char *)NULL);
 		_exit(127);
 	}
 	close(pfd[0]);
@@ -1491,7 +1500,7 @@ XY_IMPL(int, jarvis_xy_speak_clause, const char *, session_id, const char *, cla
 		return 0;
 	}
 
-	char clean[512];
+	char clean[1024];
 	clean_speech_text(clause_text, clean, sizeof(clean));
 
 	pthread_mutex_lock(&g_tts.mtx);

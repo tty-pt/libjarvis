@@ -330,6 +330,11 @@ void jarvis_format_voice_reply(
 		if (strcmp(op, "media_play") == 0 && !res->last_dsl.target.query[0]) {
 			tpl = jarvis_ontology_get_reply_template(ont, "media_play_empty");
 		}
+		if (!tpl && strcmp(op, "conversation_control") == 0 && res->last_dsl.args.action[0]) {
+			char subkey[128];
+			snprintf(subkey, sizeof(subkey), "conversation_control_%s", res->last_dsl.args.action);
+			tpl = jarvis_ontology_get_reply_template(ont, subkey);
+		}
 		if (!tpl && op[0]) {
 			tpl = jarvis_ontology_get_reply_template(ont, op);
 		}
@@ -484,7 +489,7 @@ void jarvis_tts_clean_text(const char *raw_text, char *out_clean, size_t out_sz)
 	bool prev_space = true;
 	const char *p = raw_text;
 
-	while (*p && w + 1 < out_sz && w < 260) {
+	while (*p && w + 1 < out_sz) {
 		if (strncmp(p, "http://", 7) == 0 || strncmp(p, "https://", 8) == 0) {
 			/* Strip scheme and keep only the bare domain for language-neutral TTS reading */
 			p += (p[4] == 's') ? 8 : 7;
@@ -522,16 +527,16 @@ size_t jarvis_tts_split_segments(
 )
 {
 	if (!text || !out_segments || max_segments == 0) return 0;
-	char clean[JARVIS_CLAUSE_LEN];
+	char clean[JARVIS_TEXT_LEN];
 	jarvis_tts_clean_text(text, clean, sizeof(clean));
 	if (!clean[0]) return 0;
 
 	size_t count = 0;
-	char rem_buf[JARVIS_CLAUSE_LEN];
+	char rem_buf[JARVIS_TEXT_LEN];
 	snprintf(rem_buf, sizeof(rem_buf), "%s", clean);
 
 	while (rem_buf[0] && count < max_segments) {
-		char clause[JARVIS_STR_LEN], next_rem[JARVIS_CLAUSE_LEN];
+		char clause[JARVIS_STR_LEN], next_rem[JARVIS_TEXT_LEN];
 		if (jarvis_pop_ready_tts_clause(rem_buf, count == 0, clause, sizeof(clause), next_rem, sizeof(next_rem))) {
 			char *slot = out_segments[count++];
 			snprintf(slot, sizeof(out_segments[0]), "%s", clause);

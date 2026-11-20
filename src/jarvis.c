@@ -11,6 +11,7 @@
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -34,13 +35,11 @@ static void print_usage(const char *prog)
 		"  notify <text>                             Announce background completion via OSD + non-preemptive TTS\n"
 		"  dmenu | omni                              Open interactive command bar via jarvis_xy_prompt\n"
 		"  warmup                                    Pre-warm ontology and inference engine\n"
-		"  llm-mode [auto|cloud|embedding|off]       Get or set persistent inference mode\n"
 		"  clear-learned                             Clear context, session, and embedding caches\n\n"
 		"Options:\n"
 		"  -p, --port <port>                         Override jarvisd TCP port (default from ~/.jarvisrc)\n"
 		"  -c, --cmd <raw_cmd>                       Send raw control command to jarvisd socket\n"
 		"  --wm <dwm|sway|hyprland>                  Window manager / environment (default from ~/.jarvisrc)\n"
-		"  --inference <auto|llm|embedding|none>     Inference backend (default from ~/.jarvisrc)\n"
 		"  --surface <any|terminal|browser|site|nd>  Active surface context (default: any)\n"
 		"  --mod <path>                              Load additional libxylem (.so) adapter module\n"
 		"  --dry-run                                 Compile utterance to IR/DSL without executing\n"
@@ -48,45 +47,6 @@ static void print_usage(const char *prog)
 		"  -q, --quiet                               Suppress desktop notifications / earcons\n",
 		prog
 	);
-}
-
-static void read_saved_llm_mode(char *out, size_t out_sz)
-{
-	jarvis_rc_get("llm_mode", "auto", out, out_sz);
-}
-
-static int write_saved_llm_mode(const char *mode, bool quiet)
-{
-	static const char *const valid[] = {"auto", "cloud", "fast", "smart", "llm", "embedding", "off", "none", NULL};
-	bool ok = false;
-	for (size_t i = 0; valid[i]; i++) {
-		if (strcmp(mode, valid[i]) == 0) {
-			ok = true;
-			break;
-		}
-	}
-	if (!ok) {
-		fprintf(stderr, "Usage: jarvis llm-mode [auto|cloud|fast|smart|embedding|off|none]\n");
-		return 1;
-	}
-	jarvis_rc_set("llm_mode", mode);
-	if (!quiet) {
-		char body[128];
-		snprintf(body, sizeof(body), "Modo definido para: %s", mode);
-		jarvis_xy_notify("  Modo LLM", body, 0);
-	}
-	printf("LLM mode set to %s\n", mode);
-	return 0;
-}
-
-static jarvis_infer_mode_t parse_infer_mode(const char *im)
-{
-	if (!im || !*im) return JARVIS_INFER_AUTO;
-	if (strcmp(im, "none") == 0 || strcmp(im, "off") == 0) return JARVIS_INFER_NONE;
-	if (strcmp(im, "embedding") == 0) return JARVIS_INFER_EMBEDDING;
-	if (strcmp(im, "llm") == 0 || strcmp(im, "cloud") == 0 ||
-	    strcmp(im, "fast") == 0 || strcmp(im, "smart") == 0) return JARVIS_INFER_LLM;
-	return JARVIS_INFER_AUTO;
 }
 
 static int load_xy_mod(const char *path)
@@ -337,11 +297,10 @@ static void do_jarvis_menu(void)
 {
 	bool running = is_daemon_listening();
 	int tts_on = jarvis_rc_get_int("tts_enabled", 1);
-	char voice[64], lang[32], model_path[512], llm_mode[64], wake[64];
+	char voice[64], lang[32], model_path[512], wake[64];
 	jarvis_rc_get("tts_voice", "pm_alex", voice, sizeof(voice));
 	jarvis_rc_get("lang", "pt-pt", lang, sizeof(lang));
 	jarvis_rc_get("whisper_model", "ggml-base-q8_0.bin", model_path, sizeof(model_path));
-	jarvis_rc_get("llm_mode", "auto", llm_mode, sizeof(llm_mode));
 	jarvis_rc_get("wake_word", "jarbas", wake, sizeof(wake));
 	int fms = jarvis_rc_get_int("followup_ms", 8000);
 
@@ -354,17 +313,16 @@ static void do_jarvis_menu(void)
 		"2. Voz Neural TTS: %s (voz: %s)\n"
 		"3. Janela de Seguimento: %s (%d ms)\n"
 		"4. Bloquear (Desligar Escuta + Bloquear Ecrã)\n"
-		"5. Modo de Inferência LLM: %s\n"
-		"6. Idioma Whisper / TTS: %s\n"
-		"7. Modelo Whisper: %s\n"
-		"8. Barra de Comandos Semântica\n"
-		"9. Limpar Atalhos e Cache Aprendidos\n"
-		"10. Abrir Terminal Pi Agent\n"
-		"11. Editar ~/.jarvisrc",
+		"5. Idioma Whisper / TTS: %s\n"
+		"6. Modelo Whisper: %s\n"
+		"7. Barra de Comandos Semântica\n"
+		"8. Limpar Atalhos e Cache Aprendidos\n"
+		"9. Abrir Terminal ren (dwm-jarvis)\n"
+		"10. Editar ~/.jarvisrc",
 		running ? "ATIVO [Amarelo]" : "DESLIGADO [Prata]", wake,
 		tts_on ? "ATIVO" : "DESLIGADO", voice,
 		fms >= 3600000 ? "Modo Sem Palavra de Ativação" : (fms > 0 ? "Conversacional" : "Estrito"), fms,
-		llm_mode, lang, model_base);
+		lang, model_base);
 
 	char choice[512] = {0};
 	if (jarvis_xy_prompt(" Jarbas:", items, choice, sizeof(choice)) <= 0 || !choice[0]) {
@@ -424,18 +382,6 @@ static void do_jarvis_menu(void)
 	} else if (strncmp(choice, "4.", 2) == 0) {
 		do_jarvis_lockdown(false);
 	} else if (strncmp(choice, "5.", 2) == 0) {
-		const char *litems =
-			"auto       (Embeddings locais -> LLM remoto)\n"
-			"cloud      (LLM remoto rápido/inteligente)\n"
-			"embedding  (Apenas embeddings locais — offline)\n"
-			"off        (Apenas solver determinístico Tier-0)";
-		char lchoice[256] = {0};
-		if (jarvis_xy_prompt(" Modo LLM:", litems, lchoice, sizeof(lchoice)) > 0 && lchoice[0]) {
-			char lval[32] = {0};
-			sscanf(lchoice, "%31s", lval);
-			if (lval[0]) write_saved_llm_mode(lval, false);
-		}
-	} else if (strncmp(choice, "6.", 2) == 0) {
 		const char *lang_items =
 			"pt-pt (Português Europeu)\n"
 			"en    (English)\n"
@@ -455,7 +401,7 @@ static void do_jarvis_menu(void)
 				jarvis_xy_notify("🌐  Idioma Atualizado", gval, 0);
 			}
 		}
-	} else if (strncmp(choice, "7.", 2) == 0) {
+	} else if (strncmp(choice, "6.", 2) == 0) {
 		const char *mitems =
 			"ggml-base-q8_0.bin           (78 MB  - Multilingue Rápido Q8)\n"
 			"ggml-small-q8_0.bin          (252 MB - Multilingue Alta Precisão Q8)\n"
@@ -474,13 +420,13 @@ static void do_jarvis_menu(void)
 				jarvis_xy_notify("🧠  Modelo Whisper Ativo", mfile, 0);
 			}
 		}
-	} else if (strncmp(choice, "8.", 2) == 0) {
+	} else if (strncmp(choice, "7.", 2) == 0) {
 		(void)system("jarvis dmenu &");
-	} else if (strncmp(choice, "9.", 2) == 0) {
+	} else if (strncmp(choice, "8.", 2) == 0) {
 		(void)system("jarvis clear-learned");
+	} else if (strncmp(choice, "9.", 2) == 0) {
+		(void)system("dwm-jarvis show &");
 	} else if (strncmp(choice, "10.", 3) == 0) {
-		(void)system("dwm-jarvis-pi show &");
-	} else if (strncmp(choice, "11.", 3) == 0) {
 		(void)system("st -e ${EDITOR:-nvim} ~/.jarvisrc &");
 	}
 }
@@ -549,7 +495,6 @@ int main(int argc, char **argv)
 	const char *surface = "any";
 	bool as_json = false;
 	bool quiet = false;
-	bool cli_infer_set = false;
 	char utterance[512] = {0};
 	size_t u_pos = 0;
 	const char *subcmd = NULL;
@@ -562,7 +507,13 @@ int main(int argc, char **argv)
 
 	char ctx_path[512] = {0}, sess_path[512] = {0}, mem_path[512] = {0}, fs_path[512] = {0}, emb_path[512] = {0};
 	snprintf(ctx_path, sizeof(ctx_path), "/tmp/jarvis-%s.context.json", user);
-	snprintf(sess_path, sizeof(sess_path), "/tmp/jarvis-%s.session.json", user);
+	if (home && *home) {
+		char def_sess[512];
+		snprintf(def_sess, sizeof(def_sess), "%s/.cache/jarvis/session.json", home);
+		jarvis_rc_get("session_path", def_sess, sess_path, sizeof(sess_path));
+	} else {
+		snprintf(sess_path, sizeof(sess_path), "/tmp/jarvis-%s.session.json", user);
+	}
 	cfg.context_path = ctx_path;
 	cfg.session_path = sess_path;
 	if (home && *home) {
@@ -601,11 +552,6 @@ int main(int argc, char **argv)
 			}
 			if (strcmp(argv[i], "--wm") == 0 && i + 1 < argc) {
 				cfg.wm = argv[++i];
-				continue;
-			}
-			if (strcmp(argv[i], "--inference") == 0 && i + 1 < argc) {
-				cfg.infer_mode = parse_infer_mode(argv[++i]);
-				cli_infer_set = true;
 				continue;
 			}
 			if (strcmp(argv[i], "--surface") == 0 && i + 1 < argc) {
@@ -656,11 +602,6 @@ int main(int argc, char **argv)
 				if (i + 1 < argc) subarg = argv[++i];
 				continue;
 			}
-			if (strcmp(argv[i], "llm-mode") == 0) {
-				subcmd = "llm-mode";
-				if (i + 1 < argc) subarg = argv[++i];
-				continue;
-			}
 			if (strcmp(argv[i], "config") == 0) {
 				subcmd = "config";
 				if (i + 1 < argc) subarg = argv[++i];
@@ -688,12 +629,6 @@ int main(int argc, char **argv)
 		}
 		if (resp[0]) printf("%s\n", resp);
 		return 0;
-	}
-
-	if (!cli_infer_set) {
-		char saved_mode[64];
-		read_saved_llm_mode(saved_mode, sizeof(saved_mode));
-		cfg.infer_mode = parse_infer_mode(saved_mode);
 	}
 
 	/* Auto-load configured or environment-matched Xylem adapter modules */
@@ -807,15 +742,6 @@ int main(int argc, char **argv)
 			}
 			return 0;
 		}
-		if (strcmp(subcmd, "llm-mode") == 0) {
-			if (!subarg) {
-				char saved[64];
-				read_saved_llm_mode(saved, sizeof(saved));
-				printf("%s\n", saved);
-				return 0;
-			}
-			return write_saved_llm_mode(subarg, quiet);
-		}
 		if (strcmp(subcmd, "clear-learned") == 0) {
 #ifndef _WIN32
 			if (ctx_path[0]) unlink(ctx_path);
@@ -854,6 +780,21 @@ int main(int argc, char **argv)
 		print_usage(argv[0]);
 		return 1;
 	}
+
+#ifndef _WIN32
+	if (!cfg.dry_run && !as_json) {
+		pid_t pid = fork();
+		if (pid == 0) {
+			execlp("dwm-jarvis", "dwm-jarvis", "send", utterance, (char *)NULL);
+			_exit(127);
+		} else if (pid > 0) {
+			int st = 0;
+			if (waitpid(pid, &st, 0) > 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0) {
+				return 0;
+			}
+		}
+	}
+#endif
 
 	jarvis_engine_t *eng = jarvis_engine_create(&cfg);
 	if (!eng) {

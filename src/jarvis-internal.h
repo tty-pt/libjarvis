@@ -95,7 +95,7 @@ bool               jarvis_normalize_dsl_val(const jjson_val_t *raw, jarvis_dsl_t
 #define JARVIS_MAX_POLITE_PREFIXES    48
 #define JARVIS_MAX_DICTATION_VERBS    32
 #define JARVIS_MAX_DEICTIC_PRONOUNS   32
-#define JARVIS_MAX_TTS_INTERRUPTS     48
+#define JARVIS_MAX_TTS_INTERRUPTS     64
 #define JARVIS_MAX_LOCKDOWN_PHRASES   32
 #define JARVIS_MAX_HALLUCINATIONS     64
 #define JARVIS_MAX_ARG_PREPS          48
@@ -394,9 +394,11 @@ typedef struct {
 
 typedef struct {
 	double ts;
-	char   utterance[JARVIS_STR_LEN];
+	char   utterance[JARVIS_CLAUSE_LEN];
 	char   ops[JARVIS_NAME_LEN];
-	char   output[JARVIS_CLAUSE_LEN];
+	char   output[JARVIS_TEXT_LEN];
+	char   spoken[JARVIS_TEXT_LEN];
+	bool   expect_reply;
 } jarvis_session_turn_t;
 
 #define JARVIS_EMBED_DIM       768
@@ -462,6 +464,19 @@ bool jarvis_auren_run_react_agent(
 	const char              *utterance,
 	const jarvis_world_t    *world,
 	jarvis_process_result_t *out_res
+);
+
+char *jarvis_build_chat_messages_json(
+	const jarvis_engine_t *eng,
+	const char            *model,
+	const char            *sys_prompt,
+	const char            *user_msg0,
+	const char             assistant_turns[][4096],
+	const char             user_obs_turns[][4096],
+	int                    current_turn,
+	double                 now_s,
+	double                 history_ttl_s,
+	size_t                 max_history_turns
 );
 
 #endif /* JARVIS_INTERNAL_H */

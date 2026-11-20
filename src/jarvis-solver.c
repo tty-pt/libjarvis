@@ -451,8 +451,7 @@ static void extract_constituents(
 	 */
 	bool is_open_query_verb = (get_verb_weight(out_p, "INPUT_TYPE") > 0.0 ||
 	                           get_verb_weight(out_p, "SEARCH_WEB") > 0.0 ||
-	                           get_verb_weight(out_p, "PLAY_STREAM") > 0.0 ||
-	                           get_verb_weight(out_p, "AGENT_ASK") > 0.0);
+	                           get_verb_weight(out_p, "PLAY_STREAM") > 0.0);
 	if (!is_open_query_verb && out_p->entity_count == 0 && n <= JARVIS_MAX_CLAUSE_WORDS) {
 		double dp[JARVIS_MAX_CLAUSE_WORDS + 1];
 		int    back_len[JARVIS_MAX_CLAUSE_WORDS + 1];
@@ -1114,15 +1113,6 @@ static bool build_intent_ir(
 		snprintf(out_ir->text, sizeof(out_ir->text), "%s", q_clean);
 		return true;
 	}
-	if (strcmp(cid, "agent.ask") == 0) {
-		char q_clean[512];
-		extract_after_verb(ont, raw_stripped, p->lead_verb_span, true, q_clean, sizeof(q_clean));
-		if (!q_clean[0]) return false;
-		snprintf(out_ir->surface, sizeof(out_ir->surface), "any");
-		out_ir->explicit_terminal = false;
-		snprintf(out_ir->query, sizeof(out_ir->query), "%s", q_clean);
-		return true;
-	}
 	if (strcmp(cid, "web.open") == 0) {
 		snprintf(out_ir->surface, sizeof(out_ir->surface), "any");
 		out_ir->explicit_terminal = false;
@@ -1319,7 +1309,7 @@ bool jarvis_solve_clause(
 			if (idm->action[0]) snprintf(out_ir->action, sizeof(out_ir->action), "%s", idm->action);
 			if (idm->text[0]) {
 				snprintf(out_ir->text, sizeof(out_ir->text), "%s", idm->text);
-				if (strcmp(idm->cap, "media.play") == 0 || strcmp(idm->cap, "web.search") == 0 || strcmp(idm->cap, "agent.ask") == 0) {
+				if (strcmp(idm->cap, "media.play") == 0 || strcmp(idm->cap, "web.search") == 0) {
 					snprintf(out_ir->query, sizeof(out_ir->query), "%s", idm->text);
 				} else if (strcmp(idm->cap, "app.launch") == 0) {
 					snprintf(out_ir->application, sizeof(out_ir->application), "%s", idm->text);
@@ -1402,16 +1392,9 @@ bool jarvis_solve_clause(
 
 	/* Explicit dictation when clause begins with a dictation verb */
 	bool is_explicit_dictation = (rw_idx < n_raw && jarvis_ontology_is_dictation_verb(ont, raw_words[rw_idx]));
-	if (is_explicit_dictation && !has_entity_type(&p, "edit.unit") && get_verb_weight(&p, "AGENT_ASK") <= 0.0) {
+	if (is_explicit_dictation && !has_entity_type(&p, "edit.unit")) {
 		if (build_intent_ir(ont, "input.dictate", 0.96, &p, stripped, eff_surface, explicit_term, target_other, submit_enter, out_ir)) {
 			out_ir->new_terminal = new_terminal;
-			return true;
-		}
-	}
-
-	/* Explicit coding agent delegation ("ask pi to ...", "tell the agent to ...") */
-	if (get_verb_weight(&p, "AGENT_ASK") > 0.0) {
-		if (build_intent_ir(ont, "agent.ask", 0.96, &p, stripped, eff_surface, explicit_term, target_other, submit_enter, out_ir)) {
 			return true;
 		}
 	}
@@ -1552,8 +1535,7 @@ bool jarvis_solve_clause(
 		bool is_open_arg = (cap->open_arg[0] != '\0' ||
 		                    strcmp(cid, "media.play") == 0 ||
 		                    strcmp(cid, "web.search") == 0 ||
-		                    strcmp(cid, "input.dictate") == 0 ||
-		                    strcmp(cid, "agent.ask") == 0);
+		                    strcmp(cid, "input.dictate") == 0);
 		size_t eff_res = (is_open_arg ||
 		                  (strcmp(cid, "ui.scroll") == 0 && p.residual_count == 1 && is_all_digits(p.residual[0])))
 			? 0 : p.residual_count;
@@ -1967,11 +1949,6 @@ bool jarvis_compile_ir_to_dsl(
 		APPLY_OTHER_AND_NEW_TERM();
 		return true;
 	}
-	if (strcmp(cap, "agent.ask") == 0) {
-		snprintf(out_dsl->op, sizeof(out_dsl->op), "ask_agent");
-		snprintf(out_dsl->target.query, sizeof(out_dsl->target.query), "%s", ir->query);
-		return true;
-	}
 	if (strcmp(cap, "media.play") == 0) {
 		snprintf(out_dsl->op, sizeof(out_dsl->op), "media_play");
 		snprintf(out_dsl->target.query, sizeof(out_dsl->target.query), "%s", ir->query);
@@ -1987,6 +1964,11 @@ bool jarvis_compile_ir_to_dsl(
 	if (strcmp(cap, "tts.control") == 0) {
 		snprintf(out_dsl->op, sizeof(out_dsl->op), "tts_control");
 		snprintf(out_dsl->args.action, sizeof(out_dsl->args.action), "%s", ir->action[0] ? ir->action : "on");
+		return true;
+	}
+	if (strcmp(cap, "conversation.control") == 0) {
+		snprintf(out_dsl->op, sizeof(out_dsl->op), "conversation_control");
+		snprintf(out_dsl->args.action, sizeof(out_dsl->args.action), "%s", ir->action[0] ? ir->action : "enter");
 		return true;
 	}
 	if (strcmp(cap, "media.control") == 0) {

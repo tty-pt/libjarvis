@@ -2,9 +2,11 @@
 
 #ifndef __wasm__
 #include <ttypt/mm.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
 #if defined(_WIN32)
+#include <direct.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #else
@@ -25,6 +27,37 @@ static double now_ms(void)
 	return (double)tv.tv_sec * 1000.0 + (double)tv.tv_usec / 1000.0;
 #else
 	return 0.0;
+#endif
+}
+
+static void ensure_parent_dir(const char *path)
+{
+#ifndef __wasm__
+	if (!path || !*path) return;
+	char tmp[512];
+	snprintf(tmp, sizeof(tmp), "%s", path);
+	char *slash = strrchr(tmp, '/');
+	if (!slash) return;
+	*slash = '\0';
+	if (!tmp[0]) return;
+	for (char *p = tmp + 1; *p; p++) {
+		if (*p == '/') {
+			*p = '\0';
+#if defined(_WIN32)
+			_mkdir(tmp);
+#else
+			mkdir(tmp, 0755);
+#endif
+			*p = '/';
+		}
+	}
+#if defined(_WIN32)
+	_mkdir(tmp);
+#else
+	mkdir(tmp, 0755);
+#endif
+#else
+	(void)path;
 #endif
 }
 
@@ -270,10 +303,13 @@ void jarvis_resolve_anaphora(
 		}
 		for (size_t i = 0; i < ont->anaphora.resume_phrase_count; i++) {
 			if (strcmp(clean, ont->anaphora.resume_phrases[i]) == 0) {
-				if (ctx && ctx->last_query[0] &&
-				    (strcmp(ctx->last_op, "media_play") == 0 ||
-				     strcmp(ctx->last_op, "media_pause") == 0 ||
-				     strcmp(ctx->last_op, "search_web") == 0)) {
+				bool is_media_ctx = (ctx && (strcmp(ctx->last_op, "media_play") == 0 ||
+				                             strcmp(ctx->last_op, "media_pause") == 0 ||
+				                             strcmp(ctx->last_op, "search_web") == 0));
+				if (ctx && ctx->conv_active && !is_media_ctx) {
+					break;
+				}
+				if (ctx && ctx->last_query[0] && is_media_ctx) {
 					if (ont->anaphora.resume_prefix[0]) {
 						snprintf(out_clause, out_sz, "%s %s", ont->anaphora.resume_prefix, ctx->last_query);
 					} else {
@@ -809,6 +845,7 @@ static void save_memories_to_disk(const jarvis_engine_t *eng)
 {
 #ifndef __wasm__
 	if (!eng->memory_path[0]) return;
+	ensure_parent_dir(eng->memory_path);
 	FILE *fp = fopen(eng->memory_path, "wb");
 	if (!fp) return;
 	fprintf(fp, "{\n");
@@ -986,6 +1023,8 @@ static void load_context_from_disk(jarvis_engine_t *eng)
 				snprintf(eng->ctx.last_url, sizeof(eng->ctx.last_url), "%s", jjson_obj_get_str(v, "last_url", ""));
 				snprintf(eng->ctx.last_file, sizeof(eng->ctx.last_file), "%s", jjson_obj_get_str(v, "last_file", ""));
 				eng->ctx.last_line = (int)jjson_obj_get_num(v, "last_line", 0.0);
+				eng->ctx.conv_active = jjson_obj_get_bool(v, "conv_active", false);
+				eng->ctx.conv_last_ts = jjson_obj_get_num(v, "conv_last_ts", 0.0);
 			}
 			jjson_free(v);
 			free(buf);
@@ -1001,6 +1040,7 @@ static void save_context_to_disk(const jarvis_engine_t *eng)
 {
 #ifndef __wasm__
 	if (!eng || !eng->context_path[0]) return;
+	ensure_parent_dir(eng->context_path);
 	FILE *fp = fopen(eng->context_path, "wb");
 	if (!fp) return;
 	char e_op[128], e_cmd[1024], e_app[256], e_q[512], e_loc[512], e_wid[128], e_wcls[256], e_url[1024], e_file[512];
@@ -1027,11 +1067,13 @@ static void save_context_to_disk(const jarvis_engine_t *eng)
 		"  \"prev_workspace\": %d,\n"
 		"  \"last_url\": \"%s\",\n"
 		"  \"last_file\": \"%s\",\n"
-		"  \"last_line\": %d\n"
+		"  \"last_line\": %d,\n"
+		"  \"conv_active\": %s,\n"
+		"  \"conv_last_ts\": %.3f\n"
 		"}\n",
 		eng->ctx.last_ts, e_op, e_cmd, e_app, e_q, e_loc, e_wid, e_wcls,
 		eng->ctx.last_workspace, eng->ctx.prev_workspace, e_url, e_file,
-		eng->ctx.last_line
+		eng->ctx.last_line, eng->ctx.conv_active ? "true" : "false", eng->ctx.conv_last_ts
 	);
 	fclose(fp);
 #else
@@ -1060,10 +1102,13 @@ static void load_session_from_disk(jarvis_engine_t *eng)
 					const jjson_val_t *item = v->u.arr.items[i];
 					if (item && item->type == JJSON_OBJECT) {
 						jarvis_session_turn_t *t = &eng->turns[eng->turn_count++];
+						memset(t, 0, sizeof(*t));
 						t->ts = jjson_obj_get_num(item, "ts", 0.0);
 						snprintf(t->utterance, sizeof(t->utterance), "%s", jjson_obj_get_str(item, "utterance", ""));
 						snprintf(t->ops, sizeof(t->ops), "%s", jjson_obj_get_str(item, "ops", ""));
 						snprintf(t->output, sizeof(t->output), "%s", jjson_obj_get_str(item, "output", ""));
+						snprintf(t->spoken, sizeof(t->spoken), "%s", jjson_obj_get_str(item, "spoken", ""));
+						t->expect_reply = jjson_obj_get_bool(item, "expect_reply", false);
 					}
 				}
 			}
@@ -1081,17 +1126,21 @@ static void save_session_to_disk(const jarvis_engine_t *eng)
 {
 #ifndef __wasm__
 	if (!eng || !eng->session_path[0]) return;
+	ensure_parent_dir(eng->session_path);
 	FILE *fp = fopen(eng->session_path, "wb");
 	if (!fp) return;
 	fprintf(fp, "[\n");
 	for (size_t i = 0; i < eng->turn_count; i++) {
-		char eu[1024], eo[512], eout[1024];
+		char eu[1024], eo[256], eout[2048], espk[2048];
 		jjson_escape_str(eng->turns[i].utterance, eu, sizeof(eu));
 		jjson_escape_str(eng->turns[i].ops, eo, sizeof(eo));
 		jjson_escape_str(eng->turns[i].output, eout, sizeof(eout));
+		jjson_escape_str(eng->turns[i].spoken, espk, sizeof(espk));
 		fprintf(fp,
-			"  {\"ts\":%.3f,\"utterance\":\"%s\",\"ops\":\"%s\",\"output\":\"%s\"}%s\n",
-			eng->turns[i].ts, eu, eo, eout, (i + 1 < eng->turn_count) ? "," : ""
+			"  {\"ts\":%.3f,\"utterance\":\"%s\",\"ops\":\"%s\",\"output\":\"%s\",\"spoken\":\"%s\",\"expect_reply\":%s}%s\n",
+			eng->turns[i].ts, eu, eo, eout, espk,
+			eng->turns[i].expect_reply ? "true" : "false",
+			(i + 1 < eng->turn_count) ? "," : ""
 		);
 	}
 	fprintf(fp, "]\n");
@@ -1231,7 +1280,7 @@ static bool requires_agent_reasoning(const jarvis_engine_t *eng, const char *utt
 		return true;
 	}
 
-	/* Never force agent reasoning on explicit dictation, coding-agent delegation, or TTS toggle */
+	/* Never force agent reasoning on explicit dictation or TTS toggle */
 	if (ont) {
 		for (size_t i = 0; i < ont->dictation_verb_count; i++) {
 			size_t vlen = strlen(ont->dictation_verbs[i]);
@@ -1239,19 +1288,11 @@ static bool requires_agent_reasoning(const jarvis_engine_t *eng, const char *utt
 				return false;
 			}
 		}
-		for (size_t i = 0; i < ont->verb_phrase_count; i++) {
-			for (size_t t = 0; t < ont->verb_phrases[i].tag_count; t++) {
-				if (strcmp(ont->verb_phrases[i].tags[t].concept, "AGENT_ASK") == 0) {
-					size_t plen = strlen(ont->verb_phrases[i].phrase);
-					if (plen > 0 && strncmp(clean, ont->verb_phrases[i].phrase, plen) == 0 && clean[plen] == ' ') {
-						return false;
-					}
-				}
-			}
-		}
 		jarvis_ir_t probe_ir;
 		if (jarvis_solve_clause(ont, utterance, "any", NULL, &probe_ir) &&
-		    (strcmp(probe_ir.cap, "tts.control") == 0 || strcmp(probe_ir.cap, "tts.interrupt") == 0)) {
+		    (strcmp(probe_ir.cap, "tts.control") == 0 ||
+		     strcmp(probe_ir.cap, "tts.interrupt") == 0 ||
+		     strcmp(probe_ir.cap, "conversation.control") == 0)) {
 			return false;
 		}
 	}
@@ -1381,22 +1422,53 @@ static void update_context_from_step(
 	}
 }
 
-static void record_session_turn(jarvis_engine_t *eng, const char *utterance, const char *ops, const char *output)
+static void record_session_turn(
+	jarvis_engine_t *eng,
+	const char      *utterance,
+	const char      *ops,
+	const char      *output,
+	const char      *spoken,
+	bool             expect_reply
+)
 {
 	if (!eng) return;
-	if (eng->turn_count >= JARVIS_MAX_TURNS) {
-		memmove(&eng->turns[0], &eng->turns[1], (JARVIS_MAX_TURNS - 1) * sizeof(jarvis_session_turn_t));
-		eng->turn_count = JARVIS_MAX_TURNS - 1;
+	if (!output || strcmp(output, "conversation reset") != 0) {
+		if (eng->turn_count >= JARVIS_MAX_TURNS) {
+			memmove(&eng->turns[0], &eng->turns[1], (JARVIS_MAX_TURNS - 1) * sizeof(jarvis_session_turn_t));
+			eng->turn_count = JARVIS_MAX_TURNS - 1;
+		}
+		jarvis_session_turn_t *t = &eng->turns[eng->turn_count++];
+		memset(t, 0, sizeof(*t));
+		t->ts = now_ms() / 1000.0;
+		snprintf(t->utterance, sizeof(t->utterance), "%s", utterance ? utterance : "");
+		snprintf(t->ops, sizeof(t->ops), "%s", ops ? ops : "");
+		snprintf(t->output, sizeof(t->output), "%s", output ? output : "");
+		snprintf(t->spoken, sizeof(t->spoken), "%s", spoken ? spoken : "");
+		t->expect_reply = expect_reply;
+		if (eng->ctx.conv_active) {
+			eng->ctx.conv_last_ts = t->ts;
+		}
 	}
-	jarvis_session_turn_t *t = &eng->turns[eng->turn_count++];
-	t->ts = now_ms() / 1000.0;
-	snprintf(t->utterance, sizeof(t->utterance), "%s", utterance ? utterance : "");
-	snprintf(t->ops, sizeof(t->ops), "%s", ops ? ops : "");
-	snprintf(t->output, sizeof(t->output), "%s", output ? output : "");
 	if (!eng->dry_run) {
 		save_context_to_disk(eng);
 		save_session_to_disk(eng);
 	}
+}
+
+static void speak_text_segmented(const char *text)
+{
+	if (!text || !*text) return;
+	if (strlen(text) > 240) {
+		char segs[16][JARVIS_STR_LEN];
+		size_t n_segs = jarvis_tts_split_segments(text, segs, 16);
+		if (n_segs > 0) {
+			for (size_t i = 0; i < n_segs; i++) {
+				jarvis_xy_speak_clause("oneshot", segs[i], (i + 1 == n_segs) ? 1 : 0);
+			}
+			return;
+		}
+	}
+	jarvis_xy_speak_clause("oneshot", text, 1);
 }
 
 static bool is_observation_op(const char *op)
@@ -1417,6 +1489,35 @@ static void execute_dsl_via_xylem(
 {
 	memset(out_res, 0, sizeof(*out_res));
 
+	if (strcmp(dsl->op, "conversation_control") == 0) {
+		const char *act = dsl->args.action[0] ? dsl->args.action : "enter";
+		out_res->handled = true;
+		out_res->success = true;
+		if (strcasecmp(act, "exit") == 0 || strcasecmp(act, "off") == 0 || strcasecmp(act, "stop") == 0) {
+			if (eng) {
+				eng->ctx.conv_active = false;
+				eng->ctx.conv_last_ts = 0.0;
+			}
+			snprintf(out_res->output, sizeof(out_res->output), "conversation ended");
+		} else if (strcasecmp(act, "reset") == 0 || strcasecmp(act, "clear") == 0) {
+			if (eng) {
+				eng->turn_count = 0;
+				eng->ctx.conv_active = false;
+				eng->ctx.conv_last_ts = 0.0;
+				eng->ctx.last_op[0] = '\0';
+				eng->ctx.last_command[0] = '\0';
+				eng->ctx.last_query[0] = '\0';
+			}
+			snprintf(out_res->output, sizeof(out_res->output), "conversation reset");
+		} else {
+			if (eng) {
+				eng->ctx.conv_active = true;
+				eng->ctx.conv_last_ts = now_ms() / 1000.0;
+			}
+			snprintf(out_res->output, sizeof(out_res->output), "conversation started");
+		}
+		return;
+	}
 	if (strcmp(dsl->op, "remember_fact") == 0) {
 		const char *k = dsl->args.key[0] ? dsl->args.key : "note";
 		const char *v = dsl->args.value;
@@ -1481,7 +1582,7 @@ static void execute_dsl_via_xylem(
 			const char *ans = dsl->args.answer[0] ? dsl->args.answer :
 			                  (dsl->args.text[0] ? dsl->args.text : dsl->target.query);
 			if (ans && ans[0]) {
-				jarvis_xy_speak_clause("oneshot", ans, 1);
+				speak_text_segmented(ans);
 			}
 		}
 	}
@@ -1514,7 +1615,7 @@ static void execute_dsl_via_xylem(
 		memset(&reply_res, 0, sizeof(reply_res));
 		jarvis_xy_execute(&reply_dsl, &reply_res);
 		if (!reply_dsl.args.streamed_tts) {
-			jarvis_xy_speak_clause("oneshot", reply_dsl.args.answer, 1);
+			speak_text_segmented(reply_dsl.args.answer);
 		}
 	}
 }
@@ -2010,16 +2111,179 @@ static void summarize_world_for_prompt(
 		}
 		n += snprintf(out_sum + n, (size_t)n < sum_sz ? sum_sz - (size_t)n : 0, "\n");
 	}
-	if (eng && eng->turn_count > 0) {
-		n += snprintf(out_sum + n, (size_t)n < sum_sz ? sum_sz - (size_t)n : 0,
-		              "Recent Conversation Turns:\n");
-		for (size_t i = 0; i < eng->turn_count; i++) {
-			const jarvis_session_turn_t *t = &eng->turns[i];
-			n += snprintf(out_sum + n, (size_t)n < sum_sz ? sum_sz - (size_t)n : 0,
-			              "  User: %s -> Ops: %s (Jarvis Reply/Output: %.240s)\n",
-			              t->utterance, t->ops, t->output);
+}
+
+typedef struct {
+	char  *buf;
+	size_t len;
+	size_t cap;
+} jarvis_sb_t;
+
+static bool sb_ensure(jarvis_sb_t *sb, size_t extra)
+{
+	if (!sb) return false;
+	if (sb->len + extra + 1 <= sb->cap) return true;
+	size_t ncap = sb->cap ? sb->cap : 4096;
+	while (ncap < sb->len + extra + 1) ncap *= 2;
+	char *nb = (char *)realloc(sb->buf, ncap);
+	if (!nb) return false;
+	sb->buf = nb;
+	sb->cap = ncap;
+	return true;
+}
+
+static bool sb_append_n(jarvis_sb_t *sb, const char *s, size_t n)
+{
+	if (!s || n == 0) return true;
+	if (!sb_ensure(sb, n)) return false;
+	memcpy(sb->buf + sb->len, s, n);
+	sb->len += n;
+	sb->buf[sb->len] = '\0';
+	return true;
+}
+
+static bool sb_append(jarvis_sb_t *sb, const char *s)
+{
+	return s ? sb_append_n(sb, s, strlen(s)) : true;
+}
+
+static bool sb_append_json_str(jarvis_sb_t *sb, const char *s)
+{
+	if (!s) return true;
+	for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+		unsigned char c = *p;
+		if (c == '"' || c == '\\') {
+			char esc[2] = {'\\', (char)c};
+			if (!sb_append_n(sb, esc, 2)) return false;
+		} else if (c == '\n') {
+			if (!sb_append_n(sb, "\\n", 2)) return false;
+		} else if (c == '\r') {
+			if (!sb_append_n(sb, "\\r", 2)) return false;
+		} else if (c == '\t') {
+			if (!sb_append_n(sb, "\\t", 2)) return false;
+		} else if (c < 0x20) {
+			char ubuf[8];
+			snprintf(ubuf, sizeof(ubuf), "\\u%04x", (unsigned int)c);
+			if (!sb_append(sb, ubuf)) return false;
+		} else {
+			if (!sb_append_n(sb, (const char *)&c, 1)) return false;
 		}
 	}
+	return true;
+}
+
+char *jarvis_build_chat_messages_json(
+	const jarvis_engine_t *eng,
+	const char            *model,
+	const char            *sys_prompt,
+	const char            *user_msg0,
+	const char             assistant_turns[][4096],
+	const char             user_obs_turns[][4096],
+	int                    current_turn,
+	double                 now_s,
+	double                 history_ttl_s,
+	size_t                 max_history_turns
+)
+{
+	jarvis_sb_t sb = {0};
+	if (!sb_ensure(&sb, 8192)) return NULL;
+	sb.buf[0] = '\0';
+
+	if (!sb_append(&sb, "{\"model\":\"") ||
+	    !sb_append_json_str(&sb, (model && *model) ? model : "fast") ||
+	    !sb_append(&sb, "\",\"stream\":true,\"temperature\":0.0,\"max_tokens\":512,\"messages\":[")) {
+		free(sb.buf);
+		return NULL;
+	}
+
+	if (!sb_append(&sb, "{\"role\":\"system\",\"content\":\"") ||
+	    !sb_append_json_str(&sb, sys_prompt ? sys_prompt : "") ||
+	    !sb_append(&sb, "\"}")) {
+		free(sb.buf);
+		return NULL;
+	}
+
+	if (eng && eng->turn_count > 0) {
+		size_t eligible[JARVIS_MAX_TURNS];
+		size_t n_elig = 0;
+		for (size_t i = 0; i < eng->turn_count && i < JARVIS_MAX_TURNS; i++) {
+			const jarvis_session_turn_t *t = &eng->turns[i];
+			if (!t->utterance[0]) continue;
+			if (history_ttl_s > 0.0 && t->ts > 0.0 && now_s > t->ts && (now_s - t->ts) > history_ttl_s) {
+				continue;
+			}
+			eligible[n_elig++] = i;
+		}
+		size_t start_pos = 0;
+		if (max_history_turns > 0 && n_elig > max_history_turns) {
+			start_pos = n_elig - max_history_turns;
+		}
+		for (size_t k = start_pos; k < n_elig; k++) {
+			const jarvis_session_turn_t *t = &eng->turns[eligible[k]];
+			jarvis_sb_t asb = {0};
+			bool is_ans = (strcmp(t->ops, "answer_question") == 0);
+			if (is_ans) {
+				const char *ans = t->spoken[0] ? t->spoken : t->output;
+				if (!sb_append(&asb, "{\"op\":\"answer_question\",\"args\":{\"answer\":\"") ||
+				    !sb_append_json_str(&asb, ans) ||
+				    !sb_append(&asb, "\"") ||
+				    (t->expect_reply && !sb_append(&asb, ",\"expect_reply\":true")) ||
+				    !sb_append(&asb, "}}")) {
+					free(asb.buf);
+					free(sb.buf);
+					return NULL;
+				}
+			} else {
+				const char *op_str = t->ops[0] ? t->ops : "action";
+				if (!sb_append(&asb, "{\"op\":\"") ||
+				    !sb_append_json_str(&asb, op_str) ||
+				    !sb_append(&asb, "\"") ||
+				    (t->output[0] && (!sb_append(&asb, ",\"result\":\"") || !sb_append_json_str(&asb, t->output) || !sb_append(&asb, "\""))) ||
+				    (t->spoken[0] && (!sb_append(&asb, ",\"spoken\":\"") || !sb_append_json_str(&asb, t->spoken) || !sb_append(&asb, "\""))) ||
+				    (t->expect_reply && !sb_append(&asb, ",\"expect_reply\":true")) ||
+				    !sb_append(&asb, "}")) {
+					free(asb.buf);
+					free(sb.buf);
+					return NULL;
+				}
+			}
+
+			if (!sb_append(&sb, ",{\"role\":\"user\",\"content\":\"") ||
+			    !sb_append_json_str(&sb, t->utterance) ||
+			    !sb_append(&sb, "\"},{\"role\":\"assistant\",\"content\":\"") ||
+			    !sb_append_json_str(&sb, asb.buf ? asb.buf : "{}") ||
+			    !sb_append(&sb, "\"}")) {
+				free(asb.buf);
+				free(sb.buf);
+				return NULL;
+			}
+			free(asb.buf);
+		}
+	}
+
+	if (!sb_append(&sb, ",{\"role\":\"user\",\"content\":\"") ||
+	    !sb_append_json_str(&sb, user_msg0 ? user_msg0 : "") ||
+	    !sb_append(&sb, "\"}")) {
+		free(sb.buf);
+		return NULL;
+	}
+
+	for (int pt = 0; pt < current_turn; pt++) {
+		if (!sb_append(&sb, ",{\"role\":\"assistant\",\"content\":\"") ||
+		    !sb_append_json_str(&sb, assistant_turns[pt]) ||
+		    !sb_append(&sb, "\"},{\"role\":\"user\",\"content\":\"") ||
+		    !sb_append_json_str(&sb, user_obs_turns[pt]) ||
+		    !sb_append(&sb, "\"}")) {
+			free(sb.buf);
+			return NULL;
+		}
+	}
+
+	if (!sb_append(&sb, "]}")) {
+		free(sb.buf);
+		return NULL;
+	}
+	return sb.buf;
 }
 
 static bool extract_first_url_from_text(const char *text, char *out_url, size_t url_sz)
@@ -2408,19 +2672,21 @@ bool jarvis_auren_run_react_agent(
 	snprintf(utterance, sizeof(utterance), "%s", raw_utterance);
 
 	const char *lang_name = jarvis_ontology_get_lang_name(eng->ont);
-	char sys_prompt[1536];
+	char sys_prompt[2048];
 	snprintf(
 		sys_prompt, sizeof(sys_prompt),
 		"You are Jarvis, Tony Stark's intelligent Linux desktop assistant and systems engineer. "
 		"You control a live Linux desktop (window manager, terminals, tmux, browser, audio, shell, and coding tools). "
 		"You operate in a ReAct Observe-Reason-Act loop: you can either call an OBSERVATION tool first to inspect "
 		"live terminal panes, browser accessibility page content, clipboard, system health, or command output, OR immediately emit one or more ACTION DSL objects (or a JSON array of DSL objects) to fulfill the user's intent. "
-		"When using `answer_question`, keep your spoken reply crisp, natural, and concise (1 to 2 short sentences, under 180 characters) in %s (or the language of the user's request). "
+		"Previous conversation turns appear as alternating user/assistant messages before the current request; use them naturally for follow-ups, pronouns, clarifications, and ongoing discussion. "
+		"When using `answer_question`, keep your spoken reply crisp, natural, and concise (1 to 3 short sentences, under 450 characters) in %s (or the language of the user's request). "
+		"If you ask the user a clarifying or follow-up question and want them to reply, include \"expect_reply\":true in \"args\". "
 		"Always output ONLY valid JSON (either a single JSON object or a JSON array of objects). No markdown prose outside JSON.",
 		(lang_name && *lang_name) ? lang_name : "English"
 	);
 
-	static const char *TOOLS_DOC =
+	static const char *TOOLS_DOC_1 =
 		"=== OBSERVATION & MEMORY TOOLS ===\n"
 		"- inspect_terminal: {\"op\": \"inspect_terminal\", \"target\": {\"relation\": \"focused|other\"}}\n"
 		"- inspect_browser: {\"op\": \"inspect_browser\", \"target\": {}}\n"
@@ -2445,7 +2711,8 @@ bool jarvis_auren_run_react_agent(
 		"- workspace_move_window: {\"op\": \"workspace_move_window\", \"target\": {}, \"args\": {\"workspace\": 1}}\n"
 		"- window_fullscreen: {\"op\": \"window_fullscreen\", \"target\": {}}\n"
 		"- window_float: {\"op\": \"window_float\", \"target\": {}}\n"
-		"- window_close: {\"op\": \"window_close\", \"target\": {\"kind\": \"window\"}}\n"
+		"- window_close: {\"op\": \"window_close\", \"target\": {\"kind\": \"window\"}}\n";
+	static const char *TOOLS_DOC_2 =
 		"- media_play: {\"op\": \"media_play\", \"target\": {\"query\": \"<song_or_artist>\"}}\n"
 		"- media_pause: {\"op\": \"media_pause\", \"target\": {}}\n"
 		"- media_next: {\"op\": \"media_next\", \"target\": {}}\n"
@@ -2453,26 +2720,26 @@ bool jarvis_auren_run_react_agent(
 		"- media_volume: {\"op\": \"media_volume\", \"target\": {}, \"args\": {\"action\": \"volume_up|volume_down|volume_mute\"}}\n"
 		"- record_start: {\"op\": \"record_start\", \"target\": {}, \"args\": {\"mode\": \"screen|mic|both\"}}\n"
 		"- record_stop: {\"op\": \"record_stop\", \"target\": {}}\n"
-		"- answer_question: {\"op\": \"answer_question\", \"target\": {}, \"args\": {\"answer\": \"<concise Jarvis reply>\"}}\n"
-		"- wm_help: {\"op\": \"wm_help\", \"target\": {\"query\": \"<wm_or_shortcut_question>\"}}\n"
-		"- ask_agent: {\"op\": \"ask_agent\", \"target\": {\"query\": \"<coding_agent_task>\"}}\n\n"
+		"- answer_question: {\"op\": \"answer_question\", \"target\": {}, \"args\": {\"answer\": \"<concise Jarvis reply>\", \"expect_reply\": false}}\n"
+		"- conversation_control: {\"op\": \"conversation_control\", \"target\": {}, \"args\": {\"action\": \"enter|exit|reset\"}}\n"
+		"- wm_help: {\"op\": \"wm_help\", \"target\": {\"query\": \"<wm_or_shortcut_question>\"}}\n\n"
 		"DECISION GUIDELINES:\n"
 		"1. If the user asks about an error or text on a terminal screen and `Live Terminal / Tmux Panes` does not already contain the answer, call `inspect_terminal` first; once you see the output, answer with `answer_question` or run the fix.\n"
 		"2. If the user asks about the web page, article, headings, or links in the browser and `Live Browser Accessibility Page Content` is empty, call `inspect_browser` first; once you see the page content, answer with `answer_question` or open the requested link with `open_url`.\n"
 		"3. If the user asks about clipboard / highlighted text, call `inspect_clipboard` first.\n"
 		"4. If the user asks a quick question about the current time, date, free RAM, disk space, CPU load, or active directory/window, answer IMMEDIATELY in 1 turn with `answer_question` using the live fields below (never spawn a terminal just to run `date` or `pwd` for a spoken question).\n"
 		"5. If the user asks to remember a preference or workflow, emit `remember_fact`. If they invoke a remembered workflow later, expand it into a JSON array `[step1, step2, ...]` of all actions in that workflow.\n"
-		"6. If the user refers to a previous turn ('actually move it to workspace 6 instead', 'nevermind bring it back', 'open that file', 'run that again in the other terminal'), use Recent Conversation Turns, Live Terminal Panes, Live Browser Content, and Recent action context.\n"
+		"6. Use previous conversation messages, Live Terminal Panes, Live Browser Content, and Recent action context to resolve follow-ups ('actually move it to workspace 6 instead', 'nevermind bring it back', 'open that file', 'explain more', 'yes do it'). If the user wants to end the conversation or reset the topic, emit `conversation_control`.\n"
 		"7. For any local or remote shell command, SSH command (e.g. `ssh tty.pt 'df -h'`), or CLI tool (nvim, vim, git, grep, find, make), use `spawn_shell_command`. If the user asks to OPEN A TERMINAL with a command/program/config (e.g. 'open a terminal with vim', 'abre um terminal com a minha configuracao de vim'), you MUST set \"new_terminal\": true on `spawn_shell_command`!\n";
 
 	char state_sum[4096];
 	summarize_world_for_prompt(eng, world, state_sum, sizeof(state_sum));
 
-	char user_msg0[9216];
+	char user_msg0[12288];
 	snprintf(
 		user_msg0, sizeof(user_msg0),
-		"%s\nCURRENT DESKTOP STATE, MEMORIES & CONVERSATION HISTORY:\n%s\nCURRENT USER REQUEST: %.512s\n\nOUTPUT ONLY VALID JSON (a single DSL object or a JSON array of DSL objects):",
-		TOOLS_DOC, state_sum, utterance
+		"%s%s\nCURRENT DESKTOP STATE & MEMORIES:\n%s\nCURRENT USER REQUEST: %.512s\n\nOUTPUT ONLY VALID JSON (a single DSL object or a JSON array of DSL objects):",
+		TOOLS_DOC_1, TOOLS_DOC_2, state_sum, utterance
 	);
 
 	/* Up to 3 ReAct turns with full multi-turn conversation history */
@@ -2485,6 +2752,13 @@ bool jarvis_auren_run_react_agent(
 	bool all_ok = true;
 	char combined_ops[256] = {0};
 	char combined_out[2048] = {0};
+	char combined_spoken[JARVIS_TEXT_LEN] = {0};
+	bool any_expect_reply = false;
+	bool any_question = false;
+	bool any_conv_exit = false;
+
+	int conv_timeout_s = jarvis_rc_get_int("conv_timeout_s", 180);
+	double history_ttl_s = (conv_timeout_s > 0) ? (double)conv_timeout_s : 180.0;
 
 	for (int turn = 0; turn < 3; turn++) {
 		char llm_content[8192] = {0};
@@ -2492,44 +2766,26 @@ bool jarvis_auren_run_react_agent(
 
 #ifndef __wasm__
 		if (eng->infer_mode == JARVIS_INFER_AUTO || eng->infer_mode == JARVIS_INFER_LLM) {
-			char esc_sys[2048], esc_u0[12288];
-			jjson_escape_str(sys_prompt, esc_sys, sizeof(esc_sys));
-			jjson_escape_str(user_msg0, esc_u0, sizeof(esc_u0));
-
 			const char *models[3] = {eng->llm_model, "fast", "kilo-auto/free"};
+			double now_s = now_ms() / 1000.0;
 
 			for (int mi = 0; mi < 3 && !llm_content[0]; mi++) {
 				if (mi > 0 && strcmp(models[mi], models[mi - 1]) == 0)
 					continue;
-				char req_body[32768];
-				int rpos = snprintf(
-					req_body, sizeof(req_body),
-					"{\"model\":\"%s\",\"stream\":true,\"temperature\":0.0,\"max_tokens\":512,\"messages\":["
-					"{\"role\":\"system\",\"content\":\"%s\"},"
-					"{\"role\":\"user\",\"content\":\"%s\"}",
-					models[mi], esc_sys, esc_u0
+				char *req_body = jarvis_build_chat_messages_json(
+					eng, models[mi], sys_prompt, user_msg0,
+					assistant_turns, user_obs_turns, turn,
+					now_s, history_ttl_s, 12
 				);
-				for (int pt = 0; pt < turn; pt++) {
-					char esc_a[4096], esc_o[4096];
-					jjson_escape_str(assistant_turns[pt], esc_a, sizeof(esc_a));
-					jjson_escape_str(user_obs_turns[pt], esc_o, sizeof(esc_o));
-					rpos += snprintf(
-						req_body + rpos,
-						(size_t)rpos < sizeof(req_body) ? sizeof(req_body) - (size_t)rpos : 0,
-						",{\"role\":\"assistant\",\"content\":\"%s\"}"
-						",{\"role\":\"user\",\"content\":\"%s\"}",
-						esc_a, esc_o
-					);
-				}
-				snprintf(
-					req_body + rpos,
-					(size_t)rpos < sizeof(req_body) ? sizeof(req_body) - (size_t)rpos : 0,
-					"]}"
-				);
+				if (!req_body) continue;
 
-				if (!http_post_json_sse_stream(eng->auren_url, "/v1/chat/completions", req_body,
-				                               !eng->dry_run, llm_content, sizeof(llm_content),
-				                               &turn_streamed_tts)) {
+				bool posted = http_post_json_sse_stream(
+					eng->auren_url, "/v1/chat/completions", req_body,
+					!eng->dry_run, llm_content, sizeof(llm_content),
+					&turn_streamed_tts
+				);
+				free(req_body);
+				if (!posted) {
 					continue;
 				}
 			}
@@ -2537,6 +2793,7 @@ bool jarvis_auren_run_react_agent(
 #else
 		(void)sys_prompt;
 		(void)user_msg0;
+		(void)history_ttl_s;
 #endif
 
 		if (!llm_content[0]) {
@@ -2603,6 +2860,31 @@ bool jarvis_auren_run_react_agent(
 			execute_dsl_via_xylem(eng, &st->dsl, &st->result);
 			out_res->last_dsl = st->dsl;
 			update_context_from_step(&eng->ctx, &st->dsl, world, st->result.output);
+
+			if (strcmp(st->dsl.op, "conversation_control") == 0 &&
+			    (strcasecmp(st->dsl.args.action, "exit") == 0 ||
+			     strcasecmp(st->dsl.args.action, "reset") == 0 ||
+			     strcasecmp(st->dsl.args.action, "off") == 0 ||
+			     strcasecmp(st->dsl.args.action, "stop") == 0 ||
+			     strcasecmp(st->dsl.args.action, "clear") == 0)) {
+				any_conv_exit = true;
+			}
+			if (st->dsl.args.expect_reply) {
+				any_expect_reply = true;
+			}
+			if (strcmp(st->dsl.op, "answer_question") == 0) {
+				any_question = true;
+				const char *ans = st->dsl.args.answer[0] ? st->dsl.args.answer : st->result.output;
+				if (ans && ans[0]) {
+					size_t slen = strlen(combined_spoken);
+					snprintf(combined_spoken + slen, sizeof(combined_spoken) - slen, "%s%s", slen ? " " : "", ans);
+					if (strchr(ans, '?') != NULL) any_expect_reply = true;
+				}
+			} else if (st->dsl.args.reply[0]) {
+				size_t slen = strlen(combined_spoken);
+				snprintf(combined_spoken + slen, sizeof(combined_spoken) - slen, "%s%s", slen ? " " : "", st->dsl.args.reply);
+				if (strchr(st->dsl.args.reply, '?') != NULL) any_expect_reply = true;
+			}
 
 			if (!st->result.success) {
 				all_ok = false;
@@ -2671,7 +2953,14 @@ bool jarvis_auren_run_react_agent(
 		snprintf(out_res->combined_result.error, sizeof(out_res->combined_result.error), "one or more agent steps failed");
 	}
 	snprintf(out_res->source, sizeof(out_res->source), "agent:auren-llm:%s", eng->llm_model);
-	record_session_turn(eng, utterance, combined_ops, combined_out);
+	if (!combined_spoken[0]) {
+		jarvis_format_voice_reply(eng->ont, out_res, combined_spoken, sizeof(combined_spoken));
+	}
+	if (!any_conv_exit && (any_question || any_expect_reply)) {
+		eng->ctx.conv_active = true;
+		eng->ctx.conv_last_ts = now_ms() / 1000.0;
+	}
+	record_session_turn(eng, utterance, combined_ops, combined_out, combined_spoken, any_expect_reply);
 	return true;
 }
 
@@ -2693,6 +2982,15 @@ bool jarvis_process(
 	if (jarvis_is_non_speech_hallucination(utterance)) {
 		snprintf(out_result->error, sizeof(out_result->error), "Filtered non-speech ASR hallucination");
 		return false;
+	}
+
+	double now_s = now_ms() / 1000.0;
+	int conv_timeout_s = jarvis_rc_get_int("conv_timeout_s", 180);
+	if (conv_timeout_s > 0 && eng->ctx.conv_active && eng->ctx.conv_last_ts > 0.0 &&
+	    (now_s - eng->ctx.conv_last_ts) > (double)conv_timeout_s) {
+		eng->ctx.conv_active = false;
+		eng->ctx.conv_last_ts = 0.0;
+		if (!eng->dry_run) save_context_to_disk(eng);
 	}
 
 	const char *surf = (active_surface && *active_surface) ? active_surface : "any";
@@ -2723,18 +3021,17 @@ bool jarvis_process(
 	}
 
 	/* If the previous turn within 25s ended in a clarifying question (answer_question
-	 * with '?' in output, e.g. "Open what? Please specify...") and the user's new utterance
+	 * with '?' in output/spoken, e.g. "Open what? Please specify...") and the user's new utterance
 	 * is a short clarification that stitches with the previous incomplete utterance into a
 	 * high-confidence Tier-0 action (e.g. "open a new" + "terminal", or "move this window to" + "5"),
 	 * stitch them automatically. */
 	char stitched_utterance[512];
 	if (eng->turn_count > 0) {
 		const jarvis_session_turn_t *last_t = &eng->turns[eng->turn_count - 1];
-		double now_s = now_ms() / 1000.0;
 		if (last_t->utterance[0] != '\0' &&
 		    (now_s - last_t->ts) <= 25.0 &&
 		    strcmp(last_t->ops, "answer_question") == 0 &&
-		    strchr(last_t->output, '?') != NULL &&
+		    (strchr(last_t->output, '?') != NULL || strchr(last_t->spoken, '?') != NULL) &&
 		    strlen(utterance) <= 48) {
 			jarvis_ir_t ir_alone, ir_stitched;
 			bool alone_ok = (!requires_agent_reasoning(eng, utterance)) &&
@@ -2751,16 +3048,6 @@ bool jarvis_process(
 		}
 	}
 
-	/* 1.5. Evaluate deterministic Tier-0 single-clause fast-path BEFORE ReAct agent routing
-	 * if the utterance is an unambiguous single clause without interrogatives or causal triggers. */
-	if (utterance[strlen(utterance) - 1] != '?') {
-		char probe_clauses[JARVIS_MAX_STEPS][512];
-		size_t n_probe = jarvis_split_clauses(eng->ont, utterance, probe_clauses, JARVIS_MAX_STEPS);
-		if (n_probe == 1 && !requires_agent_reasoning(eng, utterance)) {
-			/* falls through to step 3 Tier-0 solver */
-		}
-	}
-
 	/* 2. Check if whole utterance requires multi-turn ReAct agent reasoning */
 	if (requires_agent_reasoning(eng, utterance)) {
 		if (jarvis_auren_run_react_agent(eng, utterance, &world, out_result)) {
@@ -2771,7 +3058,7 @@ bool jarvis_process(
 		}
 	}
 
-	/* 3. Split into atomic clauses for deterministic or hybrid multi-clause chaining */
+	/* 3. Split into atomic clauses for deterministic Tier-0 or hybrid multi-clause chaining */
 	char clauses[JARVIS_MAX_STEPS][512];
 	size_t n_clauses = jarvis_split_clauses(eng->ont, utterance, clauses, JARVIS_MAX_STEPS);
 	if (n_clauses == 0) {
@@ -2849,6 +3136,10 @@ bool jarvis_process(
 	bool all_ok = true;
 	char combined_out[2048] = {0};
 	char combined_ops[256] = {0};
+	char combined_spoken[JARVIS_TEXT_LEN] = {0};
+	bool any_expect_reply = false;
+	bool any_question = false;
+	bool any_conv_exit = false;
 
 	for (size_t ci = 0; ci < n_clauses && out_result->step_count < JARVIS_MAX_STEPS; ci++) {
 		double t_step0 = now_ms();
@@ -2903,6 +3194,31 @@ bool jarvis_process(
 		out_result->last_dsl = st->dsl;
 		out_result->step_count++;
 
+		if (strcmp(st->dsl.op, "conversation_control") == 0 &&
+		    (strcasecmp(st->dsl.args.action, "exit") == 0 ||
+		     strcasecmp(st->dsl.args.action, "reset") == 0 ||
+		     strcasecmp(st->dsl.args.action, "off") == 0 ||
+		     strcasecmp(st->dsl.args.action, "stop") == 0 ||
+		     strcasecmp(st->dsl.args.action, "clear") == 0)) {
+			any_conv_exit = true;
+		}
+		if (st->dsl.args.expect_reply) {
+			any_expect_reply = true;
+		}
+		if (strcmp(st->dsl.op, "answer_question") == 0) {
+			any_question = true;
+			const char *ans = st->dsl.args.answer[0] ? st->dsl.args.answer : st->result.output;
+			if (ans && ans[0]) {
+				size_t slen = strlen(combined_spoken);
+				snprintf(combined_spoken + slen, sizeof(combined_spoken) - slen, "%s%s", slen ? " " : "", ans);
+				if (strchr(ans, '?') != NULL) any_expect_reply = true;
+			}
+		} else if (st->dsl.args.reply[0]) {
+			size_t slen = strlen(combined_spoken);
+			snprintf(combined_spoken + slen, sizeof(combined_spoken) - slen, "%s%s", slen ? " " : "", st->dsl.args.reply);
+			if (strchr(st->dsl.args.reply, '?') != NULL) any_expect_reply = true;
+		}
+
 		if (!st->result.success) all_ok = false;
 
 		size_t oplen = strlen(combined_ops);
@@ -2933,6 +3249,13 @@ bool jarvis_process(
 	if (!all_ok) {
 		snprintf(out_result->combined_result.error, sizeof(out_result->combined_result.error), "one or more steps failed");
 	}
-	record_session_turn(eng, utterance, combined_ops, combined_out);
+	if (!combined_spoken[0]) {
+		jarvis_format_voice_reply(eng->ont, out_result, combined_spoken, sizeof(combined_spoken));
+	}
+	if (!any_conv_exit && (any_question || any_expect_reply)) {
+		eng->ctx.conv_active = true;
+		eng->ctx.conv_last_ts = now_ms() / 1000.0;
+	}
+	record_session_turn(eng, utterance, combined_ops, combined_out, combined_spoken, any_expect_reply);
 	return out_result->ok;
 }

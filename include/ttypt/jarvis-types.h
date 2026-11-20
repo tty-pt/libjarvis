@@ -37,7 +37,7 @@ extern "C" {
 #define JARVIS_MAX_PANES       8
 #define JARVIS_MAX_STEPS       8
 #define JARVIS_MAX_MEMORIES    64
-#define JARVIS_MAX_TURNS       8
+#define JARVIS_MAX_TURNS       16
 
 #define JARVIS_SAMPLE_RATE     16000
 #define JARVIS_FRAME_MS        20
@@ -139,6 +139,8 @@ typedef struct {
 	char   last_url[JARVIS_CLAUSE_LEN];
 	char   last_file[JARVIS_STR_LEN];
 	int    last_line;
+	bool   conv_active;
+	double conv_last_ts;
 } jarvis_context_t;
 
 /**
@@ -245,6 +247,7 @@ typedef struct {
 		bool   speak;
 		bool   background;
 		bool   streamed_tts;
+		bool   expect_reply;
 	} args;
 
 	/* Verification expectations */

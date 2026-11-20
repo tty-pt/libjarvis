@@ -684,24 +684,6 @@
         "sobe a pagina"
       ],
       "light": []
-    },
-    "AGENT_ASK": {
-      "primary": [
-        "ask pi",
-        "tell pi",
-        "have pi",
-        "ask the agent",
-        "tell the agent",
-        "ask coding agent",
-        "pi agent",
-        "pede ao pi",
-        "diz ao pi",
-        "pergunta ao pi",
-        "pede ao agente",
-        "diz ao agente",
-        "pergunta ao agente"
-      ],
-      "light": []
     }
   },
   "entities": {
@@ -2925,16 +2907,6 @@
       "surface": "any"
     },
     {
-      "id": "agent.ask",
-      "verbs": [
-        "AGENT_ASK"
-      ],
-      "required_entities": [],
-      "forbid_entities": [],
-      "forbid_residual": false,
-      "surface": "any"
-    },
-    {
       "id": "app.launch",
       "verbs": [
         "OPEN_LAUNCH",
@@ -2964,7 +2936,46 @@
   "wake_word": "jarbas",
   "wake_variants": [
     "jarbas",
-    "jarvis"
+    "jarvis",
+    "zarbas",
+    "zarbis",
+    "zarabas",
+    "xarbas",
+    "sarbas",
+    "darbas",
+    "carabas",
+    "jarbos",
+    "jardas",
+    "jarras",
+    "jarra",
+    "jarviz",
+    "jarves",
+    "jarvus",
+    "jarvas",
+    "jarvisz",
+    "jarvis,",
+    "jarbas,",
+    "charbas",
+    "charvis",
+    "djarvis",
+    "jarvi",
+    "jarbi",
+    "jarbs",
+    "jarvs",
+    "jarbez",
+    "jarbes",
+    "jarba",
+    "jarva",
+    "jabas",
+    "jabis",
+    "jabes",
+    "javis",
+    "javes",
+    "jarbus",
+    "jarbaix",
+    "jarbax",
+    "jarbash",
+    "jarbesh"
   ],
   "polite_prefixes": [
     "please",
@@ -3846,6 +3857,72 @@
       "action": "off",
       "surface": "any",
       "score": 0.98
+    },
+    {
+      "phrases": [
+        "conversation mode",
+        "enter conversation mode",
+        "start conversation",
+        "lets chat",
+        "let's chat",
+        "lets talk",
+        "let's talk",
+        "stay listening",
+        "keep listening",
+        "modo conversa",
+        "entra em modo conversa",
+        "vamos conversar",
+        "fica a ouvir"
+      ],
+      "cap": "conversation.control",
+      "action": "enter",
+      "surface": "any",
+      "score": 0.98
+    },
+    {
+      "phrases": [
+        "end conversation",
+        "exit conversation",
+        "exit conversation mode",
+        "stop conversation",
+        "close conversation",
+        "goodbye jarvis",
+        "goodbye jarbas",
+        "thats all",
+        "that's all",
+        "termina a conversa",
+        "terminar conversa",
+        "fim de conversa",
+        "sai do modo conversa",
+        "sair do modo conversa",
+        "encerrar conversa",
+        "ate logo jarbas",
+        "tchau jarbas",
+        "por agora e tudo"
+      ],
+      "cap": "conversation.control",
+      "action": "exit",
+      "surface": "any",
+      "score": 0.98
+    },
+    {
+      "phrases": [
+        "new conversation",
+        "reset conversation",
+        "clear conversation",
+        "clear history",
+        "forget conversation",
+        "nova conversa",
+        "reinicia a conversa",
+        "reiniciar conversa",
+        "limpa a conversa",
+        "limpar historico",
+        "esquece esta conversa"
+      ],
+      "cap": "conversation.control",
+      "action": "reset",
+      "surface": "any",
+      "score": 0.98
     }
   ],
   "react_rules": [
@@ -4495,8 +4572,8 @@
   "description": "Jarvis Universal Semantic Ontology & Capability Graph. 100% configuration-driven language & intent compilation.",
   "lang": "pt",
   "lang_name": "European Portuguese (pt-PT)",
-  "whisper_wake_prompt": "",
-  "whisper_cmd_prompt": "",
+  "whisper_wake_prompt": "Jarbas",
+  "whisper_cmd_prompt": "Jarbas; abre, fecha, muda, aumenta, baixa, pesquisa, terminal, calculadora, Firefox, janela, música, volume, espaço de trabalho, se faz favor.",
   "ui_strings": {
     "listening": "A ouvir...",
     "say_command": "Diga o seu comando agora.",
@@ -4524,6 +4601,10 @@
     "tts_interrupt": "",
     "answer_question": "${args.answer}",
     "tts_control": "Voz atualizada.",
+    "conversation_control": "Modo conversa atualizado.",
+    "conversation_control_enter": "Modo conversa ativo.",
+    "conversation_control_exit": "Modo conversa terminado.",
+    "conversation_control_reset": "Conversa reiniciada.",
     "open_terminal": "Terminal aberto.",
     "open_application": "A abrir ${target.identifier}.",
     "focus_relative_window": "Mudei para a outra janela.",
@@ -4549,7 +4630,6 @@
     "click": "Concluído.",
     "wait": "",
     "wm_help": "${output}",
-    "ask_agent": "Enviado para o agente.",
     "remember_fact": "Compreendido, vou memorizar isso.",
     "record_start": "Gravação iniciada.",
     "record_stop": "Gravação terminada.",

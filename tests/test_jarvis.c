@@ -1,10 +1,11 @@
-#include "../include/ttypt/jarvis.h"
+#include "../src/jarvis-internal.h"
 
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 extern jarvis_dsl_t  g_executed[32];
@@ -154,12 +155,11 @@ static void test_01_standard_structured_commands(jarvis_engine_t *eng)
 	assert_cmd_op(eng, "move this window to workspace three", "workspace_move_window", "\"workspace\":3");
 	assert_cmd_op(eng, "start recording screen and audio", "record_start", "\"mode\":\"both\"");
 	assert_cmd_op(eng, "stop recording", "record_stop", NULL);
-	assert_cmd_op(eng, "ask pi to refactor the parser", "ask_agent", "refactor the parser");
 	assert_cmd_op(eng, "stop talking", "tts_interrupt", NULL);
 	assert_cmd_op(eng, "Jarvis, be quiet", "tts_interrupt", NULL);
 	assert_cmd_op(eng, "please shut up", "tts_interrupt", NULL);
 	assert_cmd_op(eng, "play some jazz music in the background", "media_play", "\"background\":true");
-	printf("  [PASS] All 68 canonical structured commands resolved in pure C!\n");
+	printf("  [PASS] All 67 canonical structured commands resolved in pure C!\n");
 }
 
 static void test_02_multi_clause_and_anaphora(jarvis_engine_t *eng)
@@ -235,7 +235,6 @@ static void test_04_random_unstructured_commands_end_to_end(jarvis_engine_t *eng
 	static const char *const OPS_WEB[]   = {"search_web", "open_url", NULL};
 	static const char *const OPS_CWD[]   = {"answer_question", "spawn_shell_command", NULL};
 	static const char *const OPS_WMH[]   = {"wm_help", "answer_question", NULL};
-	static const char *const OPS_AGENT[] = {"ask_agent", NULL};
 
 	static const struct {
 		const char              *utt;
@@ -259,7 +258,6 @@ static void test_04_random_unstructured_commands_end_to_end(jarvis_engine_t *eng
 		{"look up the linux kernel epoll man page on google", OPS_WEB},
 		{"what directory am I currently working in?", OPS_CWD},
 		{"what shortcut do I press to split or tile windows in dwm?", OPS_WMH},
-		{"tell pi to inspect the memory recall latency", OPS_AGENT},
 		{NULL, NULL}
 	};
 
@@ -782,6 +780,23 @@ static void test_10_multilingual_portuguese_and_libmm_memory(jarvis_engine_t *en
 	int rc = system(cleanup_cmd);
 	(void)rc;
 
+	/* Verify default pt-PT ontology restores wake_variants and non-empty glossary prompts */
+	{
+		jarvis_ontology_t *pt_ont = jarvis_ontology_create("../data/ontology.json");
+		assert(pt_ont != NULL);
+		const char *wp = jarvis_ontology_get_wake_prompt(pt_ont);
+		const char *cp = jarvis_ontology_get_cmd_prompt(pt_ont);
+		assert(wp && wp[0] != '\0');
+		assert(cp && cp[0] != '\0');
+		char wcmd[128] = {0};
+		assert(jarvis_voice_match_wake(pt_ont, "xarbas, abre a calculadora", "jarbas", false, wcmd, sizeof(wcmd)) == 2);
+		assert(strcmp(wcmd, "abre a calculadora") == 0);
+		assert(jarvis_voice_match_wake(pt_ont, "jabas, fecha a janela", "jarbas", false, wcmd, sizeof(wcmd)) == 2);
+		assert(strcmp(wcmd, "fecha a janela") == 0);
+		assert(jarvis_voice_match_wake(pt_ont, "jarbos", "jarbas", false, wcmd, sizeof(wcmd)) == 1);
+		jarvis_ontology_destroy(pt_ont);
+	}
+
 	/* 6. Pure non-English & non-Latin (Cyrillic + Japanese) custom ontology isolation test:
 	 * Verifies that:
 	 *   (a) Non-Latin scripts (Russian Cyrillic, Japanese CJK) are NOT falsely rejected as hallucinations;
@@ -968,6 +983,188 @@ static void test_10_multilingual_portuguese_and_libmm_memory(jarvis_engine_t *en
 	printf("  [PASS] UTF-8 diacritic folding, 20 Portuguese Tier-0 commands, pure Cyrillic ontology isolation, SOV Japanese word order, declarative capability compilation, and libmm recall verified!\n");
 }
 
+static void test_11_conversation_continuity(void)
+{
+	printf("Running test_11_conversation_continuity...\n");
+
+	/* 1. expect_reply normalize & serialize round-trip */
+	jarvis_dsl_t er_dsl;
+	assert(jarvis_normalize_dsl_json(
+		"{\"op\":\"answer_question\",\"args\":{\"answer\":\"Quer que eu continue?\",\"expect_reply\":true}}",
+		&er_dsl));
+	assert(strcmp(er_dsl.op, "answer_question") == 0);
+	assert(er_dsl.args.expect_reply == true);
+	char er_json[1024];
+	jarvis_dsl_to_json(&er_dsl, er_json, sizeof(er_json));
+	assert(strstr(er_json, "\"expect_reply\":true") != NULL);
+
+	/* 2. Isolated engine with temp context/session/rc paths */
+	int pid = (int)getpid();
+	char tmp_ctx[256], tmp_sess[256], tmp_mem[256], tmp_rc[256];
+	snprintf(tmp_ctx,  sizeof(tmp_ctx),  "/tmp/jarvis_t11_ctx_%d.json", pid);
+	snprintf(tmp_sess, sizeof(tmp_sess), "/tmp/jarvis_t11_sess_%d.json", pid);
+	snprintf(tmp_mem,  sizeof(tmp_mem),  "/tmp/jarvis_t11_mem_%d.json", pid);
+	snprintf(tmp_rc,   sizeof(tmp_rc),   "/tmp/jarvis_t11_rc_%d", pid);
+	unlink(tmp_ctx);
+	unlink(tmp_sess);
+	unlink(tmp_mem);
+
+	FILE *rcfp = fopen(tmp_rc, "wb");
+	assert(rcfp != NULL);
+	fprintf(rcfp, "conv_timeout_s = 180\nconv_followup_ms = 9000\n");
+	fclose(rcfp);
+
+	const char *old_rc_env = getenv("JARVISRC");
+	char saved_rc[512] = {0};
+	if (old_rc_env) snprintf(saved_rc, sizeof(saved_rc), "%s", old_rc_env);
+	setenv("JARVISRC", tmp_rc, 1);
+
+	jarvis_config_t cfg;
+	jarvis_config_init(&cfg);
+	cfg.infer_mode    = JARVIS_INFER_NONE;
+	cfg.ontology_path = "../data/ontology.json";
+	cfg.context_path  = tmp_ctx;
+	cfg.session_path  = tmp_sess;
+	cfg.memory_path   = tmp_mem;
+
+	jarvis_engine_t *ceng = jarvis_engine_create(&cfg);
+	assert(ceng != NULL);
+
+	/* 3. conversation_control enter/exit/reset + Tier-0 fast-path inside conv_active */
+	jarvis_process_result_t r;
+	assert(jarvis_process(ceng, "modo conversa", "terminal", &r));
+	assert(strcmp(r.last_dsl.op, "conversation_control") == 0);
+	assert(strcmp(r.last_dsl.args.action, "enter") == 0);
+	assert(ceng->ctx.conv_active == true);
+	assert(ceng->ctx.conv_last_ts > 0.0);
+
+	assert(jarvis_process(ceng, "abre a calculadora", "terminal", &r));
+	assert(strcmp(r.last_dsl.op, "open_application") == 0);
+	assert(strcmp(r.last_dsl.target.identifier, "gnome-calculator") == 0);
+	assert(strcmp(r.source, "solver") == 0);
+	assert(ceng->ctx.conv_active == true);
+	assert(ceng->turn_count >= 2);
+
+	/* Anaphora guard: "retoma isso" must NOT hijack to media_play during non-media conv_active */
+	char ana_out[256] = {0};
+	jarvis_resolve_anaphora("retoma isso", &ceng->ctx, ana_out, sizeof(ana_out));
+	assert(strcmp(ana_out, "retoma isso") == 0);
+
+	jarvis_context_t media_ctx = ceng->ctx;
+	snprintf(media_ctx.last_op, sizeof(media_ctx.last_op), "media_pause");
+	jarvis_resolve_anaphora("retoma isso", &media_ctx, ana_out, sizeof(ana_out));
+	assert(strcmp(ana_out, "retoma isso") != 0);
+
+	/* 4. Session & context persistence across engine recreate */
+	jarvis_engine_destroy(ceng);
+	ceng = jarvis_engine_create(&cfg);
+	assert(ceng != NULL);
+	assert(ceng->ctx.conv_active == true);
+	assert(ceng->turn_count >= 2);
+	assert(strcmp(ceng->turns[ceng->turn_count - 1].ops, "open_application") == 0);
+	assert(ceng->turns[ceng->turn_count - 1].spoken[0] != '\0');
+
+	assert(jarvis_process(ceng, "termina a conversa", "terminal", &r));
+	assert(strcmp(r.last_dsl.op, "conversation_control") == 0);
+	assert(strcmp(r.last_dsl.args.action, "exit") == 0);
+	assert(ceng->ctx.conv_active == false);
+
+	assert(jarvis_process(ceng, "enter conversation mode", "terminal", &r));
+	assert(ceng->ctx.conv_active == true);
+
+	assert(jarvis_process(ceng, "reset conversation", "terminal", &r));
+	assert(strcmp(r.last_dsl.op, "conversation_control") == 0);
+	assert(strcmp(r.last_dsl.args.action, "reset") == 0);
+	assert(ceng->ctx.conv_active == false);
+	assert(ceng->turn_count == 0);
+
+	/* 5. Timeout expiry resets stale conv_active */
+	ceng->ctx.conv_active = true;
+	ceng->ctx.conv_last_ts = 1.0;
+	assert(jarvis_process(ceng, "open terminal", "terminal", &r));
+	assert(strcmp(r.last_dsl.op, "open_terminal") == 0);
+	assert(ceng->ctx.conv_active == false);
+
+	/* 6. Dynamic jarvis_build_chat_messages_json: TTL pruning + multi-turn + >32KB prompt */
+	struct timeval tv_now;
+	gettimeofday(&tv_now, NULL);
+	double now_s = (double)tv_now.tv_sec + (double)tv_now.tv_usec / 1000000.0;
+
+	ceng->turn_count = 3;
+	memset(&ceng->turns[0], 0, 3 * sizeof(ceng->turns[0]));
+	ceng->turns[0].ts = 100.0; /* expired */
+	snprintf(ceng->turns[0].utterance, sizeof(ceng->turns[0].utterance), "old expired turn");
+	snprintf(ceng->turns[0].ops, sizeof(ceng->turns[0].ops), "answer_question");
+	snprintf(ceng->turns[0].spoken, sizeof(ceng->turns[0].spoken), "old expired answer");
+
+	ceng->turns[1].ts = now_s - 25.0;
+	snprintf(ceng->turns[1].utterance, sizeof(ceng->turns[1].utterance), "como esta a memoria?");
+	snprintf(ceng->turns[1].ops, sizeof(ceng->turns[1].ops), "answer_question");
+	snprintf(ceng->turns[1].output, sizeof(ceng->turns[1].output), "Tens 8 GB livres. Queres detalhes?");
+	snprintf(ceng->turns[1].spoken, sizeof(ceng->turns[1].spoken), "Tens 8 GB livres. Queres detalhes?");
+	ceng->turns[1].expect_reply = true;
+
+	ceng->turns[2].ts = now_s - 5.0;
+	snprintf(ceng->turns[2].utterance, sizeof(ceng->turns[2].utterance), "abre o terminal");
+	snprintf(ceng->turns[2].ops, sizeof(ceng->turns[2].ops), "open_terminal");
+	snprintf(ceng->turns[2].output, sizeof(ceng->turns[2].output), "opened");
+	snprintf(ceng->turns[2].spoken, sizeof(ceng->turns[2].spoken), "A abrir o terminal.");
+
+	char *big_u0 = (char *)malloc(36000);
+	assert(big_u0 != NULL);
+	memset(big_u0, 'A', 35990);
+	big_u0[35990] = '\0';
+
+	char asst_t[1][4096];
+	char obs_t[1][4096];
+	snprintf(asst_t[0], sizeof(asst_t[0]), "{\"op\":\"inspect_system\"}");
+	snprintf(obs_t[0], sizeof(obs_t[0]), "OBSERVATION: RAM 8G");
+
+	char *msg_json = jarvis_build_chat_messages_json(
+		ceng, "fast", "SYS", big_u0, asst_t, obs_t, 1, now_s, 180.0, 12);
+	free(big_u0);
+	assert(msg_json != NULL);
+	assert(strlen(msg_json) > 35000);
+	assert(strstr(msg_json, "old expired turn") == NULL);
+	assert(strstr(msg_json, "como esta a memoria?") != NULL);
+	assert(strstr(msg_json, "Tens 8 GB livres. Queres detalhes?") != NULL);
+	assert(strstr(msg_json, "\\\"expect_reply\\\":true") != NULL);
+	assert(strstr(msg_json, "abre o terminal") != NULL);
+	assert(strstr(msg_json, "A abrir o terminal.") != NULL);
+	assert(strstr(msg_json, "OBSERVATION: RAM 8G") != NULL);
+	jjson_val_t *parsed_msg = jjson_parse(msg_json);
+	assert(parsed_msg != NULL && parsed_msg->type == JJSON_OBJECT);
+	jjson_free(parsed_msg);
+	free(msg_json);
+
+	/* 7. Long TTS (>300 chars) multi-segment splitting without 260-char truncation */
+	const char *long_reply =
+		"Primeiro verificamos a carga do processador e a memoria livre no sistema Linux. "
+		"Depois inspecionamos os processos em segundo plano para garantir que nenhum servico bloqueou o audio. "
+		"Finalmente confirmamos que o canal de voz esta pronto para responder sem cortar frases longas nem truncar conteudo importante.";
+	char segs[16][JARVIS_STR_LEN];
+	size_t n_segs = jarvis_tts_split_segments(long_reply, segs, 16);
+	assert(n_segs >= 3);
+	size_t total_seg_chars = 0;
+	for (size_t i = 0; i < n_segs; i++) {
+		total_seg_chars += strlen(segs[i]);
+	}
+	assert(total_seg_chars > 300);
+
+	jarvis_engine_destroy(ceng);
+	unlink(tmp_ctx);
+	unlink(tmp_sess);
+	unlink(tmp_rc);
+	char cleanup_cmd[640];
+	snprintf(cleanup_cmd, sizeof(cleanup_cmd), "rm -rf %s %s.mm", tmp_mem, tmp_mem);
+	int rcc = system(cleanup_cmd);
+	(void)rcc;
+	if (saved_rc[0]) setenv("JARVISRC", saved_rc, 1);
+	else unsetenv("JARVISRC");
+
+	printf("  [PASS] Conversation continuity, Tier-0 fast-path, persistence, TTL pruning, >32KB chat JSON, and long TTS segmentation verified!\n");
+}
+
 int main(void)
 {
 	assert(xy_load("./mock_adapter") == XY_OK);
@@ -995,11 +1192,13 @@ int main(void)
 	test_10_multilingual_portuguese_and_libmm_memory(eng);
 
 	jarvis_engine_destroy(eng);
+	test_11_conversation_continuity();
+
 	char cleanup_cmd[640];
 	snprintf(cleanup_cmd, sizeof(cleanup_cmd), "rm -rf %s %s.mm", iso_mem, iso_mem);
 	int rc = system(cleanup_cmd);
 	(void)rc;
 
-	printf("\n=== ALL 10 LIBJARVIS PARITY, MULTILINGUAL & LIBMM SUITES PASSED IN PURE C ===\n");
+	printf("\n=== ALL 11 LIBJARVIS PARITY, MULTILINGUAL, CONVERSATION & LIBMM SUITES PASSED IN PURE C ===\n");
 	return 0;
 }
