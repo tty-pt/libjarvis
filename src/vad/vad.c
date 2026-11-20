@@ -216,6 +216,8 @@ double vad_calc_keep_db(double utter_amb_avg, double utter_amb_std,
 
 bool vad_push_frame(vad_ctx_t *ctx, const float *frame_samples, size_t count, float db)
 {
+    (void)frame_samples;
+    (void)count;
     if (!ctx)
         return false;
 

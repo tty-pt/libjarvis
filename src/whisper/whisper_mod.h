@@ -75,6 +75,11 @@ float *whisper_normalize_pcm_agc(const float *pcm, int n_samples);
 /* Collapse repetitions in text */
 void whisper_collapse_repetitions(char *s, size_t s_sz);
 
+/* Set global signal pointers for abort callback */
+void whisper_set_global_signals(volatile sig_atomic_t *running,
+                                volatile sig_atomic_t *cancel_req,
+                                volatile sig_atomic_t *stop_req);
+
 #ifdef __cplusplus
 }
 #endif

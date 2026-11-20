@@ -26,6 +26,7 @@
 
 #include <ttypt/jarvis.h>
 #include "whisper.h"
+#include "jarvisd_internal.h"
 
 static volatile sig_atomic_t g_jarvis_active = 0;
 static jarvis_engine_t      *g_jarvis_eng    = NULL;
@@ -1483,7 +1484,7 @@ is_bargein_stop_phrase(const char *text)
 	return jarvis_ontology_is_tts_interrupt(get_daemon_ont(), norm) ? 1 : 0;
 }
 
-static void
+void
 jarvis_set_active(int active)
 {
 	const char *u = get_username();
@@ -2721,7 +2722,7 @@ format_natural_voice_reply(const jarvis_process_result_t *res, char *out, size_t
 	jarvis_format_voice_reply(get_daemon_ont(), res, out, out_sz);
 }
 
-static void
+void
 run_inprocess_jarvis_turn(int srv, struct whisper_context *ctx_wake, int n_threads,
                           int *io_next_followup)
 {

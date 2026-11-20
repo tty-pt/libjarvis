@@ -171,7 +171,7 @@ void audio_release(audio_ctx_t *ctx, long hold_ms)
     pthread_mutex_unlock(&ctx->mtx);
 }
 
-int audio_get_state(const audio_ctx_t *ctx, audio_state_t *out_state)
+int audio_get_state(audio_ctx_t *ctx, audio_state_t *out_state)
 {
     if (!ctx || !out_state)
         return -1;
@@ -303,4 +303,18 @@ void *audio_thread_fn(void *arg)
 
     close_pw_record(&ctx->pw_fd, &ctx->pw_pid);
     return NULL;
+}
+
+pthread_cond_t *audio_get_cond(audio_ctx_t *ctx)
+{
+    if (!ctx)
+        return NULL;
+    return &ctx->cond;
+}
+
+void audio_set_running(audio_ctx_t *ctx, volatile sig_atomic_t *running)
+{
+    if (!ctx)
+        return;
+    ctx->running = running;
 }

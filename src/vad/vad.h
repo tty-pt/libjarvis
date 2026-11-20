@@ -8,7 +8,10 @@
 extern "C" {
 #endif
 
-typedef struct vad_biquad vad_biquad_t;
+typedef struct vad_biquad {
+    double hp_x1, hp_x2, hp_y1, hp_y2;
+    double lp_x1, lp_x2, lp_y1, lp_y2;
+} vad_biquad_t;
 
 typedef struct {
     double noise_floor_db;

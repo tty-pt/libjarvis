@@ -34,9 +34,9 @@ mods/hyprland/mod_hyprland.so: mods/hyprland/mod_hyprland.c include/ttypt/jarvis
 mods/tts/mod_tts.so: mods/tts/mod_tts.c include/ttypt/jarvis-types.h
 	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/tts/mod_tts.c $(LDFLAGS) -lxylem -ldl -lpthread -lm
 
-bin/jarvisd: $(JARVISD_OBJS) lib/libjarvis.so
+bin/jarvisd: src/jarvisd.c src/whisper.h lib/libjarvis.so
 	@mkdir -p bin
-	$(CC) $(CFLAGS) -o $@ $(JARVISD_OBJS) $(WHISPER_LIB) $(GGML_LIB) -Llib -ljarvis $(LDFLAGS) -lmm -lxylem -lstele -lcorm -lpthread -ldl -lm $(LDFLAGS-libjarvis-Linux)
+	$(CC) -Iinclude -Isrc -I$(HOME)/.local/include $(CFLAGS) -o $@ src/jarvisd.c $(WHISPER_LIB) $(GGML_LIB) -Llib -ljarvis $(LDFLAGS) -lmm -lxylem -lstele -lcorm -lpthread -ldl -lm $(LDFLAGS-libjarvis-Linux)
 
 test: all
 	$(MAKE) -C tests test

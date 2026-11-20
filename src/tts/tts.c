@@ -2,6 +2,7 @@
  * TTS module for jarvisd.
  */
 
+#include <ctype.h>
 #include <dlfcn.h>
 #include <math.h>
 #include <stdbool.h>
@@ -23,6 +24,12 @@ typedef struct {
     char loaded_model[512];
     char loaded_voice[512];
     float *kokoro_style;
+
+    /* espeak-ng function pointers */
+    void (*espeak_Init)(void);
+    void (*espeak_SetVoice)(const char *);
+    void (*espeak_TextToPhonemesTerm)(const char *, void *, int);
+    void (*espeak_Terminate)(void);
 } tts_state_t;
 
 struct tts_ctx {
@@ -55,7 +62,6 @@ typedef enum {
 } ort_idx_t;
 
 typedef void *(*OrtGetApiBase_fn)(void);
-typedef const void *(*OrtGetApi_fn)(int version);
 
 typedef void *(*ort_CreateEnv_fn)(int, const char *, void **);
 typedef void *(*ort_CreateSessionOptions_fn)(void **);
@@ -71,11 +77,6 @@ typedef int64_t (*ort_GetTensorShapeElementCount_fn)(void *, void *);
 typedef void *(*ort_GetTensorTypeAndShape_fn)(void *, void *, void **);
 typedef void (*ort_Release_fn)(void *);
 typedef void (*ort_ReleaseSessionOptions_fn)(void *);
-
-typedef void (*espeak_Init_fn)(void);
-typedef void (*espeak_SetVoice_fn)(const char *);
-typedef void (*espeak_TextToPhonemesTerm_fn)(const char *, void *, int);
-typedef void (*espeak_Terminate_fn)(void);
 
 tts_ctx_t *tts_create(void)
 {
@@ -118,6 +119,10 @@ void tts_destroy(tts_ctx_t *ctx)
         if (st->espeak_Terminate) st->espeak_Terminate();
         dlclose(st->espeak_dl);
         st->espeak_dl = NULL;
+        st->espeak_Init = NULL;
+        st->espeak_SetVoice = NULL;
+        st->espeak_TextToPhonemesTerm = NULL;
+        st->espeak_Terminate = NULL;
     }
     free(ctx);
 }
@@ -152,9 +157,16 @@ bool tts_ensure_loaded(tts_ctx_t *ctx, const char *voice)
     }
 
     OrtGetApiBase_fn get_base = (OrtGetApiBase_fn)dlsym(st->ort_dl, "OrtGetApiBase");
-    if (!get_base || !get_base()) return false;
+    if (!get_base) return false;
 
-    st->ort_vtbl = (const void **)get_base()->GetApi(ORT_API_VERSION);
+    const void *api_base = get_base();
+    if (!api_base) return false;
+
+    /* GetApi is a function pointer in the OrtApiBase struct */
+    const void *(*get_api)(int version) = *(const void *(**)(int))api_base;
+    if (!get_api) return false;
+
+    st->ort_vtbl = (const void **)get_api(ORT_API_VERSION);
     if (!ort_validate_vtable(st->ort_vtbl)) {
         tts_destroy(ctx);
         return false;

@@ -3,6 +3,7 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -20,7 +21,10 @@
 #include "../tts/tts.h"
 #include <ttypt/jarvis.h>
 
-#define MAX_UTTER_FRAMES 1500
+/* Forward declarations for rc functions */
+extern bool jarvis_rc_get(const char *key, const char *fallback, char *out, size_t out_sz);
+extern int jarvis_rc_get_int(const char *key, int fallback);
+
 #define WARM_HOLD_MS 60000L
 #define FRAME_MS 20
 #define FRAME_SAMPLES 320
@@ -204,7 +208,7 @@ void voice_handle_stream(int srv_fd, int cli_fd, const char *mode, const char *l
 
 void voice_run_turn(int srv_fd, struct whisper_context *ctx_wake, int n_threads,
                     int *io_next_followup, void *audio_ctx,
-                    struct jarvis_engine *engine, struct jarvis_ontology *ontology,
+                    struct jarvis_engine *engine, const jarvis_ontology_t *ontology,
                     int *running, volatile sig_atomic_t *stop_req,
                     volatile sig_atomic_t *cancel_req)
 {

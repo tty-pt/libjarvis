@@ -4,8 +4,10 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -16,8 +18,10 @@
 #include <unistd.h>
 
 #include "server.h"
+#include "jarvisd_internal.h"
 #include "../audio/audio.h"
 #include "../whisper/whisper_mod.h"
+#include "../voice/voice.h"
 #include <ttypt/jarvis.h>
 
 struct server_ctx {
@@ -152,6 +156,7 @@ static void handle_jarvis_status(server_ctx_t *ctx, int cli_fd, int active)
 
 static void handle_stream(server_ctx_t *ctx, int cli_fd, char *buf, size_t len)
 {
+    (void)len;
     char *save = NULL;
     char *cmd = strtok_r(buf, "|", &save);
     if (!cmd || strcmp(cmd, "STREAM") != 0) {
@@ -180,6 +185,8 @@ static void handle_stream(server_ctx_t *ctx, int cli_fd, char *buf, size_t len)
 
 static void handle_jarvis_wait(server_ctx_t *ctx, int cli_fd, char *buf, size_t len)
 {
+    (void)ctx;
+    (void)len;
     char *save = NULL;
     char *cmd = strtok_r(buf, "|", &save);
     if (!cmd || strcmp(cmd, "JARVIS_WAIT") != 0) {
@@ -197,7 +204,7 @@ static void handle_jarvis_wait(server_ctx_t *ctx, int cli_fd, char *buf, size_t 
 
     if (lang && thresh_str && sil_str && wake_word) {
         char out_cmd[4096];
-        voice_handle_wait((voice_config_t){
+        voice_config_t vcfg = {
             .port = ctx->cfg.port,
             .lang = lang,
             .thresh_db = strtod(thresh_str, NULL),
@@ -212,17 +219,20 @@ static void handle_jarvis_wait(server_ctx_t *ctx, int cli_fd, char *buf, size_t 
             .decoder = ctx->cfg.decoder,
             .audio_ctx = ctx->cfg.audio_ctx,
             .engine = ctx->cfg.jarvis_engine,
-            .ontology = NULL, // Would need to pass this
+            .ontology = NULL,
             .running = ctx->cfg.running,
             .stop_req = ctx->cfg.stop_req,
             .cancel_req = ctx->cfg.cancel_req,
-        }, out_cmd, sizeof(out_cmd));
+        };
+        voice_handle_wait(&vcfg, out_cmd, sizeof(out_cmd));
     }
     close(cli_fd);
 }
 
 static void handle_transcribe(server_ctx_t *ctx, int cli_fd, char *buf, size_t len)
 {
+    (void)ctx;
+    (void)len;
     char *save = NULL;
     char *cmd = strtok_r(buf, "|", &save);
     if (!cmd || strcmp(cmd, "TRANSCRIBE") != 0) {
@@ -274,19 +284,21 @@ void server_handle_client(server_ctx_t *ctx, int cli_fd, char *buf, size_t len)
         return;
     }
     if (strncmp(buf, "JARVIS_ON", 9) == 0) {
-        // jarvis_set_active(1);
+        jarvis_set_active(1);
         write_all(cli_fd, "ON\n", 3);
         close(cli_fd);
         return;
     }
     if (strncmp(buf, "JARVIS_OFF", 10) == 0) {
-        // jarvis_set_active(0);
+        jarvis_set_active(0);
         write_all(cli_fd, "OFF\n", 4);
         close(cli_fd);
         return;
     }
     if (strncmp(buf, "JARVIS_TOGGLE", 13) == 0) {
-        write_all(cli_fd, "OFF\n", 4);
+        extern volatile sig_atomic_t g_jarvis_active;
+        jarvis_set_active(g_jarvis_active ? 0 : 1);
+        write_all(cli_fd, g_jarvis_active ? "ON\n" : "OFF\n", g_jarvis_active ? 3 : 4);
         close(cli_fd);
         return;
     }
@@ -377,4 +389,11 @@ int server_run(server_ctx_t *ctx)
     }
 
     return 0;
+}
+
+int server_get_fd(const server_ctx_t *ctx)
+{
+    if (!ctx)
+        return -1;
+    return ctx->srv_fd;
 }

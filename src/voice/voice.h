@@ -11,7 +11,7 @@ extern "C" {
 struct whisper_context;
 struct whisper_decoder;
 struct jarvis_engine;
-struct jarvis_ontology;
+typedef struct jarvis_ontology jarvis_ontology_t;
 
 typedef struct {
     int port;
@@ -28,7 +28,7 @@ typedef struct {
     struct whisper_decoder *decoder;
     void *audio_ctx;
     struct jarvis_engine *engine;
-    struct jarvis_ontology *ontology;
+    const jarvis_ontology_t *ontology;
     int *running;
     volatile sig_atomic_t *stop_req;
     volatile sig_atomic_t *cancel_req;
@@ -46,7 +46,7 @@ void voice_handle_stream(int srv_fd, int cli_fd, const char *mode, const char *l
 /* In-process Jarvis turn (process command, execute, speak) */
 void voice_run_turn(int srv_fd, struct whisper_context *ctx_wake, int n_threads,
                     int *io_next_followup, void *audio_ctx,
-                    struct jarvis_engine *engine, struct jarvis_ontology *ontology,
+                    struct jarvis_engine *engine, const jarvis_ontology_t *ontology,
                     int *running, volatile sig_atomic_t *stop_req,
                     volatile sig_atomic_t *cancel_req);
 

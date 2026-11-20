@@ -2,6 +2,8 @@
  * Whisper decode worker module for jarvisd.
  */
 
+#include <ctype.h>
+#include <math.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -325,6 +327,7 @@ void whisper_collapse_repetitions(char *s, size_t s_sz)
 
 static int is_hallucination(const char *s)
 {
+    (void)s;
     return 0;
 }
 

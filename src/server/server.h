@@ -41,6 +41,9 @@ void server_handle_client(server_ctx_t *ctx, int cli_fd, char *buf, size_t len);
 /* Send control message to daemon */
 bool server_send_control(int port, const char *msg);
 
+/* Get server socket fd */
+int server_get_fd(const server_ctx_t *ctx);
+
 #ifdef __cplusplus
 }
 #endif

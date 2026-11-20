@@ -3,6 +3,7 @@
  */
 
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -23,21 +24,26 @@
 #include <ttypt/jarvis.h>
 #include <whisper.h>
 
+/* Forward declarations for rc functions */
+extern bool jarvis_rc_get(const char *key, const char *fallback, char *out, size_t out_sz);
+extern int jarvis_rc_get_int(const char *key, int fallback);
+
 #include "audio/audio.h"
 #include "vad/vad.h"
 #include "whisper/whisper_mod.h"
 #include "server/server.h"
 #include "tts/tts.h"
 #include "voice/voice.h"
+#include "jarvisd_internal.h"
 
 static volatile sig_atomic_t running = 1;
 static volatile sig_atomic_t g_stop_req = 0;
 static volatile sig_atomic_t g_cancel_req = 0;
+static volatile sig_atomic_t g_jarvis_active = 0;
 static volatile sig_atomic_t g_preempt_cli = -1;
 static char g_preempt_buf[2048];
 
 static jarvis_engine_t *g_jarvis_eng = NULL;
-static pthread_mutex_t g_jarvis_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 static void on_sig(int sig)
 {
@@ -57,6 +63,8 @@ static void on_cli_sigusr1(int sig)
     (void)sig;
     g_cancel_req = 1;
 }
+
+static bool send_control_msg(int port, const char *msg);
 
 static void quiet_log(enum ggml_log_level level, const char *text, void *user_data)
 {
@@ -281,7 +289,9 @@ static void jarvis_set_active(int active)
             fclose(fp);
         }
         write_state_file(state_file, "jarvis", NULL, NULL);
+        g_jarvis_active = 1;
     } else {
+        g_jarvis_active = 0;
         g_cancel_req = 1;
         jarvis_xy_tts_interrupt(0);
         unlink(jpid_file);
@@ -558,7 +568,7 @@ int main(int argc, char *argv[])
         fprintf(stderr, "jarvisd: failed to create audio context\n");
         return 1;
     }
-    audio->running = &running;
+    audio_set_running(audio, &running);
 
     whisper_decoder_t decoder;
     if (whisper_decoder_init(&decoder, ctx_main, n_threads, MAX_UTTER_FRAMES) != 0) {
@@ -578,12 +588,12 @@ int main(int argc, char *argv[])
         .n_threads = n_threads,
         .ctx_main = ctx_main,
         .ctx_wake = ctx_wake,
-        .decoder = &decoder,
+        .decoder = (struct whisper_decoder *)&decoder,
         .audio_ctx = audio,
         .jarvis_engine = g_jarvis_eng,
-        .running = &running,
-        .stop_req = &g_stop_req,
-        .cancel_req = &g_cancel_req,
+        .running = (int *)&running,
+        .stop_req = (volatile sig_atomic_t *)&g_stop_req,
+        .cancel_req = (volatile sig_atomic_t *)&g_cancel_req,
         .preempt_cli = &g_preempt_cli,
         .preempt_buf = g_preempt_buf,
         .preempt_buf_sz = sizeof(g_preempt_buf),
@@ -596,19 +606,18 @@ int main(int argc, char *argv[])
     }
 
     int next_followup = 0;
+    int srv_fd = server_get_fd(server);
 
     while (running) {
         if (g_jarvis_active) {
-            voice_run_turn(server->srv_fd, ctx_wake, n_threads, &next_followup,
-                           audio, g_jarvis_eng, jarvis_engine_get_ontology(g_jarvis_eng),
-                           &running, &g_stop_req, &g_cancel_req);
+            run_inprocess_jarvis_turn(srv_fd, ctx_wake, n_threads, &next_followup);
             continue;
         }
 
         next_followup = 0;
         struct sockaddr_in cli_addr;
         socklen_t cli_len = sizeof(cli_addr);
-        int cli_fd = accept(server->srv_fd, (struct sockaddr *)&cli_addr, &cli_len);
+        int cli_fd = accept(srv_fd, (struct sockaddr *)&cli_addr, &cli_len);
         if (cli_fd < 0) {
             if (errno == EINTR)
                 continue;
@@ -632,7 +641,9 @@ int main(int argc, char *argv[])
         g_jarvis_eng = NULL;
     }
     g_cancel_req = 1;
-    pthread_cond_broadcast(&audio->cond);
+    pthread_cond_t *audio_cond = audio_get_cond(audio);
+    if (audio_cond)
+        pthread_cond_broadcast(audio_cond);
     pthread_cond_broadcast(&decoder.cond);
     pthread_join(audio_tid, NULL);
     pthread_join(decode_tid, NULL);
@@ -641,7 +652,7 @@ int main(int argc, char *argv[])
     whisper_decoder_fini(&decoder);
     audio_destroy(audio);
     tts_destroy(tts);
-    close(server->srv_fd);
+    close(srv_fd);
     unlink(pid_path);
     close(lock_fd);
     whisper_free(ctx_main);

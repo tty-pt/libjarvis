@@ -15,6 +15,7 @@ extern "C" {
 #define AUDIO_RING_FRAMES     2000
 #define AUDIO_RING_SAMPLES    (AUDIO_RING_FRAMES * AUDIO_FRAME_SAMPLES)
 #define AUDIO_MAX_UTTER_FRAMES 1500
+#define MAX_UTTER_FRAMES      AUDIO_MAX_UTTER_FRAMES
 #define AUDIO_WARM_HOLD_MS    60000L
 
 typedef struct audio_ctx audio_ctx_t;
@@ -42,7 +43,7 @@ int audio_acquire(audio_ctx_t *ctx);
 void audio_release(audio_ctx_t *ctx, long hold_ms);
 
 /* Ring buffer access */
-int audio_get_state(const audio_ctx_t *ctx, audio_state_t *out_state);
+int audio_get_state(audio_ctx_t *ctx, audio_state_t *out_state);
 int audio_extract_pcm(audio_ctx_t *ctx, int64_t start_f, int64_t end_f,
                       float *out_pcm, int max_samples);
 
@@ -51,6 +52,12 @@ void *audio_thread_fn(void *arg);
 
 /* Utility */
 long audio_now_ms(void);
+
+/* Get condition variable for broadcasting */
+pthread_cond_t *audio_get_cond(audio_ctx_t *ctx);
+
+/* Set running flag pointer */
+void audio_set_running(audio_ctx_t *ctx, volatile sig_atomic_t *running);
 
 #ifdef __cplusplus
 }
