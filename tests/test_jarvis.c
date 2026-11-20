@@ -631,6 +631,316 @@ static void test_09_continuous_multi_turn_interaction(jarvis_engine_t *eng)
 	printf("  [PASS] Continuous 8-turn multi-modal conversation (browser -> link -> terminal -> editor -> replay -> undo) passed!\n");
 }
 
+static void test_10_multilingual_portuguese_and_libmm_memory(jarvis_engine_t *eng)
+{
+	printf("Running test_10_multilingual_portuguese_and_libmm_memory...\n");
+
+	/* 1. UTF-8 Latin diacritic + case folding verification */
+	char cleaned[128];
+	jarvis_clean_phrase("Toca a Próxima Música, por favor!", cleaned, sizeof(cleaned));
+	assert(strcmp(cleaned, "toca a proxima musica por favor") == 0);
+	jarvis_clean_phrase("Navega para a pasta de Transferências", cleaned, sizeof(cleaned));
+	assert(strcmp(cleaned, "navega para a pasta de transferencias") == 0);
+
+	/* 2. Portuguese Tier-0 commands across desktop, shell, git, filesystem, workspaces, windows, and media */
+	assert_cmd_op(eng, "abre um novo terminal", "open_terminal", NULL);
+	assert_cmd_op(eng, "por favor abre o firefox", "open_application", "firefox");
+	assert_cmd_op(eng, "abre a calculadora", "open_application", "gnome-calculator");
+	assert_cmd_op(eng, "mostra o estado do git", "spawn_shell_command", "git status");
+	assert_cmd_op(eng, "mostra as diferenças do git", "spawn_shell_command", "git diff");
+	assert_cmd_op(eng, "lista os ficheiros na pasta de transferências", "spawn_shell_command", "ls -la ~/Downloads");
+	assert_cmd_op(eng, "vai para a pasta de documentos", "spawn_shell_command", "cd ~/Documents");
+	assert_cmd_op(eng, "muda para a área de trabalho dois", "workspace_switch", "\"workspace\":2");
+	assert_cmd_op(eng, "move esta janela para a terceira área de trabalho", "workspace_move_window", "\"workspace\":3");
+	assert_cmd_op(eng, "ecrã inteiro", "window_fullscreen", NULL);
+	assert_cmd_op(eng, "fecha esta janela", "window_close", "\"kind\":\"window\"");
+	assert_cmd_op(eng, "fecha a outra janela", "window_close", "\"relation\":\"other\"");
+	assert_cmd_op(eng, "toca música lofi", "media_play", "lofi");
+	assert_cmd_op(eng, "próxima música", "media_next", NULL);
+	assert_cmd_op(eng, "aumenta o volume", "media_volume", "volume_up");
+	assert_cmd_op(eng, "baixa o volume", "media_volume", "volume_down");
+	assert_cmd_op(eng, "silencia o som", "media_volume", "volume_mute");
+	assert_cmd_op(eng, "escreve olá mundo e pressiona enter", "type_and_enter", "olá mundo");
+
+	/* 3. Portuguese multi-clause chaining & anaphora */
+	jarvis_process_result_t mres;
+	assert(jarvis_process(eng, "abre um terminal e depois mostra o estado do git", "terminal", &mres));
+	assert(mres.step_count == 2);
+	assert(strcmp(mres.steps[0].dsl.op, "open_terminal") == 0);
+	assert(strcmp(mres.steps[1].dsl.op, "spawn_shell_command") == 0);
+	assert(strstr(mres.steps[1].dsl.target.command, "git status") != NULL);
+
+	assert_cmd_op(eng, "pausa isso", "media_pause", NULL);
+	assert_cmd_op(eng, "continua a tocar", "media_play", NULL);
+
+	/* 4. Portuguese casual ergonomic idioms */
+	assert_cmd_op(eng, "a letra está muito pequena, não consigo ler", "press_key", "ctrl+plus");
+	assert_cmd_op(eng, "está muito alto, baixa isso", "media_volume", "volume_down");
+
+	/* 4b. Portuguese multi-turn ReAct agent loop (terminal diagnosis, browser AT-SPI2, workflow teaching, replay, undo) */
+	snprintf(g_mock_browser_page, sizeof(g_mock_browser_page),
+	         "[frame] Project Auren Status Dashboard - Mozilla Firefox\n"
+	         "[heading] Project Auren Status Dashboard\n"
+	         "[paragraph] Active deployment node: auren-node-07\n"
+	         "[link] Documentação da Arquitetura -> https://tty.pt/docs/architecture");
+	g_mock_pane_count = 1;
+	snprintf(g_mock_panes[0].pane, sizeof(g_mock_panes[0].pane), "st:0x1001");
+	snprintf(g_mock_panes[0].command, sizeof(g_mock_panes[0].command), "make");
+	snprintf(g_mock_panes[0].cwd, sizeof(g_mock_panes[0].cwd), "/home/quirinpa/site");
+	g_mock_panes[0].active = true;
+	snprintf(g_mock_panes[0].tail, sizeof(g_mock_panes[0].tail),
+	         "src/net_loop.c:215:4: error: 'epoll_fd' undeclared\n");
+
+	jarvis_process_result_t pt1, pt2, pt3, pt4, pt5, pt6;
+	assert(jarvis_process(eng, "o que está na página do navegador agora?", "terminal", &pt1));
+	assert(strcmp(pt1.last_dsl.op, "answer_question") == 0);
+	assert(strstr(pt1.combined_result.output, "auren-node-07") != NULL);
+
+	assert(jarvis_process(eng, "segue o link nessa página", "terminal", &pt2));
+	assert(strcmp(pt2.last_dsl.op, "open_url") == 0);
+	assert(strcmp(pt2.last_dsl.target.url, "https://tty.pt/docs/architecture") == 0);
+
+	assert(jarvis_process(eng, "qual é o erro no ecrã do terminal?", "terminal", &pt3));
+	assert(strcmp(pt3.last_dsl.op, "answer_question") == 0);
+	assert(strstr(pt3.combined_result.output, "src/net_loop.c:215") != NULL);
+
+	assert(jarvis_process(eng, "abre esse ficheiro na linha onde falhou", "terminal", &pt4));
+	assert(strcmp(pt4.last_dsl.op, "spawn_shell_command") == 0);
+	assert(strstr(pt4.last_dsl.target.command, "nvim +215 src/net_loop.c") != NULL);
+
+	assert(jarvis_process(eng, "manda esta janela para a área de trabalho 5", "terminal", &pt5));
+	assert(strcmp(pt5.last_dsl.op, "workspace_move_window") == 0);
+	assert(pt5.last_dsl.args.workspace == 5);
+
+	assert(jarvis_process(eng, "esquece, traz de volta", "terminal", &pt6));
+	assert(strcmp(pt6.last_dsl.op, "workspace_move_window") == 0);
+	assert(pt6.last_dsl.args.workspace == 1);
+
+	/* Hallucination phrase from ontology (Portuguese & English) */
+	assert(jarvis_is_non_speech_hallucination("obrigado"));
+	assert(jarvis_is_non_speech_hallucination("Thank you for watching!"));
+
+	g_mock_pane_count = 0;
+	g_mock_browser_page[0] = '\0';
+
+	/* 5. libmm-backed persistent memory remember & multi-axis recall round-trip */
+	char tmp_mem_path[256];
+	snprintf(tmp_mem_path, sizeof(tmp_mem_path), "/tmp/jarvis_test_mm_%d.json", (int)getpid());
+	jarvis_config_t mcfg;
+	jarvis_config_init(&mcfg);
+	mcfg.infer_mode  = JARVIS_INFER_NONE;
+	mcfg.memory_path = tmp_mem_path;
+
+	jarvis_engine_t *meng1 = jarvis_engine_create(&mcfg);
+	assert(meng1 != NULL);
+	assert(jarvis_memory_remember(meng1, "modo foco", "fecha a outra janela e toca música lofi"));
+	char recall_buf[1024] = {0};
+	assert(jarvis_memory_recall_json(meng1, "foco", recall_buf, sizeof(recall_buf)) > 2);
+	assert(strstr(recall_buf, "modo foco") != NULL);
+	assert(strstr(recall_buf, "lofi") != NULL);
+	jarvis_engine_destroy(meng1);
+
+	/* Verify a new engine instance with empty JSON file still recalls from the libmm .mm tier! */
+	unlink(tmp_mem_path);
+	jarvis_engine_t *meng2 = jarvis_engine_create(&mcfg);
+	assert(meng2 != NULL);
+	memset(recall_buf, 0, sizeof(recall_buf));
+	assert(jarvis_memory_recall_json(meng2, "foco", recall_buf, sizeof(recall_buf)) > 2);
+	assert(strstr(recall_buf, "modo foco") != NULL);
+	assert(strstr(recall_buf, "lofi") != NULL);
+	jarvis_engine_destroy(meng2);
+
+	char cleanup_cmd[640];
+	snprintf(cleanup_cmd, sizeof(cleanup_cmd), "rm -rf %s %s.mm", tmp_mem_path, tmp_mem_path);
+	int rc = system(cleanup_cmd);
+	(void)rc;
+
+	/* 6. Pure non-English & non-Latin (Cyrillic + Japanese) custom ontology isolation test:
+	 * Verifies that:
+	 *   (a) Non-Latin scripts (Russian Cyrillic, Japanese CJK) are NOT falsely rejected as hallucinations;
+	 *   (b) A custom ontology with its own verbs/stopwords/anaphora is NOT polluted by English defaults;
+	 *   (c) Tier-0 solving, multi-clause splitting, and anaphora work with zero English in the ontology.
+	 */
+	assert(!jarvis_is_non_speech_hallucination("открой терминал"));
+	assert(!jarvis_is_non_speech_hallucination("ターミナルを開いて"));
+	assert(jarvis_is_non_speech_hallucination("аааааааа"));
+	assert(jarvis_is_non_speech_hallucination("あーあーあーあーあー"));
+
+	char german_fold[64];
+	jarvis_clean_phrase("Schließen groß", german_fold, sizeof(german_fold));
+	assert(strcmp(german_fold, "schliessen gross") == 0 || strcmp(german_fold, "schliesen gros") == 0);
+
+	const char *pure_ru_ontology_json =
+		"{"
+		"\"wake_word\":\"джарвис\","
+		"\"stopwords\":[\"пожалуйста\",\"мне\",\"в\",\"на\"],"
+		"\"polite_prefixes\":[\"пожалуйста\",\"джарвис\"],"
+		"\"dictation_verbs\":[\"напиши\"],"
+		"\"deictic_pronouns\":[\"это\"],"
+		"\"clause_separators\":[\"и потом\",\"затем\"],"
+		"\"conjunctions\":[\"и\"],"
+		"\"arg_preps\":[\"немного \"],"
+		"\"interrogatives\":[\"что\",\"почему\"],"
+		"\"agent_triggers\":[],"
+		"\"idioms\":[],"
+		"\"react_rules\":[],"
+		"\"anaphora\":{"
+		"  \"pause_phrases\":[\"останови это\"],"
+		"  \"pause_target\":\"останови музыку\","
+		"  \"resume_phrases\":[\"включи снова\"],"
+		"  \"resume_prefix\":\"включи\","
+		"  \"resume_default\":\"включи музыку\","
+		"  \"spatial_pronouns\":[\"там\"],"
+		"  \"spatial_prep\":\"в\""
+		"},"
+		"\"verbs\":{"
+		"  \"OPEN_LAUNCH\":{\"primary\":[\"открой\",\"запусти\"]},"
+		"  \"WORKSPACE_SWITCH\":{\"primary\":[\"переключи на\"]},"
+		"  \"PLAY_STREAM\":{\"primary\":[\"включи\"]},"
+		"  \"PAUSE_STOP\":{\"primary\":[\"останови\"]},"
+		"  \"PRESENT\":{\"primary\":[\"покажи\"]}"
+		"},"
+		"\"entities\":{"
+		"  \"ui.container_kind\":[{\"id\":\"terminal\",\"phrases\":[\"терминал\"]}],"
+		"  \"ui.workspace\":[{\"id\":\"2\",\"phrases\":[\"рабочий стол два\",\"стол 2\"]}],"
+		"  \"media.object\":[{\"id\":\"music\",\"phrases\":[\"музыку\",\"музыка\"]}],"
+		"  \"fs.collection\":[{\"id\":\"files\",\"phrases\":[\"файлы\"]}],"
+		"  \"fs.location\":[{\"id\":\"~/Downloads\",\"phrases\":[\"загрузки\",\"downloads\"]}]"
+		"},"
+		"\"self_locatives\":{\"submit\":[],\"other\":[],\"terminal\":[],\"any\":[],\"new_terminal\":[],\"background\":[]}"
+		"}";
+
+	char ru_ont_path[256];
+	snprintf(ru_ont_path, sizeof(ru_ont_path), "/tmp/jarvis_test_ru_ont_%d.json", (int)getpid());
+	FILE *rfp = fopen(ru_ont_path, "wb");
+	assert(rfp != NULL);
+	fputs(pure_ru_ontology_json, rfp);
+	fclose(rfp);
+
+	jarvis_config_t rcfg;
+	jarvis_config_init(&rcfg);
+	rcfg.infer_mode    = JARVIS_INFER_NONE;
+	rcfg.ontology_path = ru_ont_path;
+	jarvis_engine_t *reng = jarvis_engine_create(&rcfg);
+	assert(reng != NULL);
+
+	/* English must NOT resolve in the pure Russian ontology (proving no English fallback contamination) */
+	jarvis_ontology_t *ru_ont = jarvis_ontology_create_from_json(pure_ru_ontology_json);
+	assert(ru_ont != NULL);
+	jarvis_ir_t en_probe;
+	assert(!jarvis_solve_clause(ru_ont, "open a new terminal", "any", NULL, &en_probe));
+	jarvis_ontology_destroy(ru_ont);
+
+	/* Re-create Russian engine so its ontology is the active one */
+	jarvis_engine_destroy(reng);
+	reng = jarvis_engine_create(&rcfg);
+	assert(reng != NULL);
+
+	/* Russian single-clause, multi-clause, and anaphora must resolve deterministically */
+	jarvis_process_result_t r_ru1, r_ru2, r_ru3, r_ru4;
+	assert(jarvis_process(reng, "Джарвис, открой терминал и потом переключи на рабочий стол два", "terminal", &r_ru1));
+	assert(r_ru1.step_count == 2);
+	assert(strcmp(r_ru1.steps[0].dsl.op, "open_terminal") == 0);
+	assert(strcmp(r_ru1.steps[1].dsl.op, "workspace_switch") == 0);
+	assert(r_ru1.steps[1].dsl.args.workspace == 2);
+
+	assert(jarvis_process(reng, "включи джаз", "terminal", &r_ru2));
+	assert(strcmp(r_ru2.last_dsl.op, "media_play") == 0);
+	assert(strcmp(r_ru2.last_dsl.target.query, "джаз") == 0);
+
+	assert(jarvis_process(reng, "останови это", "terminal", &r_ru3));
+	assert(strcmp(r_ru3.last_dsl.op, "media_pause") == 0);
+
+	assert(jarvis_process(reng, "включи снова", "terminal", &r_ru4));
+	assert(strcmp(r_ru4.last_dsl.op, "media_play") == 0);
+	assert(strcmp(r_ru4.last_dsl.target.query, "джаз") == 0);
+
+	jarvis_engine_destroy(reng);
+	unlink(ru_ont_path);
+
+	/* 7. SOV (Subject-Object-Verb, e.g. Japanese / Turkish / Korean) word-order & declarative capability compiler test:
+	 * Verifies that:
+	 *   (a) Trailing verbs at the end of a clause (SOV) properly extract the pre-verbal object;
+	 *   (b) Prefix/postposition modifiers work regardless of position;
+	 *   (c) Custom declarative capabilities with "slots" and "compile" templates compile directly to DSL without C code changes.
+	 */
+	const char *sov_ja_ontology_json =
+		"{"
+		"\"lang\":\"ja\","
+		"\"lang_name\":\"Japanese\","
+		"\"wake_word\":\"ジャービス\","
+		"\"stopwords\":[\"を\",\"に\",\"で\",\"ください\"],"
+		"\"polite_prefixes\":[\"ジャービス\",\"どうぞ\"],"
+		"\"polite_suffixes\":[\"ください\",\"お願いします\"],"
+		"\"verbs\":{"
+		"  \"OPEN_LAUNCH\":{\"primary\":[\"開いて\",\"起動して\"]},"
+		"  \"PLAY_STREAM\":{\"primary\":[\"再生して\",\"流して\"]},"
+		"  \"CUSTOM_BRIGHTNESS\":{\"primary\":[\"明るくして\",\"暗くして\"]}"
+		"},"
+		"\"entities\":{"
+		"  \"ui.container_kind\":[{\"id\":\"terminal\",\"phrases\":[\"ターミナル\"]}],"
+		"  \"gui.application\":[{\"id\":\"firefox\",\"phrases\":[\"ファイアフォックス\"]}],"
+		"  \"media.object\":[{\"id\":\"music\",\"phrases\":[\"音楽\"]}]"
+		"},"
+		"\"capabilities\":["
+		"  {\"id\":\"app.launch\",\"verbs\":[\"OPEN_LAUNCH\"],\"required_entities\":[\"gui.application\"]},"
+		"  {\"id\":\"media.play\",\"verbs\":[\"PLAY_STREAM\"],\"open_arg\":\"query\"},"
+		"  {"
+		"    \"id\":\"custom.brightness\","
+		"    \"verbs\":[\"CUSTOM_BRIGHTNESS\"],"
+		"    \"open_arg\":\"level\","
+		"    \"slots\":{\"level\":{\"source\":\"after_verb\",\"default\":\"50%\"}},"
+		"    \"compile\":{\"op\":\"spawn_shell_command\",\"target\":{\"command\":\"brightnessctl set ${level}\"}}"
+		"  }"
+		"],"
+		"\"self_locatives\":{\"submit\":[],\"other\":[\"別のウィンドウで\"],\"terminal\":[],\"any\":[],\"new_terminal\":[],\"background\":[\"バックグラウンドで\"]}"
+		"}";
+
+	jarvis_ontology_t *ja_ont = jarvis_ontology_create_from_json(sov_ja_ontology_json);
+	assert(ja_ont != NULL);
+
+	/* SOV 1: "ファイアフォックス を 開いて ください" (Firefox [obj] open [verb] please [suffix]) */
+	jarvis_ir_t ja_ir1;
+	assert(jarvis_solve_clause(ja_ont, "ファイアフォックス を 開いて ください", "any", NULL, &ja_ir1));
+	assert(strcmp(ja_ir1.cap, "app.launch") == 0);
+	jarvis_dsl_t ja_dsl1;
+	assert(jarvis_compile_ir_to_dsl_ex(ja_ont, &ja_ir1, "any", NULL, NULL, &ja_dsl1));
+	assert(strcmp(ja_dsl1.op, "open_application") == 0);
+	assert(strcmp(ja_dsl1.target.identifier, "firefox") == 0);
+
+	/* SOV 2: "バックグラウンドで ローファイ 音楽 を 再生して" (In background [prefix locative] lofi [query] music [media.object] play [trailing verb]) */
+	jarvis_ir_t ja_ir2;
+	assert(jarvis_solve_clause(ja_ont, "バックグラウンドで ローファイ 音楽 を 再生して", "any", NULL, &ja_ir2));
+	assert(strcmp(ja_ir2.cap, "media.play") == 0);
+	assert(ja_ir2.background == true);
+	jarvis_dsl_t ja_dsl2;
+	assert(jarvis_compile_ir_to_dsl_ex(ja_ont, &ja_ir2, "any", NULL, NULL, &ja_dsl2));
+	assert(strcmp(ja_dsl2.op, "media_play") == 0);
+	assert(strcmp(ja_dsl2.target.query, "ローファイ") == 0);
+	assert(ja_dsl2.args.background == true);
+
+	/* SOV 3: Bare "音楽 を 再生して" (music [generic media.object] play [verb]) -> empty query (resume playback, not search for "音楽") */
+	jarvis_ir_t ja_ir3;
+	assert(jarvis_solve_clause(ja_ont, "音楽 を 再生して", "any", NULL, &ja_ir3));
+	jarvis_dsl_t ja_dsl3;
+	assert(jarvis_compile_ir_to_dsl_ex(ja_ont, &ja_ir3, "any", NULL, NULL, &ja_dsl3));
+	assert(strcmp(ja_dsl3.op, "media_play") == 0);
+	assert(ja_dsl3.target.query[0] == '\0');
+
+	/* SOV 4: Declarative custom capability with "slots" and "compile" template: "80% に 明るくして" */
+	jarvis_ir_t ja_ir4;
+	assert(jarvis_solve_clause(ja_ont, "80% に 明るくして", "any", NULL, &ja_ir4));
+	assert(strcmp(ja_ir4.cap, "custom.brightness") == 0);
+	jarvis_dsl_t ja_dsl4;
+	assert(jarvis_compile_ir_to_dsl_ex(ja_ont, &ja_ir4, "any", NULL, NULL, &ja_dsl4));
+	assert(strcmp(ja_dsl4.op, "spawn_shell_command") == 0);
+	assert(strcmp(ja_dsl4.target.command, "brightnessctl set 80%") == 0);
+
+	jarvis_ontology_destroy(ja_ont);
+
+	printf("  [PASS] UTF-8 diacritic folding, 20 Portuguese Tier-0 commands, pure Cyrillic ontology isolation, SOV Japanese word order, declarative capability compilation, and libmm recall verified!\n");
+}
+
 int main(void)
 {
 	assert(xy_load("./mock_adapter") == XY_OK);
@@ -639,6 +949,9 @@ int main(void)
 	jarvis_config_init(&cfg);
 	/* Test deterministically without external LLM latency first, using built-in solver + ReAct synthesizer */
 	cfg.infer_mode = JARVIS_INFER_NONE;
+	char iso_mem[256];
+	snprintf(iso_mem, sizeof(iso_mem), "/tmp/jarvis_main_test_%d.json", (int)getpid());
+	cfg.memory_path = iso_mem;
 
 	jarvis_engine_t *eng = jarvis_engine_create(&cfg);
 	assert(eng != NULL);
@@ -652,8 +965,14 @@ int main(void)
 	test_07_casual_conversational_and_ergonomic_requests(eng);
 	test_08_browser_accessibility_and_terminal_screen_inspection(eng);
 	test_09_continuous_multi_turn_interaction(eng);
+	test_10_multilingual_portuguese_and_libmm_memory(eng);
 
 	jarvis_engine_destroy(eng);
-	printf("\n=== ALL 9 LIBJARVIS PARITY & CONTINUOUS INTERACTION SUITES PASSED IN PURE C ===\n");
+	char cleanup_cmd[640];
+	snprintf(cleanup_cmd, sizeof(cleanup_cmd), "rm -rf %s %s.mm", iso_mem, iso_mem);
+	int rc = system(cleanup_cmd);
+	(void)rc;
+
+	printf("\n=== ALL 10 LIBJARVIS PARITY, MULTILINGUAL & LIBMM SUITES PASSED IN PURE C ===\n");
 	return 0;
 }

@@ -6,9 +6,20 @@
 #include "../../src/jarvis-voice.c"
 #include "../../src/libjarvis.c"
 
+static jarvis_ontology_t *g_ont = NULL;
+
+ISO_EXPORT(int, jarvis_wasm_load_ontology_json, const char *json_str)
+{
+	if (!json_str || !*json_str) return 0;
+	jarvis_ontology_t *ont = jarvis_ontology_create_from_json(json_str);
+	if (!ont) return 0;
+	if (g_ont) jarvis_ontology_destroy(g_ont);
+	g_ont = ont;
+	return 1;
+}
+
 ISO_EXPORT(size_t, jarvis_wasm_solve_json, const char *utterance, const char *surface, char *out_json, size_t out_sz)
 {
-	static jarvis_ontology_t *g_ont = NULL;
 	if (!g_ont) {
 		g_ont = jarvis_ontology_create(NULL);
 	}
@@ -20,7 +31,7 @@ ISO_EXPORT(size_t, jarvis_wasm_solve_json, const char *utterance, const char *su
 		return 0;
 	}
 	jarvis_dsl_t dsl;
-	if (!jarvis_compile_ir_to_dsl(&ir, (surface && *surface) ? surface : "any", NULL, NULL, &dsl)) {
+	if (!jarvis_compile_ir_to_dsl_ex(g_ont, &ir, (surface && *surface) ? surface : "any", NULL, NULL, &dsl)) {
 		return 0;
 	}
 	return jarvis_dsl_to_json(&dsl, out_json, out_sz);
@@ -40,7 +51,6 @@ ISO_EXPORT(size_t, jarvis_wasm_normalize_dsl_json, const char *raw_json, char *o
 
 ISO_EXPORT(size_t, jarvis_wasm_split_clauses_json, const char *utterance, char *out_json, size_t out_sz)
 {
-	static jarvis_ontology_t *g_ont = NULL;
 	if (!g_ont) {
 		g_ont = jarvis_ontology_create(NULL);
 	}

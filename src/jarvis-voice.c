@@ -122,11 +122,139 @@ size_t jarvis_vad_get_samples(
 
 static const jarvis_ontology_t *jarvis_voice_default_ontology(void)
 {
-	static jarvis_ontology_t *g_voice_ont = NULL;
-	if (!g_voice_ont) {
-		g_voice_ont = jarvis_ontology_create(NULL);
+	return jarvis_ontology_get_active();
+}
+
+static const char *match_folded_wake_span(
+	const jarvis_ontology_t *ont,
+	const char              *transcript,
+	const char              *wake_clean,
+	bool                     allow_anywhere
+)
+{
+	if (!transcript || !wake_clean || !*wake_clean) return NULL;
+	size_t n_words = 0;
+	for (size_t i = 0; wake_clean[i]; i++) {
+		if (i == 0 || (wake_clean[i] != ' ' && wake_clean[i - 1] == ' ')) n_words++;
 	}
-	return g_voice_ont;
+	if (n_words == 0) return NULL;
+
+	const char *p = transcript;
+	while (*p) {
+		while (*p && (isspace((unsigned char)*p) || strchr(",.!?;:-", *p))) p++;
+		if (!*p) break;
+
+		/* If prefix-only mode, strip any leading polite prefixes from ontology before testing */
+		if (!allow_anywhere && ont) {
+			bool stripped_polite = true;
+			while (stripped_polite) {
+				stripped_polite = false;
+				for (size_t pi = 0; pi < ont->polite_prefix_count; pi++) {
+					const char *pp = ont->polite_prefixes[pi];
+					if (!pp[0]) continue;
+					size_t pw = 0;
+					for (size_t k = 0; pp[k]; k++) {
+						if (k == 0 || (pp[k] != ' ' && pp[k - 1] == ' ')) pw++;
+					}
+					const char *cur_p = p;
+					for (size_t w = 0; w < pw && *cur_p; w++) {
+						if (w > 0) {
+							while (*cur_p && (isspace((unsigned char)*cur_p) || strchr(",.!?;:-", *cur_p))) cur_p++;
+						}
+						while (*cur_p && !isspace((unsigned char)*cur_p) && !strchr(",.!?;:-", *cur_p)) cur_p++;
+					}
+					size_t plen = (size_t)(cur_p - p);
+					if (plen > 0 && plen < JARVIS_ID_LEN) {
+						char raw_p[JARVIS_ID_LEN], clean_p[JARVIS_ID_LEN];
+						memcpy(raw_p, p, plen);
+						raw_p[plen] = '\0';
+						jarvis_clean_phrase(raw_p, clean_p, sizeof(clean_p));
+						if (strcmp(clean_p, pp) == 0 && strcmp(clean_p, wake_clean) != 0) {
+							p = cur_p;
+							while (*p && (isspace((unsigned char)*p) || strchr(",.!?;:-", *p))) p++;
+							stripped_polite = true;
+							break;
+						}
+					}
+				}
+			}
+		}
+
+		const char *span_start = p;
+		const char *cur = p;
+		for (size_t w = 0; w < n_words && *cur; w++) {
+			if (w > 0) {
+				while (*cur && (isspace((unsigned char)*cur) || strchr(",.!?;:-", *cur))) cur++;
+			}
+			while (*cur && !isspace((unsigned char)*cur) && !strchr(",.!?;:-", *cur)) cur++;
+		}
+		size_t slen = (size_t)(cur - span_start);
+		if (slen > 0 && slen < JARVIS_ID_LEN) {
+			char raw_span[JARVIS_ID_LEN], clean_span[JARVIS_ID_LEN];
+			memcpy(raw_span, span_start, slen);
+			raw_span[slen] = '\0';
+			jarvis_clean_phrase(raw_span, clean_span, sizeof(clean_span));
+			if (strcmp(clean_span, wake_clean) == 0) {
+				return cur;
+			}
+		}
+		if (!allow_anywhere) break;
+		/* Advance one word */
+		while (*p && !isspace((unsigned char)*p) && !strchr(",.!?;:-", *p)) p++;
+	}
+	return NULL;
+}
+
+int jarvis_voice_match_wake(
+	const jarvis_ontology_t *ont,
+	const char              *text,
+	const char              *custom_wake_word,
+	bool                     allow_anywhere,
+	char                    *out_cmd,
+	size_t                   out_sz
+)
+{
+	if (out_cmd && out_sz > 0) out_cmd[0] = '\0';
+	if (!text || !*text) return 0;
+	if (!ont) ont = jarvis_voice_default_ontology();
+
+	const char *ww = (custom_wake_word && *custom_wake_word) ? custom_wake_word : (ont ? ont->wake_word : "");
+	char ww_clean[JARVIS_ID_LEN];
+	jarvis_clean_phrase(ww, ww_clean, sizeof(ww_clean));
+	if (!ww_clean[0] && ont && ont->wake_word[0]) {
+		jarvis_clean_phrase(ont->wake_word, ww_clean, sizeof(ww_clean));
+	}
+	if (!ww_clean[0]) return 0;
+
+	const char *matched_end = match_folded_wake_span(ont, text, ww_clean, allow_anywhere);
+
+	if (!matched_end && ont) {
+		for (size_t i = 0; i < ont->wake_variant_count; i++) {
+			char var_clean[JARVIS_ID_LEN];
+			jarvis_clean_phrase(ont->wake_variants[i], var_clean, sizeof(var_clean));
+			if (!var_clean[0]) continue;
+			matched_end = match_folded_wake_span(ont, text, var_clean, allow_anywhere);
+			if (matched_end) break;
+		}
+	}
+
+	if (!matched_end) return 0;
+
+	while (*matched_end && (isspace((unsigned char)*matched_end) || strchr(",.!?;:-", *matched_end))) {
+		matched_end++;
+	}
+
+	if (!*matched_end) return 1;
+
+	if (out_cmd && out_sz > 0) {
+		snprintf(out_cmd, out_sz, "%s", matched_end);
+		size_t clen = strlen(out_cmd);
+		while (clen > 0 && (isspace((unsigned char)out_cmd[clen - 1]) || strchr(".!?;,", out_cmd[clen - 1]))) {
+			out_cmd[--clen] = '\0';
+		}
+		if (!out_cmd[0]) return 1;
+	}
+	return 2;
 }
 
 bool jarvis_voice_extract_wake_command(
@@ -136,57 +264,96 @@ bool jarvis_voice_extract_wake_command(
 	size_t      out_sz
 )
 {
-	if (out_command && out_sz > 0) out_command[0] = '\0';
-	if (!transcript || !*transcript) return false;
+	return jarvis_voice_match_wake(NULL, transcript, wake_word, true, out_command, out_sz) != 0;
+}
 
-	const jarvis_ontology_t *ont = jarvis_voice_default_ontology();
-	const char *ww = (wake_word && *wake_word) ? wake_word : (ont ? ont->wake_word : "");
-	char ww_clean[JARVIS_ID_LEN];
-	jarvis_clean_phrase(ww, ww_clean, sizeof(ww_clean));
-	if (!ww_clean[0] && ont && ont->wake_word[0]) {
-		snprintf(ww_clean, sizeof(ww_clean), "%s", ont->wake_word);
+static const char *lookup_dsl_reply_var(const jarvis_process_result_t *res, const char *var, char *num_buf, size_t num_sz)
+{
+	if (!res || !var) return "";
+	const jarvis_dsl_t *d = &res->last_dsl;
+	if (strcmp(var, "output") == 0) return res->combined_result.output;
+	if (strcmp(var, "error") == 0) return res->error[0] ? res->error : res->combined_result.error;
+	if (strcmp(var, "op") == 0) return d->op;
+	if (strcmp(var, "target.identifier") == 0) return d->target.identifier;
+	if (strcmp(var, "target.command") == 0) return d->target.command;
+	if (strcmp(var, "target.kind") == 0) return d->target.kind;
+	if (strcmp(var, "target.relation") == 0) return d->target.relation;
+	if (strcmp(var, "target.url") == 0) return d->target.url;
+	if (strcmp(var, "target.query") == 0) return d->target.query;
+	if (strcmp(var, "args.answer") == 0) return d->args.answer[0] ? d->args.answer : res->combined_result.output;
+	if (strcmp(var, "args.text") == 0) return d->args.text;
+	if (strcmp(var, "args.action") == 0) return d->args.action;
+	if (strcmp(var, "args.direction") == 0) return d->args.direction;
+	if (strcmp(var, "args.mode") == 0) return d->args.mode;
+	if (strcmp(var, "args.key_combo") == 0) return d->args.key_combo;
+	if (strcmp(var, "args.workspace") == 0) {
+		snprintf(num_buf, num_sz, "%d", d->args.workspace);
+		return num_buf;
 	}
-	if (!ww_clean[0]) return false;
+	if (strcmp(var, "args.amount") == 0) {
+		snprintf(num_buf, num_sz, "%d", d->args.amount);
+		return num_buf;
+	}
+	return "";
+}
 
-	char low[JARVIS_CLAUSE_LEN];
-	size_t len = strlen(transcript);
-	if (len >= sizeof(low)) len = sizeof(low) - 1;
-	for (size_t i = 0; i < len; i++) low[i] = (char)tolower((unsigned char)transcript[i]);
-	low[len] = '\0';
+void jarvis_format_voice_reply(
+	const jarvis_ontology_t       *ont,
+	const jarvis_process_result_t *res,
+	char                          *out,
+	size_t                         out_sz
+)
+{
+	if (!out || out_sz == 0) return;
+	out[0] = '\0';
+	if (!res) return;
+	if (!ont) ont = jarvis_voice_default_ontology();
 
-	const char *matched_end = NULL;
-	size_t ww_len = strlen(ww_clean);
-	const char *hit = strstr(low, ww_clean);
-	if (hit && (hit == low || !isalnum((unsigned char)hit[-1])) && !isalnum((unsigned char)hit[ww_len])) {
-		matched_end = transcript + (hit - low) + ww_len;
+	const char *op = res->last_dsl.op;
+	if (strcmp(op, "tts_interrupt") == 0) return;
+
+	const char *tpl = NULL;
+	if (!res->combined_result.success) {
+		tpl = jarvis_ontology_get_reply_template(ont, "error");
+	} else {
+		if (strcmp(op, "media_play") == 0 && !res->last_dsl.target.query[0]) {
+			tpl = jarvis_ontology_get_reply_template(ont, "media_play_empty");
+		}
+		if (!tpl && op[0]) {
+			tpl = jarvis_ontology_get_reply_template(ont, op);
+		}
+		if (!tpl) {
+			tpl = jarvis_ontology_get_reply_template(ont, "default");
+		}
 	}
 
-	if (!matched_end && ont && strcmp(ww_clean, ont->wake_word) == 0) {
-		for (size_t i = 0; i < ont->wake_variant_count; i++) {
-			const char *var = ont->wake_variants[i];
-			size_t vlen = strlen(var);
-			const char *vh = strstr(low, var);
-			if (vh && (vh == low || !isalnum((unsigned char)vh[-1])) && !isalnum((unsigned char)vh[vlen])) {
-				matched_end = transcript + (vh - low) + vlen;
-				break;
+	if (!tpl) {
+		if (strcmp(op, "answer_question") == 0 || strcmp(op, "tts_control") == 0 || strcmp(op, "wm_help") == 0) {
+			snprintf(out, out_sz, "%s", res->combined_result.output);
+		}
+		return;
+	}
+	if (!tpl[0]) return;
+
+	size_t w = 0;
+	for (size_t i = 0; tpl[i] && w + 1 < out_sz; ) {
+		if (tpl[i] == '$' && tpl[i + 1] == '{') {
+			const char *end = strchr(tpl + i + 2, '}');
+			if (end) {
+				char vname[64] = {0}, num_buf[32] = {0};
+				size_t vlen = (size_t)(end - (tpl + i + 2));
+				if (vlen >= sizeof(vname)) vlen = sizeof(vname) - 1;
+				memcpy(vname, tpl + i + 2, vlen);
+				vname[vlen] = '\0';
+				const char *val = lookup_dsl_reply_var(res, vname, num_buf, sizeof(num_buf));
+				w += (size_t)snprintf(out + w, out_sz - w, "%s", val ? val : "");
+				i = (size_t)(end - tpl) + 1;
+				continue;
 			}
 		}
+		out[w++] = tpl[i++];
 	}
-
-	if (!matched_end) return false;
-
-	while (*matched_end && (isspace((unsigned char)*matched_end) || strchr(",.!?;:-", *matched_end))) {
-		matched_end++;
-	}
-
-	if (out_command && out_sz > 0) {
-		snprintf(out_command, out_sz, "%s", matched_end);
-		size_t clen = strlen(out_command);
-		while (clen > 0 && isspace((unsigned char)out_command[clen - 1])) {
-			out_command[--clen] = '\0';
-		}
-	}
-	return true;
+	out[w] = '\0';
 }
 
 bool jarvis_voice_is_lockdown_phrase(const char *phrase)
@@ -288,11 +455,14 @@ void jarvis_tts_clean_text(const char *raw_text, char *out_clean, size_t out_sz)
 
 	while (*p && w + 1 < out_sz && w < 260) {
 		if (strncmp(p, "http://", 7) == 0 || strncmp(p, "https://", 8) == 0) {
-			if (!prev_space && w + 1 < out_sz) out_clean[w++] = ' ';
-			size_t rem = out_sz - w;
-			if (rem > 5) {
-				memcpy(out_clean + w, "link", 4);
-				w += 4;
+			/* Strip scheme and keep only the bare domain for language-neutral TTS reading */
+			p += (p[4] == 's') ? 8 : 7;
+			if (!prev_space && w + 1 < out_sz) {
+				out_clean[w++] = ' ';
+				prev_space = true;
+			}
+			while (*p && !isspace((unsigned char)*p) && *p != '/' && *p != '?' && *p != '#' && w + 1 < out_sz) {
+				out_clean[w++] = *p++;
 				prev_space = false;
 			}
 			while (*p && !isspace((unsigned char)*p)) p++;

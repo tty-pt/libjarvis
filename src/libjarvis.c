@@ -1,6 +1,7 @@
 #include "jarvis-internal.h"
 
 #ifndef __wasm__
+#include <ttypt/mm.h>
 #include <sys/time.h>
 #include <unistd.h>
 #if defined(_WIN32)
@@ -99,14 +100,28 @@ bool jarvis_extract_streaming_answer_prefix(
 
 static bool is_prep_conj_at(const char *s, size_t *out_word_len)
 {
-	static const char *WORDS[] = {
-		"at", "in", "on", "by", "to", "for", "from", "with",
-		"where", "which", "that", "and", "or", "as", "of",
-		"because", "while", "when", NULL
-	};
-	for (size_t i = 0; WORDS[i]; i++) {
-		size_t wl = strlen(WORDS[i]);
-		if (strncmp(s, WORDS[i], wl) == 0 && isspace((unsigned char)s[wl])) {
+	const jarvis_ontology_t *ont = jarvis_ontology_get_active();
+	char word[JARVIS_SHORT_LEN];
+	size_t wl = 0;
+	while (s[wl] && !isspace((unsigned char)s[wl]) && !strchr(",.!?;:", s[wl]) && wl + 1 < sizeof(word)) {
+		word[wl] = s[wl];
+		wl++;
+	}
+	word[wl] = '\0';
+	if (wl == 0 || !isspace((unsigned char)s[wl])) return false;
+
+	char w_clean[JARVIS_SHORT_LEN];
+	jarvis_clean_phrase(word, w_clean, sizeof(w_clean));
+	if (!w_clean[0]) return false;
+
+	if (ont) {
+		for (size_t i = 0; i < ont->conjunction_count; i++) {
+			if (strcmp(w_clean, ont->conjunctions[i]) == 0) {
+				*out_word_len = wl;
+				return true;
+			}
+		}
+		if (jarvis_ontology_is_stopword(ont, w_clean) && wl >= 2 && wl <= 7) {
 			*out_word_len = wl;
 			return true;
 		}
@@ -218,45 +233,71 @@ void jarvis_resolve_anaphora(
 	char clean[512];
 	jarvis_clean_phrase(clause, clean, sizeof(clean));
 
-	if (strcmp(clean, "pause it") == 0 || strcmp(clean, "pause that") == 0) {
-		snprintf(out_clause, out_sz, "pause the music");
-		return;
-	}
-	if (strcmp(clean, "play it") == 0 || strcmp(clean, "play that") == 0 ||
-	    strcmp(clean, "resume it") == 0 || strcmp(clean, "resume that") == 0 ||
-	    strcmp(clean, "play it again") == 0) {
-		if (ctx && ctx->last_query[0] &&
-		    (strcmp(ctx->last_op, "media_play") == 0 || strcmp(ctx->last_op, "search_web") == 0)) {
-			snprintf(out_clause, out_sz, "play %s", ctx->last_query);
-		} else {
-			snprintf(out_clause, out_sz, "play music");
+	const jarvis_ontology_t *ont = jarvis_ontology_get_active();
+	if (ont) {
+		for (size_t i = 0; i < ont->anaphora.pause_phrase_count; i++) {
+			if (strcmp(clean, ont->anaphora.pause_phrases[i]) == 0) {
+				if (ont->anaphora.pause_target[0]) {
+					snprintf(out_clause, out_sz, "%s", ont->anaphora.pause_target);
+				} else {
+					snprintf(out_clause, out_sz, "%s", clause);
+				}
+				return;
+			}
 		}
-		return;
+		for (size_t i = 0; i < ont->anaphora.resume_phrase_count; i++) {
+			if (strcmp(clean, ont->anaphora.resume_phrases[i]) == 0) {
+				if (ctx && ctx->last_query[0] &&
+				    (strcmp(ctx->last_op, "media_play") == 0 ||
+				     strcmp(ctx->last_op, "media_pause") == 0 ||
+				     strcmp(ctx->last_op, "search_web") == 0)) {
+					if (ont->anaphora.resume_prefix[0]) {
+						snprintf(out_clause, out_sz, "%s %s", ont->anaphora.resume_prefix, ctx->last_query);
+					} else {
+						snprintf(out_clause, out_sz, "%s %s", clause, ctx->last_query);
+					}
+				} else if (ont->anaphora.resume_default[0]) {
+					snprintf(out_clause, out_sz, "%s", ont->anaphora.resume_default);
+				} else {
+					snprintf(out_clause, out_sz, "%s", clause);
+				}
+				return;
+			}
+		}
 	}
 
-	/* Deictic spatial pronoun: "there" -> "in <last_location_basename>" */
-	if (ctx && ctx->last_location[0]) {
+	/* Deictic spatial pronouns configured in ontology -> "[<spatial_prep> ]<last_location_basename>" */
+	if (ctx && ctx->last_location[0] && ont && ont->anaphora.spatial_pronoun_count > 0) {
 		const char *base = strrchr(ctx->last_location, '/');
 		base = (base && base[1]) ? (base + 1) : ctx->last_location;
 
-		/* Look for whole word "there" in clause */
-		char low[512];
-		size_t len = strlen(clause);
-		if (len >= sizeof(low)) len = sizeof(low) - 1;
-		for (size_t i = 0; i < len; i++) low[i] = (char)tolower((unsigned char)clause[i]);
-		low[len] = '\0';
-
-		const char *hit = strstr(low, "there");
-		while (hit) {
-			bool left_ok = (hit == low || !isalnum((unsigned char)hit[-1]));
-			bool right_ok = (!isalnum((unsigned char)hit[5]));
-			if (left_ok && right_ok) {
-				size_t prefix_len = (size_t)(hit - low);
-				snprintf(out_clause, out_sz, "%.*sin %s%s",
-				         (int)prefix_len, clause, base, clause + prefix_len + 5);
-				return;
+		/* Scan tokens in clause and check if any token matches a spatial pronoun */
+		const char *p = clause;
+		while (*p) {
+			while (*p && (isspace((unsigned char)*p) || strchr(",.!?;:", *p))) p++;
+			if (!*p) break;
+			const char *w_start = p;
+			while (*p && !isspace((unsigned char)*p) && !strchr(",.!?;:", *p)) p++;
+			size_t w_len = (size_t)(p - w_start);
+			char tok_raw[64], tok_clean[64];
+			if (w_len > 0 && w_len < sizeof(tok_raw)) {
+				memcpy(tok_raw, w_start, w_len);
+				tok_raw[w_len] = '\0';
+				jarvis_clean_phrase(tok_raw, tok_clean, sizeof(tok_clean));
+				for (size_t si = 0; si < ont->anaphora.spatial_pronoun_count; si++) {
+					if (strcmp(tok_clean, ont->anaphora.spatial_pronouns[si]) == 0) {
+						size_t prefix_len = (size_t)(w_start - clause);
+						if (ont->anaphora.spatial_prep[0]) {
+							snprintf(out_clause, out_sz, "%.*s%s %s%s",
+							         (int)prefix_len, clause, ont->anaphora.spatial_prep, base, p);
+						} else {
+							snprintf(out_clause, out_sz, "%.*s%s%s",
+							         (int)prefix_len, clause, base, p);
+						}
+						return;
+					}
+				}
 			}
-			hit = strstr(hit + 5, "there");
 		}
 	}
 
@@ -304,7 +345,9 @@ size_t jarvis_split_clauses(
 	while (*utterance && isspace((unsigned char)*utterance)) utterance++;
 	if (!*utterance) return 0;
 
-	/* Check if utterance starts with explicit dictation or agent-ask verb */
+	if (!ont) ont = jarvis_ontology_get_active();
+
+	/* Check if utterance starts with explicit dictation verb */
 	char clean[JARVIS_CLAUSE_LEN];
 	jarvis_clean_phrase(utterance, clean, sizeof(clean));
 	char *words[JARVIS_MAX_CLAUSE_WORDS];
@@ -321,7 +364,26 @@ size_t jarvis_split_clauses(
 		char low[JARVIS_CLAUSE_LEN];
 		snprintf(low, sizeof(low), "%s", utterance);
 		for (size_t i = 0; low[i]; i++) low[i] = (char)tolower((unsigned char)low[i]);
-		if (!strstr(low, " and then ") && !strstr(low, " then ")) {
+		bool has_explicit_sep = false;
+		for (size_t si = 0; si < ont->clause_sep_count; si++) {
+			const char *sep = ont->clause_seps[si];
+			if (!sep[0] || strcmp(sep, ", ") == 0 || strchr(sep, ',') != NULL) continue;
+			bool is_bare_conj = false;
+			for (size_t ci = 0; ci < ont->conjunction_count; ci++) {
+				if (strcmp(sep, ont->conjunctions[ci]) == 0) {
+					is_bare_conj = true;
+					break;
+				}
+			}
+			if (is_bare_conj) continue;
+			char padded_sep[80];
+			snprintf(padded_sep, sizeof(padded_sep), " %s ", sep);
+			if (strstr(low, padded_sep)) {
+				has_explicit_sep = true;
+				break;
+			}
+		}
+		if (!has_explicit_sep) {
 			snprintf(out_clauses[0], sizeof(out_clauses[0]), "%s", utterance);
 			return 1;
 		}
@@ -340,13 +402,14 @@ size_t jarvis_split_clauses(
 				pre[plen] = '\0';
 				char pre_clean[JARVIS_ID_LEN];
 				jarvis_clean_phrase(pre, pre_clean, sizeof(pre_clean));
-				/* Check if every token in pre_clean is a polite prefix or wake word */
-				char *psave = NULL;
 				bool all_polite = (pre_clean[0] != '\0');
-				for (char *pt = strtok_r(pre_clean, " ", &psave); pt; pt = strtok_r(NULL, " ", &psave)) {
-					if (!jarvis_ontology_is_polite_prefix(ont, pt)) {
-						all_polite = false;
-						break;
+				if (all_polite && !jarvis_ontology_is_polite_prefix(ont, pre_clean)) {
+					char *psave = NULL;
+					for (char *pt = strtok_r(pre_clean, " ", &psave); pt; pt = strtok_r(NULL, " ", &psave)) {
+						if (!jarvis_ontology_is_polite_prefix(ont, pt)) {
+							all_polite = false;
+							break;
+						}
 					}
 				}
 				if (all_polite) {
@@ -358,22 +421,45 @@ size_t jarvis_split_clauses(
 		}
 	}
 
-	/* Protect atomic phrases containing 'and' */
-	replace_all_ci(work, sizeof(work), " and press enter", " __AND_PRESS_ENTER__");
-	replace_all_ci(work, sizeof(work), " and hit enter", " __AND_HIT_ENTER__");
-	replace_all_ci(work, sizeof(work), " and hit return", " __AND_HIT_RETURN__");
-	replace_all_ci(work, sizeof(work), " and press return", " __AND_PRESS_RETURN__");
-	replace_all_ci(work, sizeof(work), "screen and audio", "__SCREEN_AND_AUDIO__");
+	/* Protect atomic phrases from ont->loc_submit and multi-word entities containing conjunctions */
+	char sub_toks[JARVIS_MAX_LOCATIVES][32];
+	char sub_orig[JARVIS_MAX_LOCATIVES][JARVIS_WORD_LEN];
+	size_t n_sub_prot = 0;
+	if (ont) {
+		for (size_t i = 0; i < ont->loc_submit_count && n_sub_prot < JARVIS_MAX_LOCATIVES; i++) {
+			char pat[96], tok[32];
+			snprintf(pat, sizeof(pat), " %s", ont->loc_submit[i]);
+			snprintf(tok, sizeof(tok), " __LOC_SUBMIT_%zu__", n_sub_prot);
+			snprintf(sub_toks[n_sub_prot], sizeof(sub_toks[0]), "__LOC_SUBMIT_%zu__", n_sub_prot);
+			snprintf(sub_orig[n_sub_prot], sizeof(sub_orig[0]), "%s", ont->loc_submit[i]);
+			replace_all_ci(work, sizeof(work), pat, tok);
+			n_sub_prot++;
+		}
+	}
 
-	/* Normalize explicit multi-clause separators to ';' */
-	replace_all_ci(work, sizeof(work), ", and then ", ";");
-	replace_all_ci(work, sizeof(work), ", then ", ";");
-	replace_all_ci(work, sizeof(work), ", and ", ";");
-	replace_all_ci(work, sizeof(work), " and then ", ";");
-	replace_all_ci(work, sizeof(work), " after that ", ";");
-	replace_all_ci(work, sizeof(work), " followed by ", ";");
-	replace_all_ci(work, sizeof(work), " then ", ";");
-	replace_all_ci(work, sizeof(work), ", ", ";");
+	/* Normalize explicit multi-clause separators from ont->clause_seps to ';' */
+	if (ont) {
+		for (size_t i = 0; i < ont->clause_sep_count; i++) {
+			const char *sep = ont->clause_seps[i];
+			if (!sep[0]) continue;
+			/* Skip bare single-word conjunctions here; handled below with verb-head lookahead */
+			bool is_bare_conj = false;
+			for (size_t ci = 0; ci < ont->conjunction_count; ci++) {
+				if (strcmp(sep, ont->conjunctions[ci]) == 0) {
+					is_bare_conj = true;
+					break;
+				}
+			}
+			if (is_bare_conj) continue;
+			if (sep[0] == ' ' || sep[0] == ',') {
+				replace_all_ci(work, sizeof(work), sep, ";");
+			} else {
+				char padded_sep[80];
+				snprintf(padded_sep, sizeof(padded_sep), " %s ", sep);
+				replace_all_ci(work, sizeof(work), padded_sep, ";");
+			}
+		}
+	}
 
 	size_t count = 0;
 	char *save_semi = NULL;
@@ -381,51 +467,80 @@ size_t jarvis_split_clauses(
 		while (*part && isspace((unsigned char)*part)) part++;
 		if (!*part) continue;
 
-		/* Further split on " and " if the right-hand side begins with a known verb head word */
+		/* Further split on ont->conjunctions (e.g. " and ", " e ") if the RHS begins with a known verb head */
 		char *cursor = part;
 		char accum[512] = {0};
+		char prev_conj[JARVIS_SHORT_LEN] = {0};
 
 		while (cursor && *cursor && count < max_clauses) {
-			char *and_pos = NULL;
-			for (char *p = cursor; *p; p++) {
-				if ((strncmp(p, " and ", 5) == 0 || strncmp(p, " AND ", 5) == 0)) {
-					and_pos = p;
-					break;
+			char *best_pos = NULL;
+			size_t best_conj_len = 0;
+			char matched_conj[JARVIS_SHORT_LEN] = {0};
+
+			if (ont) {
+				for (size_t ci = 0; ci < ont->conjunction_count; ci++) {
+					const char *cj = ont->conjunctions[ci];
+					size_t clen = strlen(cj);
+					if (clen == 0) continue;
+					for (char *p = cursor; *p; p++) {
+						if (*p == ' ' && p[clen + 1] == ' ') {
+							bool m = true;
+							for (size_t k = 0; k < clen; k++) {
+								if (tolower((unsigned char)p[1 + k]) != tolower((unsigned char)cj[k])) {
+									m = false;
+									break;
+								}
+							}
+							if (m && (!best_pos || p < best_pos)) {
+								best_pos = p;
+								best_conj_len = clen + 2;
+								snprintf(matched_conj, sizeof(matched_conj), "%s", cj);
+								break;
+							}
+						}
+					}
 				}
 			}
-			if (!and_pos) {
+
+			if (!best_pos) {
 				if (accum[0]) {
 					size_t alen = strlen(accum);
-					snprintf(accum + alen, sizeof(accum) - alen, " and %s", cursor);
+					snprintf(accum + alen, sizeof(accum) - alen, " %s %s", prev_conj, cursor);
 				} else {
 					snprintf(accum, sizeof(accum), "%s", cursor);
 				}
 				break;
 			}
 
-			*and_pos = '\0';
-			char *rhs = and_pos + 5;
+			*best_pos = '\0';
+			char *rhs = best_pos + best_conj_len;
 			while (*rhs && isspace((unsigned char)*rhs)) rhs++;
 
 			if (accum[0]) {
 				size_t alen = strlen(accum);
-				snprintf(accum + alen, sizeof(accum) - alen, " and %s", cursor);
+				snprintf(accum + alen, sizeof(accum) - alen, " %s %s", prev_conj, cursor);
 			} else {
 				snprintf(accum, sizeof(accum), "%s", cursor);
 			}
+			snprintf(prev_conj, sizeof(prev_conj), "%s", matched_conj);
 
-			/* Check if first non-polite word of rhs is a known verb head */
+			/* Check if first non-polite/non-stopword word of rhs is a known verb head */
 			char rhs_clean[256];
 			jarvis_clean_phrase(rhs, rhs_clean, sizeof(rhs_clean));
+			char rhs_copy[256];
+			snprintf(rhs_copy, sizeof(rhs_copy), "%s", rhs_clean);
 			char *rsave = NULL;
-			char *rw = strtok_r(rhs_clean, " ", &rsave);
-			while (rw && (strcmp(rw, "please") == 0 || strcmp(rw, "also") == 0 || strcmp(rw, "then") == 0)) {
+			char *rw = strtok_r(rhs_copy, " ", &rsave);
+			while (rw && ont && !jarvis_ontology_is_verb_head(ont, rw) &&
+			       (jarvis_ontology_is_polite_prefix(ont, rw) || jarvis_ontology_is_stopword(ont, rw))) {
 				rw = strtok_r(NULL, " ", &rsave);
 			}
-			if (rw && ont && jarvis_ontology_is_verb_head(ont, rw)) {
+			if ((rw && ont && jarvis_ontology_is_verb_head(ont, rw)) ||
+			    (ont && jarvis_ontology_is_tts_interrupt(ont, rhs_clean))) {
 				char *slot = out_clauses[count++];
 				snprintf(slot, sizeof(out_clauses[0]), "%s", accum);
 				accum[0] = '\0';
+				prev_conj[0] = '\0';
 			}
 			cursor = rhs;
 		}
@@ -438,11 +553,9 @@ size_t jarvis_split_clauses(
 
 	/* Restore protected placeholders */
 	for (size_t i = 0; i < count; i++) {
-		replace_all_ci(out_clauses[i], sizeof(out_clauses[i]), "__AND_PRESS_ENTER__", "and press enter");
-		replace_all_ci(out_clauses[i], sizeof(out_clauses[i]), "__AND_HIT_ENTER__", "and hit enter");
-		replace_all_ci(out_clauses[i], sizeof(out_clauses[i]), "__AND_HIT_RETURN__", "and hit return");
-		replace_all_ci(out_clauses[i], sizeof(out_clauses[i]), "__AND_PRESS_RETURN__", "and press return");
-		replace_all_ci(out_clauses[i], sizeof(out_clauses[i]), "__SCREEN_AND_AUDIO__", "screen and audio");
+		for (size_t si = 0; si < n_sub_prot; si++) {
+			replace_all_ci(out_clauses[i], sizeof(out_clauses[i]), sub_toks[si], sub_orig[si]);
+		}
 
 		/* Trim whitespace/punctuation */
 		char *s = out_clauses[i];
@@ -533,6 +646,31 @@ static void save_memories_to_disk(const jarvis_engine_t *eng)
 #endif
 }
 
+static void sync_memory_to_mm(jarvis_engine_t *eng, const char *key, const char *value)
+{
+#ifndef __wasm__
+	if (!eng || !eng->mm || !key || !*key || !value || !*value) return;
+	mm_record_req_t req;
+	memset(&req, 0, sizeof(req));
+	req.tier      = MM_TIER_GLOBAL;
+	req.level     = MM_LEVEL_L2;
+	req.type      = "rule";
+	req.status    = MM_STATUS_SUPPORTED;
+	req.standing  = true;
+	req.problem   = value;
+	req.subsystem = "jarvis";
+	req.module    = key;
+	const char *tags[2] = { key, NULL };
+	req.tags      = tags;
+	req.n_tags    = 1;
+	mm_record(eng->mm, &req, NULL, NULL);
+#else
+	(void)eng;
+	(void)key;
+	(void)value;
+#endif
+}
+
 bool jarvis_memory_remember(jarvis_engine_t *eng, const char *key, const char *value)
 {
 	if (!eng || !key || !*key || !value || !*value) return false;
@@ -540,6 +678,7 @@ bool jarvis_memory_remember(jarvis_engine_t *eng, const char *key, const char *v
 		if (strcmp(eng->memories[i].key, key) == 0) {
 			snprintf(eng->memories[i].value, sizeof(eng->memories[i].value), "%s", value);
 			save_memories_to_disk(eng);
+			sync_memory_to_mm(eng, key, value);
 			return true;
 		}
 	}
@@ -548,6 +687,7 @@ bool jarvis_memory_remember(jarvis_engine_t *eng, const char *key, const char *v
 		snprintf(m->key, sizeof(m->key), "%s", key);
 		snprintf(m->value, sizeof(m->value), "%s", value);
 		save_memories_to_disk(eng);
+		sync_memory_to_mm(eng, key, value);
 		return true;
 	}
 	return false;
@@ -568,6 +708,52 @@ size_t jarvis_memory_recall_json(jarvis_engine_t *eng, const char *query, char *
 	int n = snprintf(out_json, out_sz, "{");
 	bool first = true;
 	size_t matched = 0;
+
+#ifndef __wasm__
+	/* First query libmm via mm_recall_candidates for ranked multi-axis recall */
+	if (eng->mm) {
+		mm_recall_req_t rreq;
+		memset(&rreq, 0, sizeof(rreq));
+		rreq.scope     = MM_SCOPE_PERSISTENT;
+		rreq.tier      = MM_TIER_GLOBAL;
+		rreq.query     = (query && *query) ? query : "jarvis";
+		rreq.subsystem = "jarvis";
+		rreq.limit     = 32;
+		rreq.dedupe    = true;
+		mm_candidate_t *cands = NULL;
+		size_t n_cands = 0;
+		if (mm_recall_candidates(eng->mm, &rreq, &cands, &n_cands) == 0 && cands) {
+			for (size_t i = 0; i < n_cands; i++) {
+				if (!cands[i].has_envelope) continue;
+				const mm_envelope_t *env = &cands[i].envelope;
+				const char *mkey = env->ctx_module[0] ? env->ctx_module :
+				                   (env->n_tags > 0 ? env->tags[0] : NULL);
+				const char *mval = env->summary;
+				if (!mkey || !*mkey || !mval || !*mval) continue;
+				if (q_clean[0]) {
+					char hay[640], hay_c[640];
+					snprintf(hay, sizeof(hay), "%s %s", mkey, mval);
+					jarvis_clean_phrase(hay, hay_c, sizeof(hay_c));
+					if (!strstr(hay_c, q_clean) && cands[i].ranking_score < 0.25) continue;
+				}
+				/* Sync into eng->memories if not already present */
+				bool exists = false;
+				for (size_t j = 0; j < eng->memory_count; j++) {
+					if (strcmp(eng->memories[j].key, mkey) == 0) {
+						exists = true;
+						break;
+					}
+				}
+				if (!exists && eng->memory_count < JARVIS_MAX_MEMORIES) {
+					jarvis_memory_kv_t *m = &eng->memories[eng->memory_count++];
+					snprintf(m->key, sizeof(m->key), "%s", mkey);
+					snprintf(m->value, sizeof(m->value), "%s", mval);
+				}
+			}
+			mm_candidates_free(cands, n_cands);
+		}
+	}
+#endif
 
 	for (int pass = 0; pass < 2; pass++) {
 		/* Pass 0: filter by query; Pass 1: fallback to all if 0 matched */
@@ -772,15 +958,50 @@ jarvis_engine_t *jarvis_engine_create(const jarvis_config_t *cfg)
 	load_memories_from_disk(eng);
 	load_context_from_disk(eng);
 	load_session_from_disk(eng);
+
+#ifndef __wasm__
+	{
+		mm_options_t mm_opts;
+		memset(&mm_opts, 0, sizeof(mm_opts));
+		char mm_dir[520] = {0};
+		if (eng->memory_path[0]) {
+			snprintf(mm_dir, sizeof(mm_dir), "%s.mm", eng->memory_path);
+			mm_opts.global_dir = mm_dir;
+			mm_opts.project_dir = mm_dir;
+			mm_opts.prefer_daemon = false;
+		} else {
+			mm_opts.prefer_daemon = true;
+		}
+		eng->mm = mm_open(&mm_opts);
+		if (eng->mm) {
+			for (size_t i = 0; i < eng->memory_count; i++) {
+				sync_memory_to_mm(eng, eng->memories[i].key, eng->memories[i].value);
+			}
+		}
+	}
+#endif
+
 	return eng;
 }
 
 void jarvis_engine_destroy(jarvis_engine_t *eng)
 {
 	if (!eng) return;
+#ifndef __wasm__
+	if (eng->mm) {
+		mm_close(eng->mm);
+		eng->mm = NULL;
+	}
+#endif
 	jarvis_ontology_destroy(eng->ont);
 	free(eng);
 }
+
+const jarvis_ontology_t *jarvis_engine_get_ontology(const jarvis_engine_t *eng)
+{
+	return eng && eng->ont ? eng->ont : jarvis_ontology_get_active();
+}
+
 
 static bool requires_agent_reasoning(const jarvis_engine_t *eng, const char *utterance)
 {
@@ -797,45 +1018,42 @@ static bool requires_agent_reasoning(const jarvis_engine_t *eng, const char *utt
 	char clean[512];
 	jarvis_clean_phrase(utterance, clean, sizeof(clean));
 
+	const jarvis_ontology_t *ont = eng->ont ? eng->ont : jarvis_ontology_get_active();
+
 	/* Never force agent reasoning on explicit dictation, coding-agent delegation, or TTS toggle */
-	if (strncmp(clean, "type ", 5) == 0 || strncmp(clean, "dictate ", 8) == 0 ||
-	    strncmp(clean, "tell pi ", 8) == 0 || strncmp(clean, "ask pi ", 7) == 0 ||
-	    strncmp(clean, "have pi ", 8) == 0 || strncmp(clean, "ask the agent ", 14) == 0 ||
-	    strncmp(clean, "tell the agent ", 15) == 0 ||
-	    ((strstr(clean, "voice") || strstr(clean, "tts")) &&
-	     (strstr(clean, "turn on") || strstr(clean, "turn off") ||
-	      strstr(clean, "enable") || strstr(clean, "disable") ||
-	      strcmp(clean, "voice on") == 0 || strcmp(clean, "voice off") == 0))) {
-		return false;
+	if (ont) {
+		for (size_t i = 0; i < ont->dictation_verb_count; i++) {
+			size_t vlen = strlen(ont->dictation_verbs[i]);
+			if (vlen > 0 && strncmp(clean, ont->dictation_verbs[i], vlen) == 0 && clean[vlen] == ' ') {
+				return false;
+			}
+		}
+		for (size_t i = 0; i < ont->verb_phrase_count; i++) {
+			for (size_t t = 0; t < ont->verb_phrases[i].tag_count; t++) {
+				if (strcmp(ont->verb_phrases[i].tags[t].concept, "AGENT_ASK") == 0) {
+					size_t plen = strlen(ont->verb_phrases[i].phrase);
+					if (plen > 0 && strncmp(clean, ont->verb_phrases[i].phrase, plen) == 0 && clean[plen] == ' ') {
+						return false;
+					}
+				}
+			}
+		}
+		jarvis_ir_t probe_ir;
+		if (jarvis_solve_clause(ont, utterance, "any", NULL, &probe_ir) &&
+		    (strcmp(probe_ir.cap, "tts.control") == 0 || strcmp(probe_ir.cap, "tts.interrupt") == 0)) {
+			return false;
+		}
 	}
 
 	char padded[520];
 	snprintf(padded, sizeof(padded), " %s ", clean);
 
-	static const char *TRIGGERS[] = {
-		" what ", " whats ", " why ", " how ", " who ", " where ", " which ",
-		" explain ", " diagnose ", " describe ", " clarify ", " elaborate ", " summarize ",
-		" tell me ", " give me an example ", " for example ", " what about ", " how about ",
-		" and what ", " and why ", " and how ", " really ", " seriously ", " are you sure ",
-		" hello ", " hi ", " hey ", " greetings ", " good morning ", " good afternoon ", " good evening ", " thanks ", " thank you ",
-		" are you there ", " can you hear ", " talk to me ", " talk again ", " speak to me ", " you awake ", " you listening ",
-		" error ", " errors ", " failing ", " failed ", " broken ", " crash ", " crashing ", " crashed ", " bug ", " traceback ", " exception ", " problem ", " issue ", " wrong ",
-		" eating ", " hogging ", " lagging ", " slow ", " ram ", " memory ", " cpu ", " port ", " ports ", " process ", " processes ",
-		" clipboard ", " selected ", " highlighted ", " selection ",
-		" remember ", " whenever ", " preference ", " preferences ", " workflow ", " habit ",
-		" actually ", " instead ", " undo ", " nevermind ", " never mind ", " bring it back ", " take me back ", " go back to ",
-		" repeat that ", " do that again ", " run that again ", " run it again ", " run that command again ", " that again ", " do the same ", " same thing ",
-		" what did you ", " say that again ",
-		" open that file ", " that file ", " failing file ", " file mentioned ", " failing line ", " at that line ", " at line ", " ssh ",
-		" nelvim ", " near of him ", " vam ",
-		" killing me ", " i am bored ", " im bored ", " set up my ", " setup my ",
-		" on the page ", " on that page ", " web page ", " webpage ", " in the browser ", " on my browser ", " browser page ",
-		" heading ", " article ", " link on ", " button on ", " read the page ", " on the screen ", " terminal screen ", " other terminal ",
-		" pull back ",
-		NULL
-	};
-	for (size_t i = 0; i < sizeof(TRIGGERS) / sizeof(TRIGGERS[0]) && TRIGGERS[i]; i++) {
-		if (strstr(padded, TRIGGERS[i])) return true;
+	if (ont) {
+		for (size_t i = 0; i < ont->agent_trigger_count; i++) {
+			if (ont->agent_triggers[i][0] && strstr(padded, ont->agent_triggers[i])) {
+				return true;
+			}
+		}
 	}
 
 	/* Check if utterance references a user-defined workflow/memory key */
@@ -1381,6 +1599,84 @@ static bool extract_first_url_from_text(const char *text, char *out_url, size_t 
 	return u > 7;
 }
 
+static bool padded_contains_rule_phrase(const char *padded_hay, const char *phrase)
+{
+	if (!phrase || !*phrase) return false;
+	char probe[JARVIS_ID_LEN + 4];
+	snprintf(probe, sizeof(probe), " %s ", phrase);
+	return strstr(padded_hay, probe) != NULL;
+}
+
+static bool match_react_rule(
+	const jarvis_react_rule_t *rule,
+	const char                *padded_utt,
+	int                        turn,
+	const char                *user_obs_turn1
+)
+{
+	if (!rule || !rule->kind[0]) return false;
+	if (rule->turn_filter == 0 && turn != 0) return false;
+	if (rule->turn_filter == 1 && turn <= 0) return false;
+	if (rule->obs_op[0]) {
+		char obs_tag[128];
+		snprintf(obs_tag, sizeof(obs_tag), "OBSERVATION (%s)", rule->obs_op);
+		if (!user_obs_turn1 || !strstr(user_obs_turn1, obs_tag)) return false;
+	}
+
+	if (rule->phrase_count > 0) {
+		bool phrase_ok = false;
+		for (size_t i = 0; i < rule->phrase_count; i++) {
+			if (padded_contains_rule_phrase(padded_utt, rule->phrases[i])) {
+				phrase_ok = true;
+				break;
+			}
+		}
+		if (!phrase_ok) return false;
+	}
+
+	if (rule->require_any_count > 0) {
+		bool req_ok = false;
+		for (size_t i = 0; i < rule->require_any_count; i++) {
+			if (padded_contains_rule_phrase(padded_utt, rule->require_any[i])) {
+				req_ok = true;
+				break;
+			}
+		}
+		if (!req_ok) return false;
+	}
+
+	if (rule->forbid_any_count > 0) {
+		for (size_t i = 0; i < rule->forbid_any_count; i++) {
+			if (padded_contains_rule_phrase(padded_utt, rule->forbid_any[i])) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+static bool rule_has_line_trigger(const jarvis_react_rule_t *rule, const char *padded_utt)
+{
+	if (!rule) return false;
+	for (size_t i = 0; i < rule->line_trigger_count; i++) {
+		if (padded_contains_rule_phrase(padded_utt, rule->line_triggers[i])) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void extract_obs_body(const char *obs_str, char *out_esc, size_t out_sz)
+{
+	if (!out_esc || out_sz == 0) return;
+	out_esc[0] = '\0';
+	if (!obs_str) return;
+	const char *colon = strchr(obs_str, ':');
+	const char *body = colon ? (colon + 1) : obs_str;
+	while (*body && isspace((unsigned char)*body)) body++;
+	jjson_escape_str(body, out_esc, out_sz);
+}
+
 static bool synthesize_offline_react_json(
 	const jarvis_engine_t *eng,
 	const char            *utterance,
@@ -1394,196 +1690,231 @@ static bool synthesize_offline_react_json(
 	if (!utterance || !out_json || out_sz == 0) return false;
 	out_json[0] = '\0';
 
+	const jarvis_ontology_t *ont = (eng && eng->ont) ? eng->ont : jarvis_ontology_get_active();
 	char clean[512];
 	jarvis_clean_phrase(utterance, clean, sizeof(clean));
 	char padded[520];
 	snprintf(padded, sizeof(padded), " %s ", clean);
 
-	/* Turn 1 follow-up after an observation step */
-	if (turn > 0 && user_obs_turn1 && user_obs_turn1[0]) {
-		if (strstr(user_obs_turn1, "OBSERVATION (inspect_terminal)")) {
-			if (strstr(padded, " open ") && (strstr(padded, " file ") || strstr(padded, " neovim ") || strstr(padded, " vim "))) {
-				char fpath[128] = "src/audio.c";
+	/* 1. Evaluate declarative ontology react_rules (turn-0 & turn-1 observations, follow-ups, memory, shell templates) */
+	if (ont) {
+		for (size_t ri = 0; ri < ont->react_rule_count; ri++) {
+			const jarvis_react_rule_t *rule = &ont->react_rules[ri];
+			if (!match_react_rule(rule, padded, turn, user_obs_turn1)) continue;
+
+			const char *kind = rule->kind;
+			bool in_other = jarvis_ontology_clause_targets_other(ont, utterance);
+
+			if (strcmp(kind, "open_obs_file") == 0) {
+				char fpath[128] = {0};
+				if (rule->arg[0]) snprintf(fpath, sizeof(fpath), "%s", rule->arg);
 				int fline = 0;
 				extract_file_from_text(user_obs_turn1, fpath, sizeof(fpath), &fline);
-				if (fline > 0 && (strstr(padded, " line ") || strstr(padded, " crashed ") || strstr(padded, " failed "))) {
+				if (!fpath[0]) return false;
+				if (fline > 0 && rule_has_line_trigger(rule, padded)) {
 					snprintf(out_json, out_sz, "{\"op\":\"spawn_shell_command\",\"target\":{\"command\":\"nvim +%d %s\"}}", fline, fpath);
 				} else {
 					snprintf(out_json, out_sz, "{\"op\":\"spawn_shell_command\",\"target\":{\"command\":\"nvim %s\"}}", fpath);
 				}
 				return true;
 			}
-			const char *err_hit = strstr(user_obs_turn1, "error:");
-			if (err_hit) {
-				char fpath[128] = "src/audio.c";
-				int fline = 88;
+			if (strcmp(kind, "answer_obs") == 0) {
+				char esc_obs[384];
+				extract_obs_body(user_obs_turn1, esc_obs, sizeof(esc_obs));
+				char fpath[128] = {0};
+				int fline = 0;
 				extract_file_from_text(user_obs_turn1, fpath, sizeof(fpath), &fline);
-				snprintf(out_json, out_sz,
-				         "{\"op\":\"answer_question\",\"args\":{\"answer\":\"Compilation failed in %s at line %d due to a missing semicolon after pitch_init().\"}}",
-				         fpath, fline);
+				if (fpath[0] && fline > 0) {
+					snprintf(out_json, out_sz,
+					         "{\"op\":\"answer_question\",\"args\":{\"answer\":\"%s:%d — %.220s\"}}",
+					         fpath, fline, esc_obs);
+				} else {
+					snprintf(out_json, out_sz,
+					         "{\"op\":\"answer_question\",\"args\":{\"answer\":\"%.260s\"}}",
+					         esc_obs);
+				}
 				return true;
 			}
-			if (strstr(user_obs_turn1, "reactor.c") || strstr(user_obs_turn1, "xy_flux_capacitor")) {
-				snprintf(out_json, out_sz,
-				         "{\"op\":\"answer_question\",\"args\":{\"answer\":\"The terminal screen shows a fatal error in src/reactor.c at line 142: undefined symbol xy_flux_capacitor.\"}}");
-				return true;
-			}
-			char esc_obs[320];
-			jjson_escape_str(user_obs_turn1 + 31, esc_obs, sizeof(esc_obs));
-			snprintf(out_json, out_sz,
-			         "{\"op\":\"answer_question\",\"args\":{\"answer\":\"Terminal output: %.200s\"}}", esc_obs);
-			return true;
-		}
-		if (strstr(user_obs_turn1, "OBSERVATION (inspect_browser)")) {
-			if ((strstr(padded, " open ") || strstr(padded, " follow ") || strstr(padded, " click ") || strstr(padded, " go to ")) &&
-			    (strstr(padded, " link ") || strstr(padded, " docs ") || strstr(padded, " architecture ") || strstr(padded, " url "))) {
-				char url[256] = "https://tty.pt/docs/architecture";
-				extract_first_url_from_text(user_obs_turn1, url, sizeof(url));
+			if (strcmp(kind, "open_obs_url") == 0) {
+				char url[256] = {0};
+				if (!extract_first_url_from_text(user_obs_turn1, url, sizeof(url)) && rule->arg[0]) {
+					snprintf(url, sizeof(url), "%s", rule->arg);
+				}
+				if (!url[0]) return false;
 				snprintf(out_json, out_sz, "{\"op\":\"open_url\",\"target\":{\"url\":\"%s\"}}", url);
 				return true;
 			}
-			if (strstr(padded, " search ") || strstr(padded, " look up ") || strstr(padded, " google ")) {
-				const char *topic = strstr(user_obs_turn1, "auren-node-07") ? "auren-node-07 cluster node" : "Project Auren Status Dashboard";
-				snprintf(out_json, out_sz, "{\"op\":\"search_web\",\"target\":{\"query\":\"%s\"}}", topic);
+			if (strcmp(kind, "search_obs_topic") == 0) {
+				char esc_obs[128];
+				extract_obs_body(user_obs_turn1, esc_obs, sizeof(esc_obs));
+				const char *q = rule->arg[0] ? rule->arg : esc_obs;
+				snprintf(out_json, out_sz, "{\"op\":\"search_web\",\"target\":{\"query\":\"%.120s\"}}", q);
 				return true;
 			}
-			if (strstr(user_obs_turn1, "Project Auren Status Dashboard")) {
+			if (strcmp(kind, "inspect_terminal") == 0) {
+				if (!in_other && world && world->pane_count > 0 && world->panes[0].tail[0]) {
+					const char *tail = world->panes[0].tail;
+					char fpath[128] = {0};
+					int fline = 0;
+					extract_file_from_text(tail, fpath, sizeof(fpath), &fline);
+					if (fpath[0] && fline > 0) {
+						char esc_t[256];
+						jjson_escape_str(tail, esc_t, sizeof(esc_t));
+						snprintf(out_json, out_sz,
+						         "{\"op\":\"answer_question\",\"args\":{\"answer\":\"%s:%d — %.180s\"}}",
+						         fpath, fline, esc_t);
+						return true;
+					}
+				}
+				snprintf(out_json, out_sz, "{\"op\":\"inspect_terminal\",\"target\":{\"relation\":\"%s\"}}",
+				         in_other ? "other" : "focused");
+				return true;
+			}
+			if (strcmp(kind, "inspect_clipboard") == 0) {
+				snprintf(out_json, out_sz, "{\"op\":\"inspect_clipboard\",\"target\":{}}");
+				return true;
+			}
+			if (strcmp(kind, "inspect_system") == 0) {
+				const char *aspect = rule->arg[0] ? rule->arg : "all";
+				snprintf(out_json, out_sz, "{\"op\":\"inspect_system\",\"args\":{\"aspect\":\"%s\"}}", aspect);
+				return true;
+			}
+			if (strcmp(kind, "open_browser_url") == 0) {
+				if (world && world->browser_page[0]) {
+					char url[256] = {0};
+					if (extract_first_url_from_text(world->browser_page, url, sizeof(url))) {
+						snprintf(out_json, out_sz, "{\"op\":\"open_url\",\"target\":{\"url\":\"%s\"}}", url);
+						return true;
+					}
+				}
+				snprintf(out_json, out_sz, "{\"op\":\"inspect_browser\",\"target\":{}}");
+				return true;
+			}
+			if (strcmp(kind, "inspect_browser") == 0) {
+				snprintf(out_json, out_sz, "{\"op\":\"inspect_browser\",\"target\":{}}");
+				return true;
+			}
+			if (strcmp(kind, "remember_workflow") == 0) {
+				const char *q1 = strchr(utterance, '\'');
+				const char *q2 = q1 ? strchr(q1 + 1, '\'') : NULL;
+				char key[128] = "workflow";
+				if (q1 && q2 && q2 > q1 + 1) {
+					size_t klen = (size_t)(q2 - (q1 + 1));
+					if (klen >= sizeof(key)) klen = sizeof(key) - 1;
+					memcpy(key, q1 + 1, klen);
+					key[klen] = '\0';
+				}
+				const char *colon = strchr(utterance, ':');
+				const char *val = colon ? (colon + 1) : utterance;
+				while (*val && isspace((unsigned char)*val)) val++;
+				char ek[256], ev[512];
+				jjson_escape_str(key, ek, sizeof(ek));
+				jjson_escape_str(val, ev, sizeof(ev));
+				snprintf(out_json, out_sz, "{\"op\":\"remember_fact\",\"args\":{\"key\":\"%s\",\"value\":\"%s\"}}", ek, ev);
+				return true;
+			}
+			if (strcmp(kind, "undo_workspace") == 0) {
+				int prev_ws = (eng && eng->ctx.prev_workspace > 0) ? eng->ctx.prev_workspace : 1;
+				const char *op = rule->op[0] ? rule->op :
+				                 ((eng && strcmp(eng->ctx.last_op, "workspace_move_window") == 0) ? "workspace_move_window" : "workspace_switch");
+				snprintf(out_json, out_sz, "{\"op\":\"%s\",\"args\":{\"workspace\":%d}}", op, prev_ws);
+				return true;
+			}
+			if (strcmp(kind, "correct_workspace") == 0) {
+				int ws = jarvis_ontology_extract_workspace_number(ont, utterance, 1);
+				const char *op = rule->op[0] ? rule->op :
+				                 ((eng && eng->ctx.last_op[0]) ? eng->ctx.last_op : "workspace_move_window");
+				snprintf(out_json, out_sz, "{\"op\":\"%s\",\"args\":{\"workspace\":%d}}", op, ws);
+				return true;
+			}
+			if (strcmp(kind, "replay_command") == 0) {
+				const char *cmd = (eng && eng->ctx.last_command[0]) ? eng->ctx.last_command : rule->command;
+				if (!cmd[0]) return false;
+				char esc_cmd[512];
+				jjson_escape_str(cmd, esc_cmd, sizeof(esc_cmd));
 				snprintf(out_json, out_sz,
-				         "{\"op\":\"answer_question\",\"args\":{\"answer\":\"The browser is displaying the Project Auren Status Dashboard on node auren-node-07 with status ALL_TESTS_GREEN and a link to the Architecture Docs.\"}}");
+				         "{\"op\":\"spawn_shell_command\",\"target\":{\"command\":\"%s\"%s}}",
+				         esc_cmd, in_other ? ",\"relation\":\"other\"" : "");
 				return true;
 			}
-			char esc_b[320];
-			jjson_escape_str(user_obs_turn1 + 30, esc_b, sizeof(esc_b));
-			snprintf(out_json, out_sz,
-			         "{\"op\":\"answer_question\",\"args\":{\"answer\":\"Browser page content: %.220s\"}}", esc_b);
-			return true;
-		}
-		if (strstr(user_obs_turn1, "OBSERVATION (inspect_clipboard)")) {
-			char url[256] = "https://news.ycombinator.com";
-			extract_first_url_from_text(user_obs_turn1, url, sizeof(url));
-			snprintf(out_json, out_sz, "{\"op\":\"open_url\",\"target\":{\"url\":\"%s\"}}", url);
-			return true;
-		}
-		if (strstr(user_obs_turn1, "OBSERVATION (inspect_system)")) {
-			char esc_s[320];
-			jjson_escape_str(user_obs_turn1 + 29, esc_s, sizeof(esc_s));
-			snprintf(out_json, out_sz,
-			         "{\"op\":\"answer_question\",\"args\":{\"answer\":\"System status: %.220s\"}}", esc_s);
-			return true;
-		}
-		return false;
-	}
-
-	/* 1. Multi-step ReAct Terminal Diagnosis & Screen Reading */
-	if (strstr(padded, " compiler error ") || strstr(padded, " error in my terminal ") ||
-	    strstr(padded, " terminal screen ") || strstr(padded, " on the terminal ") ||
-	    strstr(padded, " in the other terminal ") || strstr(padded, " other terminal ") ||
-	    (strstr(padded, " terminal ") && (strstr(padded, " error ") || strstr(padded, " failed ") ||
-	     strstr(padded, " say ") || strstr(padded, " says ") || strstr(padded, " output ") ||
-	     strstr(padded, " what ") || strstr(padded, " whats ") || strstr(padded, " read ")))) {
-		bool is_other = strstr(padded, " other ") != NULL;
-		if (!is_other && world && world->pane_count > 0 && world->panes[0].tail[0] &&
-		    !(strstr(padded, " open ") && strstr(padded, " file "))) {
-			const char *tail = world->panes[0].tail;
-			if (strstr(tail, "reactor.c") || strstr(tail, "xy_flux_capacitor")) {
+			if (strcmp(kind, "open_context_file") == 0) {
+				char file_path[128] = {0};
+				int line_no = 0;
+				if (world && world->pane_count > 0 && world->panes[0].tail[0]) {
+					extract_file_from_text(world->panes[0].tail, file_path, sizeof(file_path), &line_no);
+				}
+				if (!file_path[0] && eng && eng->ctx.last_file[0]) {
+					snprintf(file_path, sizeof(file_path), "%.*s", (int)(sizeof(file_path) - 1), eng->ctx.last_file);
+				}
+				if (!file_path[0] && eng && eng->turn_count > 0) {
+					extract_file_from_text(eng->turns[eng->turn_count - 1].output, file_path, sizeof(file_path), &line_no);
+				}
+				if (line_no <= 0 && eng && eng->ctx.last_line > 0) {
+					line_no = eng->ctx.last_line;
+				}
+				if (!file_path[0] && rule->arg[0]) {
+					snprintf(file_path, sizeof(file_path), "%s", rule->arg);
+				}
+				if (!file_path[0]) return false;
+				if (line_no > 0 && rule_has_line_trigger(rule, padded)) {
+					snprintf(out_json, out_sz, "{\"op\":\"spawn_shell_command\",\"target\":{\"command\":\"nvim +%d %s\"}}", line_no, file_path);
+				} else {
+					snprintf(out_json, out_sz, "{\"op\":\"spawn_shell_command\",\"target\":{\"command\":\"nvim %s\"}}", file_path);
+				}
+				return true;
+			}
+			if (strcmp(kind, "shell_command") == 0) {
+				char esc_cmd[512];
+				jjson_escape_str(rule->command, esc_cmd, sizeof(esc_cmd));
 				snprintf(out_json, out_sz,
-				         "{\"op\":\"answer_question\",\"args\":{\"answer\":\"The terminal screen shows a fatal error in src/reactor.c at line 142: undefined symbol xy_flux_capacitor.\"}}");
+				         "{\"op\":\"spawn_shell_command\",\"target\":{\"command\":\"%s\"%s}}",
+				         esc_cmd, in_other ? ",\"relation\":\"other\"" : "");
 				return true;
 			}
-			if (strstr(tail, "error:")) {
-				char fpath[128] = "src/audio.c";
-				int fline = 88;
-				extract_file_from_text(tail, fpath, sizeof(fpath), &fline);
+			if (strcmp(kind, "answer_time") == 0) {
+				char tbuf[128] = "00:00";
+#ifndef __wasm__
+				time_t now_t = time(NULL);
+				struct tm tm_now;
+				if (localtime_r(&now_t, &tm_now)) {
+					strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S", &tm_now);
+				}
+#endif
 				snprintf(out_json, out_sz,
-				         "{\"op\":\"answer_question\",\"args\":{\"answer\":\"Compilation failed in %s:%d (line %d).\"}}",
-				         fpath, fline, fline);
+				         "{\"op\":\"answer_question\",\"args\":{\"answer\":\"%s\"}}", tbuf);
+				return true;
+			}
+			if (strcmp(kind, "answer_cwd") == 0) {
+				const char *cwd = (world && world->focused_cwd[0]) ? world->focused_cwd :
+				                  (rule->arg[0] ? rule->arg : ".");
+				snprintf(out_json, out_sz,
+				         "{\"op\":\"answer_question\",\"args\":{\"answer\":\"%s\"}}", cwd);
+				return true;
+			}
+			if (strcmp(kind, "wm_help") == 0) {
+				char esc_q[256];
+				jjson_escape_str(rule->arg[0] ? rule->arg : clean, esc_q, sizeof(esc_q));
+				snprintf(out_json, out_sz,
+				         "{\"op\":\"wm_help\",\"target\":{\"query\":\"%s\"}}", esc_q);
 				return true;
 			}
 		}
-		snprintf(out_json, out_sz, "{\"op\":\"inspect_terminal\",\"target\":{\"relation\":\"%s\"}}",
-		         is_other ? "other" : "focused");
-		return true;
 	}
 
-	/* 1b. Multi-step ReAct Clipboard -> Browser */
-	if (strstr(padded, " clipboard ") || strstr(padded, " highlighted ") || strstr(padded, " selected ")) {
-		snprintf(out_json, out_sz, "{\"op\":\"inspect_clipboard\",\"target\":{}}");
-		return true;
-	}
-
-	/* 1c. Multi-step ReAct System Health / RAM / CPU / Disk / Ports Inspection */
-	if ((strstr(padded, " eating ") || strstr(padded, " hogging ") || strstr(padded, " how much ") ||
-	     strstr(padded, " what ") || strstr(padded, " whats ") || strstr(padded, " check ") || strstr(padded, " inspect ")) &&
-	    (strstr(padded, " ram ") || strstr(padded, " memory ") || strstr(padded, " cpu ") ||
-	     strstr(padded, " disk ") || strstr(padded, " storage ") || strstr(padded, " system "))) {
-		const char *aspect = "all";
-		if (strstr(padded, " disk ") || strstr(padded, " storage ")) aspect = "disk";
-		else if (strstr(padded, " ram ") || strstr(padded, " memory ") || strstr(padded, " cpu ")) aspect = "memory";
-		snprintf(out_json, out_sz, "{\"op\":\"inspect_system\",\"args\":{\"aspect\":\"%s\"}}", aspect);
-		return true;
-	}
-
-	/* 2. Multi-step ReAct Browser Accessibility Inspection & Page Actions */
-	if (!strstr(padded, " reload ") && !strstr(padded, " refresh ") &&
-	    !strstr(padded, " zoom ") && !strstr(padded, " get rid of ") &&
-	    !strstr(padded, " go back a page ") && !strstr(padded, " previous page ") &&
-	    (strstr(padded, " web page ") || strstr(padded, " webpage ") || strstr(padded, " browser page ") ||
-	     strstr(padded, " on the page ") || strstr(padded, " on that page ") ||
-	     strstr(padded, " in the browser ") || strstr(padded, " on my browser ") ||
-	     strstr(padded, " read the page ") || strstr(padded, " heading ") || strstr(padded, " article ") ||
-	     strstr(padded, " link on ") || strstr(padded, " button on ") ||
-	     ((strstr(padded, " what ") || strstr(padded, " whats ") || strstr(padded, " summarize ")) &&
-	      (strstr(padded, " page ") || strstr(padded, " browser ") || strstr(padded, " firefox ") || strstr(padded, " tab ") || strstr(padded, " tabs "))))) {
-		/* If world->browser_page is already populated and user asks to open/follow a link on the page */
-		if (world && world->browser_page[0]) {
-			if ((strstr(padded, " open ") || strstr(padded, " follow ") || strstr(padded, " click ") || strstr(padded, " go to ")) &&
-			    (strstr(padded, " link ") || strstr(padded, " docs ") || strstr(padded, " architecture "))) {
-				char url[256] = "https://tty.pt/docs/architecture";
-				extract_first_url_from_text(world->browser_page, url, sizeof(url));
-				snprintf(out_json, out_sz, "{\"op\":\"open_url\",\"target\":{\"url\":\"%s\"}}", url);
-				return true;
-			}
-		}
-		snprintf(out_json, out_sz, "{\"op\":\"inspect_browser\",\"target\":{}}");
-		return true;
-	}
-
-	/* 3. Persistent User Workflow Memory: remember preference/workflow */
-	if (strstr(padded, " remember ") && (strstr(padded, " preference ") || strstr(padded, " workflow ") || strstr(padded, " habit "))) {
-		const char *q1 = strchr(utterance, '\'');
-		const char *q2 = q1 ? strchr(q1 + 1, '\'') : NULL;
-		char key[128] = "workflow";
-		if (q1 && q2 && q2 > q1 + 1) {
-			size_t klen = (size_t)(q2 - (q1 + 1));
-			if (klen >= sizeof(key)) klen = sizeof(key) - 1;
-			memcpy(key, q1 + 1, klen);
-			key[klen] = '\0';
-		}
-		const char *colon = strchr(utterance, ':');
-		const char *val = colon ? (colon + 1) : utterance;
-		while (*val && isspace((unsigned char)*val)) val++;
-		char ek[256], ev[512];
-		jjson_escape_str(key, ek, sizeof(ek));
-		jjson_escape_str(val, ev, sizeof(ev));
-		snprintf(out_json, out_sz, "{\"op\":\"remember_fact\",\"args\":{\"key\":\"%s\",\"value\":\"%s\"}}", ek, ev);
-		return true;
-	}
-
-	/* 3b. Invoke a remembered user workflow */
+	/* 2. Invoke a remembered user workflow if the utterance references a stored memory key */
 	if (eng && eng->memory_count > 0) {
 		for (size_t i = 0; i < eng->memory_count; i++) {
 			char mk_clean[128];
 			if (jarvis_clean_phrase(eng->memories[i].key, mk_clean, sizeof(mk_clean)) >= 3 &&
 			    strstr(clean, mk_clean)) {
-				/* Expand remembered workflow value through clause splitter + solver */
 				char wf_clauses[JARVIS_MAX_STEPS][512];
-				size_t n_wf = jarvis_split_clauses(eng->ont, eng->memories[i].value, wf_clauses, JARVIS_MAX_STEPS);
+				size_t n_wf = jarvis_split_clauses(ont, eng->memories[i].value, wf_clauses, JARVIS_MAX_STEPS);
 				int pos = snprintf(out_json, out_sz, "[");
 				size_t emitted = 0;
 				for (size_t ci = 0; ci < n_wf; ci++) {
 					jarvis_ir_t ir;
 					jarvis_dsl_t dsl;
-					if (jarvis_solve_clause(eng->ont, wf_clauses[ci], "any", world, &ir) &&
+					if (jarvis_solve_clause(ont, wf_clauses[ci], "any", world, &ir) &&
 					    jarvis_compile_ir_to_dsl(&ir, "any", &eng->ctx, world, &dsl)) {
 						char dj[1024];
 						jarvis_dsl_to_json(&dsl, dj, sizeof(dj));
@@ -1600,253 +1931,15 @@ static bool synthesize_offline_react_json(
 		}
 	}
 
-	/* 4. Conversational follow-ups across turns: workspace corrections, undo/bring back, command replay, file opening */
-	if (strstr(padded, " bring it back ") || strstr(padded, " pull back ") ||
-	    ((strstr(padded, " nevermind ") || strstr(padded, " never mind ") || strstr(padded, " undo ")) &&
-	     (strstr(padded, " workspace ") || strstr(padded, " desktop ") || strstr(padded, " back ") ||
-	      (eng && (strcmp(eng->ctx.last_op, "workspace_switch") == 0 || strcmp(eng->ctx.last_op, "workspace_move_window") == 0))))) {
-		int prev_ws = (eng && eng->ctx.prev_workspace > 0) ? eng->ctx.prev_workspace : 1;
-		const char *op = (eng && strcmp(eng->ctx.last_op, "workspace_move_window") == 0) ? "workspace_move_window" : "workspace_switch";
-		if (strstr(padded, " bring it back ") || strstr(padded, " pull back ")) op = "workspace_move_window";
-		snprintf(out_json, out_sz, "{\"op\":\"%s\",\"args\":{\"workspace\":%d}}", op, prev_ws);
-		return true;
-	}
-
-	if ((strstr(padded, " actually ") || strstr(padded, " instead ") || strstr(padded, " wait ")) &&
-	    (strstr(padded, " move it ") || strstr(padded, " workspace ") || strstr(padded, " desktop ") ||
-	     (eng && (strcmp(eng->ctx.last_op, "workspace_switch") == 0 || strcmp(eng->ctx.last_op, "workspace_move_window") == 0)))) {
-		int ws = 1;
-		for (const char *p = clean; *p; p++) {
-			if (*p >= '1' && *p <= '9' && (p == clean || isspace((unsigned char)p[-1]))) {
-				ws = *p - '0';
-				break;
-			}
+	/* 3. Delegate to the language-agnostic Tier-0 ontology solver & idiom table */
+	if (ont) {
+		jarvis_ir_t ir;
+		jarvis_dsl_t dsl;
+		if (jarvis_solve_clause(ont, utterance, "any", world, &ir) &&
+		    jarvis_compile_ir_to_dsl(&ir, "any", eng ? &eng->ctx : NULL, world, &dsl)) {
+			jarvis_dsl_to_json(&dsl, out_json, out_sz);
+			return out_json[0] != '\0';
 		}
-		const char *op = (eng && eng->ctx.last_op[0]) ? eng->ctx.last_op : "workspace_move_window";
-		if (strstr(padded, " move ")) op = "workspace_move_window";
-		else if (strstr(padded, " switch ") || strstr(padded, " go to ")) op = "workspace_switch";
-		snprintf(out_json, out_sz, "{\"op\":\"%s\",\"args\":{\"workspace\":%d}}", op, ws);
-		return true;
-	}
-
-	/* 4a. Replay last command or action ("run that again", "run that command again", "do the same thing in the other window", "repeat that") */
-	if (strstr(padded, " run that again ") || strstr(padded, " run it again ") ||
-	    strstr(padded, " run that command again ") || strstr(padded, " that again ") ||
-	    strstr(padded, " repeat that ") || strstr(padded, " do that again ") ||
-	    strstr(padded, " do the same ") || strstr(padded, " same thing ")) {
-		bool in_other = strstr(padded, " other ") != NULL;
-		const char *cmd = (eng && eng->ctx.last_command[0]) ? eng->ctx.last_command : "make test-fast";
-		char esc_cmd[512];
-		jjson_escape_str(cmd, esc_cmd, sizeof(esc_cmd));
-		snprintf(out_json, out_sz,
-		         "{\"op\":\"spawn_shell_command\",\"target\":{\"command\":\"%s\"%s}}",
-		         esc_cmd, in_other ? ",\"relation\":\"other\"" : "");
-		return true;
-	}
-
-	/* 4b. Contextual "open that file in neovim" / "open the file where it crashed" from live terminal or context */
-	if (strstr(padded, " open that file ") || strstr(padded, " that file ") ||
-	    strstr(padded, " failing file ") || strstr(padded, " file mentioned ") ||
-	    (strstr(padded, " open ") && strstr(padded, " file ") && (strstr(padded, " crashed ") || strstr(padded, " error ") || strstr(padded, " failed ")))) {
-		char file_path[128] = {0};
-		int line_no = 0;
-		if (world && world->pane_count > 0 && world->panes[0].tail[0]) {
-			extract_file_from_text(world->panes[0].tail, file_path, sizeof(file_path), &line_no);
-		}
-		if (!file_path[0] && eng && eng->ctx.last_file[0]) {
-			snprintf(file_path, sizeof(file_path), "%.*s", (int)(sizeof(file_path) - 1), eng->ctx.last_file);
-		}
-		if (!file_path[0] && eng && eng->turn_count > 0) {
-			extract_file_from_text(eng->turns[eng->turn_count - 1].output, file_path, sizeof(file_path), &line_no);
-		}
-		if (line_no <= 0 && eng && eng->ctx.last_line > 0) {
-			line_no = eng->ctx.last_line;
-		}
-		if (!file_path[0]) {
-			snprintf(file_path, sizeof(file_path), "src/audio.c");
-		}
-		if (line_no > 0 && (strstr(padded, " line ") || strstr(padded, " where ") || strstr(padded, " crashed "))) {
-			snprintf(out_json, out_sz, "{\"op\":\"spawn_shell_command\",\"target\":{\"command\":\"nvim +%d %s\"}}", line_no, file_path);
-		} else {
-			snprintf(out_json, out_sz, "{\"op\":\"spawn_shell_command\",\"target\":{\"command\":\"nvim %s\"}}", file_path);
-		}
-		return true;
-	}
-
-	/* 4c. SSH to remote host */
-	if (strstr(padded, " ssh ")) {
-		snprintf(out_json, out_sz, "{\"op\":\"spawn_shell_command\",\"target\":{\"command\":\"ssh tty.pt 'df -h'\"}}");
-		return true;
-	}
-
-	/* 5. Casual / indirect / slang / ergonomic requests */
-	if (strstr(padded, " too small ") || strstr(padded, " cant read ") || strstr(padded, " cannot read ") ||
-	    strstr(padded, " barely read ") || strstr(padded, " tiny ") || strstr(padded, " my eyes ")) {
-		if (strstr(padded, " fullscreen ") || strstr(padded, " full screen ") || strstr(padded, " maximize ") || strstr(padded, " bigger window ")) {
-			snprintf(out_json, out_sz, "{\"op\":\"window_fullscreen\",\"target\":{}}");
-			return true;
-		}
-		snprintf(out_json, out_sz, "{\"op\":\"press_key\",\"args\":{\"key_combo\":\"ctrl+plus\"}}");
-		return true;
-	}
-	if (strstr(padded, " zoom in ") || strstr(padded, " bump the font ") || strstr(padded, " make the text bigger ") || strstr(padded, " font bigger ")) {
-		snprintf(out_json, out_sz, "{\"op\":\"press_key\",\"args\":{\"key_combo\":\"ctrl+plus\"}}");
-		return true;
-	}
-	if (strstr(padded, " zoom out ") || strstr(padded, " smaller text ") || strstr(padded, " font smaller ") || strstr(padded, " shrink the font ")) {
-		snprintf(out_json, out_sz, "{\"op\":\"press_key\",\"args\":{\"key_combo\":\"ctrl+minus\"}}");
-		return true;
-	}
-	if (strstr(padded, " reload ") || strstr(padded, " refresh ")) {
-		snprintf(out_json, out_sz, "{\"op\":\"press_key\",\"args\":{\"key_combo\":\"ctrl+r\"}}");
-		return true;
-	}
-	if (strstr(padded, " go back a page ") || strstr(padded, " previous page ")) {
-		snprintf(out_json, out_sz, "{\"op\":\"press_key\",\"args\":{\"key_combo\":\"alt+Left\"}}");
-		return true;
-	}
-	if (strstr(padded, " too loud ") || strstr(padded, " ears ") || strstr(padded, " blasting ") || strstr(padded, " quieter ") ||
-	    strstr(padded, " turn it down ") || strstr(padded, " dial it down ")) {
-		snprintf(out_json, out_sz, "{\"op\":\"media_volume\",\"args\":{\"action\":\"volume_down\"}}");
-		return true;
-	}
-	if (strstr(padded, " barely hear ") || strstr(padded, " louder ") || strstr(padded, " turn it up ")) {
-		snprintf(out_json, out_sz, "{\"op\":\"media_volume\",\"args\":{\"action\":\"volume_up\"}}");
-		return true;
-	}
-	if (strstr(padded, " get rid of ") || strstr(padded, " ditch ") || strstr(padded, " trash ") ||
-	    (strstr(padded, " kill ") && (strstr(padded, " window ") || strstr(padded, " tab ")))) {
-		bool is_tab = strstr(padded, " tab ") != NULL;
-		bool is_other = strstr(padded, " other ") != NULL;
-		snprintf(out_json, out_sz,
-		         "{\"op\":\"window_close\",\"target\":{\"kind\":\"%s\"%s}}",
-		         is_tab ? "tab" : "window", is_other ? ",\"relation\":\"other\"" : "");
-		return true;
-	}
-	if ((strstr(padded, " hop over ") || strstr(padded, " jump to ") || strstr(padded, " bounce to ")) &&
-	    (strstr(padded, " workspace ") || strstr(padded, " desktop ") || strstr(padded, " tag "))) {
-		int ws = 4;
-		for (const char *p = clean; *p; p++) {
-			if (*p >= '1' && *p <= '9' && (p == clean || isspace((unsigned char)p[-1]))) {
-				ws = *p - '0';
-				break;
-			}
-		}
-		snprintf(out_json, out_sz, "{\"op\":\"workspace_switch\",\"args\":{\"workspace\":%d}}", ws);
-		return true;
-	}
-	if ((strstr(padded, " banish ") || strstr(padded, " stash ") || strstr(padded, " toss ") || strstr(padded, " throw ")) &&
-	    (strstr(padded, " desktop ") || strstr(padded, " workspace ") || strstr(padded, " tag "))) {
-		int ws = 6;
-		for (const char *p = clean; *p; p++) {
-			if (*p >= '1' && *p <= '9' && (p == clean || isspace((unsigned char)p[-1]))) {
-				ws = *p - '0';
-				break;
-			}
-		}
-		bool other = strstr(padded, " other window ") != NULL || strstr(padded, " other ") != NULL;
-		snprintf(out_json, out_sz,
-		         "{\"op\":\"workspace_move_window\",\"target\":{%s},\"args\":{\"workspace\":%d}}",
-		         other ? "\"relation\":\"other\"" : "", ws);
-		return true;
-	}
-
-	/* 6. Out-of-distribution informal system / shell / desktop / media / browser requests */
-	if (strstr(padded, " how much memory ") || (strstr(padded, " memory ") && strstr(padded, " left "))) {
-		snprintf(out_json, out_sz, "{\"op\":\"spawn_shell_command\",\"target\":{\"command\":\"free -h\"}}");
-		return true;
-	}
-	if (strstr(padded, " hogging port ") || strstr(padded, " port 8080 ")) {
-		snprintf(out_json, out_sz, "{\"op\":\"spawn_shell_command\",\"target\":{\"command\":\"lsof -i :8080\"}}");
-		return true;
-	}
-	if (strstr(padded, " lines of c code ") || strstr(padded, " count how many lines ")) {
-		snprintf(out_json, out_sz, "{\"op\":\"spawn_shell_command\",\"target\":{\"command\":\"find . -name '*.c' | xargs wc -l\"}}");
-		return true;
-	}
-	if (strstr(padded, " last 15 lines ") || strstr(padded, " auren server log ")) {
-		snprintf(out_json, out_sz, "{\"op\":\"spawn_shell_command\",\"target\":{\"command\":\"tail -n 15 /var/log/auren.log\"}}");
-		return true;
-	}
-	if (strstr(padded, " gitconfig ") && (strstr(padded, " edit ") || strstr(padded, " neovim ") || strstr(padded, " vim "))) {
-		snprintf(out_json, out_sz, "{\"op\":\"spawn_shell_command\",\"target\":{\"command\":\"nvim ~/.gitconfig\"}}");
-		return true;
-	}
-	if (strstr(padded, " make test ") || strstr(padded, " test fast ")) {
-		bool other = strstr(padded, " other window ") != NULL || strstr(padded, " other terminal ") != NULL;
-		snprintf(out_json, out_sz,
-		         "{\"op\":\"spawn_shell_command\",\"target\":{\"command\":\"make test-fast\"%s}}",
-		         other ? ",\"relation\":\"other\"" : "");
-		return true;
-	}
-	if (strstr(padded, " ping ") || strstr(padded, " reachable ")) {
-		snprintf(out_json, out_sz, "{\"op\":\"spawn_shell_command\",\"target\":{\"command\":\"ping -c 3 google.com\"}}");
-		return true;
-	}
-	if (strstr(padded, " compress ") || strstr(padded, " tar gz ")) {
-		snprintf(out_json, out_sz, "{\"op\":\"spawn_shell_command\",\"target\":{\"command\":\"tar -czf logs.tar.gz logs\"}}");
-		return true;
-	}
-	if (strstr(padded, " nuke ") && strstr(padded, " window ")) {
-		bool other = strstr(padded, " other window ") != NULL;
-		snprintf(out_json, out_sz,
-		         "{\"op\":\"window_close\",\"target\":{\"kind\":\"window\"%s}}",
-		         other ? ",\"relation\":\"other\"" : "");
-		return true;
-	}
-	if (strstr(padded, " flip back ") || strstr(padded, " looking at before ")) {
-		snprintf(out_json, out_sz, "{\"op\":\"focus_relative_window\",\"target\":{\"kind\":\"relative\",\"relation\":\"other\"}}");
-		return true;
-	}
-	if (strstr(padded, " calculator ")) {
-		snprintf(out_json, out_sz, "{\"op\":\"open_application\",\"target\":{\"identifier\":\"gnome-calculator\"}}");
-		return true;
-	}
-	if (strstr(padded, " crank ") && (strstr(padded, " sound ") || strstr(padded, " volume "))) {
-		snprintf(out_json, out_sz, "{\"op\":\"media_volume\",\"args\":{\"action\":\"volume_up\"}}");
-		return true;
-	}
-	if (strstr(padded, " shush ") && (strstr(padded, " audio ") || strstr(padded, " sound "))) {
-		snprintf(out_json, out_sz, "{\"op\":\"media_volume\",\"args\":{\"action\":\"volume_mute\"}}");
-		return true;
-	}
-	if (strstr(padded, " synthwave ") || strstr(padded, " throw on ") || strstr(padded, " im bored ") || strstr(padded, " i am bored ")) {
-		snprintf(out_json, out_sz, "{\"op\":\"media_play\",\"target\":{\"query\":\"chill synthwave beats\"}}");
-		return true;
-	}
-	if (strstr(padded, " look up ") || strstr(padded, " on google ")) {
-		snprintf(out_json, out_sz, "{\"op\":\"search_web\",\"target\":{\"query\":\"linux kernel epoll man page\"}}");
-		return true;
-	}
-	if (strstr(padded, " what time ") || strstr(padded, " current time ") ||
-	    strstr(padded, " what date ") || strstr(padded, " todays date ") || strstr(padded, " what day is ")) {
-		char tbuf[128] = "now";
-#ifndef __wasm__
-		time_t now_t = time(NULL);
-		struct tm tm_now;
-		if (localtime_r(&now_t, &tm_now)) {
-			strftime(tbuf, sizeof(tbuf), "%I:%M %p on %A, %B %d", &tm_now);
-		}
-#endif
-		snprintf(out_json, out_sz,
-		         "{\"op\":\"answer_question\",\"args\":{\"answer\":\"It is %s.\"}}", tbuf);
-		return true;
-	}
-	if (strstr(padded, " what directory ") || strstr(padded, " working in ")) {
-		const char *cwd = (world && world->focused_cwd[0]) ? world->focused_cwd : "/home/quirinpa/site";
-		snprintf(out_json, out_sz,
-		         "{\"op\":\"answer_question\",\"args\":{\"answer\":\"You are currently working in %s.\"}}", cwd);
-		return true;
-	}
-	if (strstr(padded, " what shortcut ") || (strstr(padded, " dwm ") && strstr(padded, " tile "))) {
-		snprintf(out_json, out_sz,
-		         "{\"op\":\"wm_help\",\"target\":{\"query\":\"split or tile windows in dwm\"}}");
-		return true;
-	}
-	if (strstr(padded, " tell pi ") || strstr(padded, " ask pi ")) {
-		snprintf(out_json, out_sz,
-		         "{\"op\":\"ask_agent\",\"target\":{\"query\":\"inspect the memory recall latency\"}}");
-		return true;
 	}
 
 	return false;
@@ -1864,13 +1957,18 @@ bool jarvis_auren_run_react_agent(
 	char utterance[512];
 	snprintf(utterance, sizeof(utterance), "%s", raw_utterance);
 
-	static const char *SYS_PROMPT =
+	const char *lang_name = jarvis_ontology_get_lang_name(eng->ont);
+	char sys_prompt[1536];
+	snprintf(
+		sys_prompt, sizeof(sys_prompt),
 		"You are Jarvis, Tony Stark's intelligent Linux desktop assistant and systems engineer. "
 		"You control a live Linux desktop (dwm, terminals, tmux, Firefox, audio, shell, and coding tools). "
 		"You operate in a ReAct Observe-Reason-Act loop: you can either call an OBSERVATION tool first to inspect "
 		"live terminal panes, browser accessibility page content, clipboard, system health, or command output, OR immediately emit one or more ACTION DSL objects (or a JSON array of DSL objects) to fulfill the user's intent. "
-		"When using `answer_question`, keep your spoken reply crisp, natural, and concise (1 to 2 short sentences, under 180 characters). "
-		"Always output ONLY valid JSON (either a single JSON object or a JSON array of objects). No markdown prose outside JSON.";
+		"When using `answer_question`, keep your spoken reply crisp, natural, and concise (1 to 2 short sentences, under 180 characters) in %s (or the language of the user's request). "
+		"Always output ONLY valid JSON (either a single JSON object or a JSON array of objects). No markdown prose outside JSON.",
+		(lang_name && *lang_name) ? lang_name : "English"
+	);
 
 	static const char *TOOLS_DOC =
 		"=== OBSERVATION & MEMORY TOOLS ===\n"
@@ -1944,7 +2042,7 @@ bool jarvis_auren_run_react_agent(
 #ifndef __wasm__
 		if (eng->infer_mode == JARVIS_INFER_AUTO || eng->infer_mode == JARVIS_INFER_LLM) {
 			char esc_sys[2048], esc_u0[12288];
-			jjson_escape_str(SYS_PROMPT, esc_sys, sizeof(esc_sys));
+			jjson_escape_str(sys_prompt, esc_sys, sizeof(esc_sys));
 			jjson_escape_str(user_msg0, esc_u0, sizeof(esc_u0));
 
 			const char *models[3] = {eng->llm_model, "fast", "kilo-auto/free"};
@@ -1996,7 +2094,7 @@ bool jarvis_auren_run_react_agent(
 			}
 		}
 #else
-		(void)SYS_PROMPT;
+		(void)sys_prompt;
 		(void)user_msg0;
 #endif
 
@@ -2203,6 +2301,16 @@ bool jarvis_process(
 		}
 	}
 
+	/* 1.5. Evaluate deterministic Tier-0 single-clause fast-path BEFORE ReAct agent routing
+	 * if the utterance is an unambiguous single clause without interrogatives or causal triggers. */
+	if (utterance[strlen(utterance) - 1] != '?') {
+		char probe_clauses[JARVIS_MAX_STEPS][512];
+		size_t n_probe = jarvis_split_clauses(eng->ont, utterance, probe_clauses, JARVIS_MAX_STEPS);
+		if (n_probe == 1 && !requires_agent_reasoning(eng, utterance)) {
+			/* falls through to step 3 Tier-0 solver */
+		}
+	}
+
 	/* 2. Check if whole utterance requires multi-turn ReAct agent reasoning */
 	if (requires_agent_reasoning(eng, utterance)) {
 		if (jarvis_auren_run_react_agent(eng, utterance, &world, out_result)) {
@@ -2227,10 +2335,20 @@ bool jarvis_process(
 	double tier0_thresh = (eng->infer_mode != JARVIS_INFER_EMBEDDING) ? 0.90 : 0.85;
 
 	/* If a 2-clause utterance was split on a casual comma ("this text is tiny, I can't read it")
+	 * and not an explicit multi-word comma-conjunction separator from ont->clause_seps,
 	 * and the whole utterance deterministically resolves as a single high-confidence Tier-0 action
 	 * (or both clauses resolve to the same IR capability), treat it as a single 1-step utterance. */
-	if (n_clauses == 2 && strstr(utterance, ", ") &&
-	    !strstr(utterance, ", and ") && !strstr(utterance, ", then ")) {
+	bool has_explicit_comma_sep = false;
+	if (eng->ont) {
+		for (size_t si = 0; si < eng->ont->clause_sep_count; si++) {
+			const char *sep = eng->ont->clause_seps[si];
+			if (sep[0] == ',' && strlen(sep) > 2 && strstr(utterance, sep)) {
+				has_explicit_comma_sep = true;
+				break;
+			}
+		}
+	}
+	if (n_clauses == 2 && strstr(utterance, ", ") && !has_explicit_comma_sep) {
 		jarvis_ir_t ir_full, ir0, ir1;
 		if (!requires_agent_reasoning(eng, utterance) &&
 		    jarvis_solve_clause(eng->ont, utterance, surf, &world, &ir_full) &&

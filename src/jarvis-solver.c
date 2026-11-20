@@ -1,14 +1,5 @@
 #include "jarvis-internal.h"
 
-static bool in_str_list(const char *w, const char **list)
-{
-	if (!w) return false;
-	for (size_t i = 0; list[i]; i++) {
-		if (strcmp(w, list[i]) == 0) return true;
-	}
-	return false;
-}
-
 static void trim_punct_ws(char *s)
 {
 	if (!s) return;
@@ -23,16 +14,76 @@ static void trim_punct_ws(char *s)
 
 static bool ends_with_ci_space(const char *str, const char *tail)
 {
-	size_t slen = strlen(str);
-	size_t tlen = strlen(tail);
-	if (slen < tlen + 1) return false;
-	if (str[slen - tlen - 1] != ' ') return false;
-	for (size_t i = 0; i < tlen; i++) {
-		if (tolower((unsigned char)str[slen - tlen + i]) != tolower((unsigned char)tail[i])) {
-			return false;
-		}
+	char str_c[512], tail_c[128];
+	jarvis_clean_phrase(str, str_c, sizeof(str_c));
+	jarvis_clean_phrase(tail, tail_c, sizeof(tail_c));
+	size_t slen = strlen(str_c);
+	size_t tlen = strlen(tail_c);
+	if (tlen == 0 || slen < tlen + 1) return false;
+	if (str_c[slen - tlen - 1] != ' ') return false;
+	return strcmp(str_c + slen - tlen, tail_c) == 0;
+}
+
+static void strip_tail_words(char *str, const char *tail_phrase)
+{
+	char tail_c[128];
+	jarvis_clean_phrase(tail_phrase, tail_c, sizeof(tail_c));
+	size_t n_words = 0;
+	for (size_t i = 0; tail_c[i]; i++) {
+		if (i == 0 || (tail_c[i] != ' ' && tail_c[i - 1] == ' ')) n_words++;
 	}
-	return true;
+	size_t len = strlen(str);
+	while (n_words > 0 && len > 0) {
+		while (len > 0 && (isspace((unsigned char)str[len - 1]) || strchr(",.!?;:", str[len - 1]))) len--;
+		while (len > 0 && !isspace((unsigned char)str[len - 1])) len--;
+		n_words--;
+	}
+	str[len] = '\0';
+	trim_punct_ws(str);
+}
+
+static bool starts_with_ci_space(const char *str, const char *head)
+{
+	char str_c[512], head_c[128];
+	jarvis_clean_phrase(str, str_c, sizeof(str_c));
+	jarvis_clean_phrase(head, head_c, sizeof(head_c));
+	size_t slen = strlen(str_c);
+	size_t hlen = strlen(head_c);
+	if (hlen == 0 || slen < hlen + 1) return false;
+	if (str_c[hlen] != ' ') return false;
+	return strncmp(str_c, head_c, hlen) == 0;
+}
+
+static void strip_head_words(char *str, const char *head_phrase)
+{
+	char head_c[128];
+	jarvis_clean_phrase(head_phrase, head_c, sizeof(head_c));
+	size_t n_words = 0;
+	for (size_t i = 0; head_c[i]; i++) {
+		if (i == 0 || (head_c[i] != ' ' && head_c[i - 1] == ' ')) n_words++;
+	}
+	char *p = str;
+	while (n_words > 0 && *p) {
+		while (*p && (isspace((unsigned char)*p) || strchr(",.!?;:", *p))) p++;
+		while (*p && !isspace((unsigned char)*p)) p++;
+		n_words--;
+	}
+	while (*p && (isspace((unsigned char)*p) || strchr(",.!?;:", *p))) p++;
+	memmove(str, p, strlen(p) + 1);
+	trim_punct_ws(str);
+}
+
+static bool match_and_strip_modifier(char *str, const char *mod_phrase)
+{
+	if (ends_with_ci_space(str, mod_phrase)) {
+		strip_tail_words(str, mod_phrase);
+		return true;
+	}
+	if (starts_with_ci_space(str, mod_phrase)) {
+		strip_head_words(str, mod_phrase);
+		return true;
+	}
+	return false;
 }
 
 static void strip_locative_modifiers(
@@ -45,7 +96,9 @@ static void strip_locative_modifiers(
 	size_t                   surf_sz,
 	bool                    *out_explicit_term,
 	bool                    *out_target_other,
-	bool                    *out_submit_enter
+	bool                    *out_submit_enter,
+	bool                    *out_new_terminal,
+	bool                    *out_bg_play
 )
 {
 	snprintf(out_stripped, stripped_sz, "%s", clause ? clause : "");
@@ -54,15 +107,15 @@ static void strip_locative_modifiers(
 	*out_explicit_term = false;
 	*out_target_other  = false;
 	*out_submit_enter  = false;
+	*out_new_terminal  = false;
+	*out_bg_play       = false;
 	if (!ont) return;
 
 	bool changed = true;
 	while (changed) {
 		changed = false;
 		for (size_t i = 0; i < ont->loc_submit_count; i++) {
-			if (ends_with_ci_space(out_stripped, ont->loc_submit[i])) {
-				out_stripped[strlen(out_stripped) - strlen(ont->loc_submit[i])] = '\0';
-				trim_punct_ws(out_stripped);
+			if (match_and_strip_modifier(out_stripped, ont->loc_submit[i])) {
 				*out_submit_enter = true;
 				changed = true;
 				break;
@@ -70,10 +123,28 @@ static void strip_locative_modifiers(
 		}
 		if (changed) continue;
 
+		for (size_t i = 0; i < ont->loc_new_terminal_count; i++) {
+			if (match_and_strip_modifier(out_stripped, ont->loc_new_terminal[i])) {
+				*out_new_terminal = true;
+				snprintf(out_surface, surf_sz, "terminal");
+				*out_explicit_term = true;
+				changed = true;
+				break;
+			}
+		}
+		if (changed) continue;
+
+		for (size_t i = 0; i < ont->loc_background_count; i++) {
+			if (match_and_strip_modifier(out_stripped, ont->loc_background[i])) {
+				*out_bg_play = true;
+				changed = true;
+				break;
+			}
+		}
+		if (changed) continue;
+
 		for (size_t i = 0; i < ont->loc_other_count; i++) {
-			if (ends_with_ci_space(out_stripped, ont->loc_other[i])) {
-				out_stripped[strlen(out_stripped) - strlen(ont->loc_other[i])] = '\0';
-				trim_punct_ws(out_stripped);
+			if (match_and_strip_modifier(out_stripped, ont->loc_other[i])) {
 				*out_target_other = true;
 				changed = true;
 				break;
@@ -82,9 +153,7 @@ static void strip_locative_modifiers(
 		if (changed) continue;
 
 		for (size_t i = 0; i < ont->loc_terminal_count; i++) {
-			if (ends_with_ci_space(out_stripped, ont->loc_terminal[i])) {
-				out_stripped[strlen(out_stripped) - strlen(ont->loc_terminal[i])] = '\0';
-				trim_punct_ws(out_stripped);
+			if (match_and_strip_modifier(out_stripped, ont->loc_terminal[i])) {
 				snprintf(out_surface, surf_sz, "terminal");
 				*out_explicit_term = true;
 				changed = true;
@@ -94,9 +163,7 @@ static void strip_locative_modifiers(
 		if (changed) continue;
 
 		for (size_t i = 0; i < ont->loc_any_count; i++) {
-			if (ends_with_ci_space(out_stripped, ont->loc_any[i])) {
-				out_stripped[strlen(out_stripped) - strlen(ont->loc_any[i])] = '\0';
-				trim_punct_ws(out_stripped);
+			if (match_and_strip_modifier(out_stripped, ont->loc_any[i])) {
 				changed = true;
 				break;
 			}
@@ -296,6 +363,13 @@ static void extract_constituents(
 			const jarvis_entity_entry_t *ee = jarvis_live_index_find(live_idx, span);
 			if (!ee) continue;
 
+			/* Do not consume a single-word mod.flag-only entity (like "new") so it doesn't shadow multi-word phrases,
+			 * unless it also carries non-modifier entity tags (like "fullscreen" -> ui.window_action + mod.flag). */
+			if (ee->tag_count == 1 && strcmp(ee->tags[0].type, "mod.flag") == 0) {
+				add_entity_match(out_p, ee->tags[0].type, ee->tags[0].id);
+				continue;
+			}
+
 			bool any_cons = false;
 			for (size_t k = i; k < i + L; k++) {
 				if (consumed[k]) { any_cons = true; break; }
@@ -306,15 +380,11 @@ static void extract_constituents(
 					for (size_t k = lead_verb_end; k < i + L; k++) {
 						if (consumed[k]) { allow_subsume = false; break; }
 					}
+				} else if (i >= v_start && i + L <= lead_verb_end) {
+					/* Entity phrase is a sub-span inside the leading verb phrase (e.g. "fullscreen" inside "toggle fullscreen") */
+					allow_subsume = true;
 				}
 				if (!allow_subsume) continue;
-			}
-
-			if (i == v_start && L == 1 &&
-			    jarvis_ontology_find_verb_phrase(ont, span) &&
-			    n > v_start + 1 &&
-			    strcmp(span, out_p->lead_verb_span) == 0) {
-				continue;
 			}
 
 			for (size_t t = 0; t < ee->tag_count; t++) {
@@ -338,7 +408,9 @@ static void extract_constituents(
 			join_words(words, i, L, span, sizeof(span));
 			const jarvis_verb_entry_t *ve = jarvis_ontology_find_verb_phrase(ont, span);
 			if (ve) {
-				if (strcmp(span, "google") == 0 && i > v_start && out_p->verb_count > 0) {
+				/* If a verb phrase is also a known web.shortcut host name after a leading verb, keep it as argument */
+				if (i > v_start && out_p->verb_count > 0 && ve->tag_count == 1 &&
+				    strcmp(ve->tags[0].concept, "SEARCH_WEB") == 0) {
 					continue;
 				}
 				for (size_t t = 0; t < ve->tag_count; t++) {
@@ -349,15 +421,15 @@ static void extract_constituents(
 		}
 	}
 
-	/* 4. Modifiers and implicit verb fallback for verbless noun utterances */
-	for (size_t i = 0; i < n; i++) {
-		if (strcmp(words[i], "new") == 0) out_p->mod_new = true;
-		else if (strcmp(words[i], "hidden") == 0) out_p->mod_hidden = true;
-		else if (strcmp(words[i], "all") == 0) out_p->mod_all = true;
-		else if (strcmp(words[i], "silent") == 0) out_p->mod_silent = true;
-		else if (strcmp(words[i], "fullscreen") == 0) out_p->mod_fullscreen = true;
-		else if (strcmp(words[i], "floating") == 0) out_p->mod_floating = true;
+	/* 4. Modifiers (from mod.flag ontology entities) and implicit verb fallback */
+	out_p->mod_new        = entity_has_id(out_p, "mod.flag", "new");
+	out_p->mod_hidden     = entity_has_id(out_p, "mod.flag", "hidden");
+	out_p->mod_all        = entity_has_id(out_p, "mod.flag", "all");
+	out_p->mod_silent     = entity_has_id(out_p, "mod.flag", "silent");
+	out_p->mod_fullscreen = entity_has_id(out_p, "mod.flag", "fullscreen");
+	out_p->mod_floating   = entity_has_id(out_p, "mod.flag", "floating");
 
+	for (size_t i = 0; i < n; i++) {
 		if (!consumed[i] && out_p->verb_count == 0) {
 			const jarvis_verb_entry_t *ve = jarvis_ontology_find_verb_phrase(ont, words[i]);
 			if (ve) {
@@ -415,13 +487,33 @@ static void extract_constituents(
 	}
 }
 
-static bool starts_with_ci(const char *s, const char *prefix)
+static bool starts_with_folded_phrase(const char *s, const char *phrase, size_t *out_advance)
 {
-	while (*prefix) {
-		if (tolower((unsigned char)*s) != tolower((unsigned char)*prefix)) return false;
-		s++;
-		prefix++;
+	char p_clean[128];
+	jarvis_clean_phrase(phrase, p_clean, sizeof(p_clean));
+	if (!p_clean[0]) return false;
+
+	char s_clean[512];
+	jarvis_clean_phrase(s, s_clean, sizeof(s_clean));
+	size_t plen = strlen(p_clean);
+	if (strncmp(s_clean, p_clean, plen) != 0 ||
+	    (s_clean[plen] != '\0' && s_clean[plen] != ' ')) {
+		return false;
 	}
+
+	/* Count words in p_clean and advance that many words in raw string s */
+	size_t n_words = 0;
+	for (size_t i = 0; p_clean[i]; i++) {
+		if (i == 0 || (p_clean[i] != ' ' && p_clean[i - 1] == ' ')) n_words++;
+	}
+	const char *cur = s;
+	while (n_words > 0 && *cur) {
+		while (*cur && (isspace((unsigned char)*cur) || strchr(",.!?;:", *cur))) cur++;
+		while (*cur && !isspace((unsigned char)*cur)) cur++;
+		n_words--;
+	}
+	while (*cur && isspace((unsigned char)*cur)) cur++;
+	*out_advance = (size_t)(cur - s);
 	return true;
 }
 
@@ -429,7 +521,7 @@ static void extract_after_verb(
 	const jarvis_ontology_t *ont,
 	const char              *raw_stripped,
 	const char              *lead_verb_span,
-	const char             **strip_preps,
+	bool                     strip_arg_preps,
 	char                    *out,
 	size_t                   out_sz
 )
@@ -447,54 +539,47 @@ static void extract_after_verb(
 		while (stripped_p) {
 			stripped_p = false;
 			for (size_t i = 0; i < ont->polite_prefix_count; i++) {
-				const char *pp = ont->polite_prefixes[i];
-				size_t plen = strlen(pp);
-				if (plen > 0 && starts_with_ci(q, pp) && isspace((unsigned char)q[plen])) {
-					q += plen;
-					while (*q && isspace((unsigned char)*q)) q++;
+				size_t adv = 0;
+				if (starts_with_folded_phrase(q, ont->polite_prefixes[i], &adv) && adv > 0) {
+					q += adv;
 					stripped_p = true;
 					break;
 				}
 			}
-			if (!stripped_p && (starts_with_ci(q, "let's ") || starts_with_ci(q, "lets "))) {
-				q += starts_with_ci(q, "let's ") ? 6 : 5;
-				while (*q && isspace((unsigned char)*q)) q++;
-				stripped_p = true;
-			}
 		}
 	}
 
-	/* Strip leading verb phrase */
+	/* Strip leading verb phrase (SVO/VSO) or trailing verb phrase (SOV) */
+	bool stripped_lead_verb = false;
 	if (lead_verb_span && *lead_verb_span) {
-		size_t vlen = strlen(lead_verb_span);
-		if (starts_with_ci(q, lead_verb_span) && (q[vlen] == '\0' || isspace((unsigned char)q[vlen]))) {
-			q += vlen;
-			while (*q && isspace((unsigned char)*q)) q++;
+		size_t adv = 0;
+		if (starts_with_folded_phrase(q, lead_verb_span, &adv)) {
+			q += adv;
+			stripped_lead_verb = true;
 		}
 	} else if (ont) {
-		size_t best_len = 0;
+		size_t best_adv = 0;
 		for (size_t i = 0; i < ont->verb_phrase_count; i++) {
-			const char *vp = ont->verb_phrases[i].phrase;
-			size_t vlen = strlen(vp);
-			if (vlen > best_len && starts_with_ci(q, vp) && (q[vlen] == '\0' || isspace((unsigned char)q[vlen]))) {
-				best_len = vlen;
+			size_t adv = 0;
+			if (starts_with_folded_phrase(q, ont->verb_phrases[i].phrase, &adv) && adv > best_adv) {
+				best_adv = adv;
 			}
 		}
-		if (best_len > 0) {
-			q += best_len;
-			while (*q && isspace((unsigned char)*q)) q++;
+		if (best_adv > 0) {
+			q += best_adv;
+			stripped_lead_verb = true;
 		}
 	}
 
-	/* Strip optional prepositions */
-	if (strip_preps) {
+	/* Strip optional prepositions from ont->arg_preps */
+	if (strip_arg_preps && ont) {
 		bool changed = true;
 		while (changed) {
 			changed = false;
-			for (size_t i = 0; strip_preps[i]; i++) {
-				if (starts_with_ci(q, strip_preps[i])) {
-					q += strlen(strip_preps[i]);
-					while (*q && isspace((unsigned char)*q)) q++;
+			for (size_t i = 0; i < ont->arg_prep_count; i++) {
+				size_t adv = 0;
+				if (starts_with_folded_phrase(q, ont->arg_preps[i], &adv) && adv > 0) {
+					q += adv;
 					changed = true;
 					break;
 				}
@@ -507,38 +592,121 @@ static void extract_after_verb(
 	while (olen > 0 && isspace((unsigned char)out[olen - 1])) {
 		out[--olen] = '\0';
 	}
-}
 
-static bool is_digit_1_to_9(const char *s)
-{
-	if (!s) return false;
-	if (s[0] >= '1' && s[0] <= '9' && s[1] == '\0') return true;
-	static const char *const WORDS[] = {
-		"one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
-		"first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth",
-		NULL
-	};
-	for (size_t i = 0; WORDS[i]; i++) {
-		if (strcmp(s, WORDS[i]) == 0) return true;
+	/* SOV support: if no leading verb was stripped, subtract trailing verb phrase (and trailing polite/adposition particles) */
+	if (!stripped_lead_verb && ont && out[0]) {
+		bool sov_changed = true;
+		while (sov_changed) {
+			sov_changed = false;
+			for (size_t i = 0; i < ont->polite_prefix_count; i++) {
+				if (ends_with_ci_space(out, ont->polite_prefixes[i])) {
+					strip_tail_words(out, ont->polite_prefixes[i]);
+					sov_changed = true;
+					break;
+				}
+			}
+		}
+		size_t best_vlen = 0;
+		const char *best_vp = NULL;
+		for (size_t i = 0; i < ont->verb_phrase_count; i++) {
+			const char *vp = ont->verb_phrases[i].phrase;
+			size_t vlen = strlen(vp);
+			if (vlen > best_vlen && ends_with_ci_space(out, vp)) {
+				best_vlen = vlen;
+				best_vp = vp;
+			}
+		}
+		if (best_vp) {
+			strip_tail_words(out, best_vp);
+		}
+		if (strip_arg_preps) {
+			bool tail_changed = true;
+			while (tail_changed) {
+				tail_changed = false;
+				for (size_t i = 0; i < ont->arg_prep_count; i++) {
+					if (ends_with_ci_space(out, ont->arg_preps[i])) {
+						strip_tail_words(out, ont->arg_preps[i]);
+						tail_changed = true;
+						break;
+					}
+				}
+				for (size_t i = 0; i < ont->stopword_count; i++) {
+					if (ont->stopwords[i][0] && ends_with_ci_space(out, ont->stopwords[i])) {
+						strip_tail_words(out, ont->stopwords[i]);
+						tail_changed = true;
+						break;
+					}
+				}
+			}
+		}
 	}
-	return false;
 }
 
-static int parse_digit_1_to_9(const char *s)
+static void strip_generic_media_object_words(const jarvis_ontology_t *ont, char *q)
 {
-	if (!s) return 0;
+	if (!ont || !q || !*q) return;
+	bool changed = true;
+	while (changed && q[0]) {
+		changed = false;
+		char q_clean[512];
+		jarvis_clean_phrase(q, q_clean, sizeof(q_clean));
+		for (size_t i = 0; i < ont->entity_phrase_count; i++) {
+			const jarvis_entity_entry_t *ee = &ont->entity_phrases[i];
+			for (size_t t = 0; t < ee->tag_count; t++) {
+				if (strcmp(ee->tags[t].type, "media.object") == 0 &&
+				    strcmp(ee->tags[t].id, "music") == 0) {
+					if (strcmp(q_clean, ee->phrase) == 0) {
+						q[0] = '\0';
+						return;
+					}
+					if (ends_with_ci_space(q, ee->phrase)) {
+						strip_tail_words(q, ee->phrase);
+						changed = true;
+						break;
+					}
+					size_t adv = 0;
+					if (starts_with_folded_phrase(q, ee->phrase, &adv) && adv > 0) {
+						memmove(q, q + adv, strlen(q + adv) + 1);
+						changed = true;
+						break;
+					}
+				}
+			}
+			if (changed) break;
+		}
+		for (size_t i = 0; i < ont->stopword_count && q[0]; i++) {
+			if (ont->stopwords[i][0] && ends_with_ci_space(q, ont->stopwords[i])) {
+				strip_tail_words(q, ont->stopwords[i]);
+				changed = true;
+				break;
+			}
+		}
+	}
+}
+
+static int parse_workspace_digit(const jarvis_ontology_t *ont, const char *s)
+{
+	if (!s || !*s) return 0;
 	if (s[0] >= '1' && s[0] <= '9' && s[1] == '\0') return s[0] - '0';
-	static const struct { const char *w; int v; } MAP[] = {
-		{"one", 1}, {"two", 2}, {"three", 3}, {"four", 4}, {"five", 5},
-		{"six", 6}, {"seven", 7}, {"eight", 8}, {"nine", 9},
-		{"first", 1}, {"second", 2}, {"third", 3}, {"fourth", 4}, {"fifth", 5},
-		{"sixth", 6}, {"seventh", 7}, {"eighth", 8}, {"ninth", 9},
-		{NULL, 0}
-	};
-	for (size_t i = 0; MAP[i].w; i++) {
-		if (strcmp(s, MAP[i].w) == 0) return MAP[i].v;
+	if (ont) {
+		for (size_t i = 0; i < ont->entity_phrase_count; i++) {
+			if (strcmp(ont->entity_phrases[i].phrase, s) == 0) {
+				for (size_t t = 0; t < ont->entity_phrases[i].tag_count; t++) {
+					if (strcmp(ont->entity_phrases[i].tags[t].type, "ui.workspace") == 0 ||
+					    strcmp(ont->entity_phrases[i].tags[t].type, "sys.number") == 0) {
+						int v = atoi(ont->entity_phrases[i].tags[t].id);
+						if (v >= 1 && v <= 9) return v;
+					}
+				}
+			}
+		}
 	}
 	return 0;
+}
+
+static bool is_digit_1_to_9(const jarvis_ontology_t *ont, const char *s)
+{
+	return parse_workspace_digit(ont, s) >= 1;
 }
 
 static bool is_all_digits(const char *s)
@@ -575,6 +743,63 @@ static bool detect_url_token(const char *stripped, char *out_url, size_t url_sz)
 	return false;
 }
 
+static void assign_ir_slot(jarvis_ir_t *ir, const char *slot_name, const char *val)
+{
+	if (!ir || !slot_name || !val) return;
+	if (strcmp(slot_name, "action") == 0 || strcmp(slot_name, "state") == 0) {
+		snprintf(ir->action, sizeof(ir->action), "%s", val);
+	} else if (strcmp(slot_name, "command") == 0 || strcmp(slot_name, "program") == 0) {
+		snprintf(ir->program, sizeof(ir->program), "%s", val);
+	} else if (strcmp(slot_name, "identifier") == 0) {
+		snprintf(ir->identifier, sizeof(ir->identifier), "%s", val);
+		snprintf(ir->application, sizeof(ir->application), "%s", val);
+	} else if (strcmp(slot_name, "application") == 0) {
+		snprintf(ir->application, sizeof(ir->application), "%s", val);
+	} else if (strcmp(slot_name, "url") == 0) {
+		snprintf(ir->url, sizeof(ir->url), "%s", val);
+	} else if (strcmp(slot_name, "query") == 0 || strcmp(slot_name, "target_query") == 0) {
+		snprintf(ir->query, sizeof(ir->query), "%s", val);
+	} else if (strcmp(slot_name, "text") == 0 || strcmp(slot_name, "key_combo") == 0) {
+		snprintf(ir->text, sizeof(ir->text), "%s", val);
+	} else if (strcmp(slot_name, "kind") == 0) {
+		snprintf(ir->kind, sizeof(ir->kind), "%s", val);
+	} else if (strcmp(slot_name, "relation") == 0) {
+		snprintf(ir->relation, sizeof(ir->relation), "%s", val);
+	} else if (strcmp(slot_name, "direction") == 0) {
+		snprintf(ir->direction, sizeof(ir->direction), "%s", val);
+	} else if (strcmp(slot_name, "workspace") == 0) {
+		ir->workspace = atoi(val);
+	} else if (strcmp(slot_name, "amount") == 0 || strcmp(slot_name, "button") == 0 || strcmp(slot_name, "seconds") == 0) {
+		ir->amount = atoi(val);
+	} else if (strcmp(slot_name, "mode") == 0 || strcmp(slot_name, "record_target") == 0) {
+		snprintf(ir->record_target, sizeof(ir->record_target), "%s", val);
+	} else if (strcmp(slot_name, "location") == 0) {
+		snprintf(ir->location, sizeof(ir->location), "%s", val);
+	} else if (strcmp(slot_name, "aspect") == 0) {
+		snprintf(ir->aspect, sizeof(ir->aspect), "%s", val);
+	} else if (strcmp(slot_name, "metric") == 0) {
+		snprintf(ir->metric, sizeof(ir->metric), "%s", val);
+	} else if (strcmp(slot_name, "pattern") == 0) {
+		snprintf(ir->pattern, sizeof(ir->pattern), "%s", val);
+	} else if (strcmp(slot_name, "unit") == 0) {
+		snprintf(ir->unit, sizeof(ir->unit), "%s", val);
+	} else {
+		/* Arbitrary custom slot name -> store in ir->query */
+		snprintf(ir->query, sizeof(ir->query), "%s", val);
+	}
+}
+
+static const jarvis_capability_t *find_ont_capability(const jarvis_ontology_t *ont, const char *cid)
+{
+	if (!ont || !cid) return NULL;
+	for (size_t i = 0; i < ont->capability_count; i++) {
+		if (strcmp(ont->capabilities[i].id, cid) == 0) {
+			return &ont->capabilities[i];
+		}
+	}
+	return NULL;
+}
+
 static bool build_intent_ir(
 	const jarvis_ontology_t *ont,
 	const char              *cid,
@@ -595,6 +820,46 @@ static bool build_intent_ir(
 	out_ir->target_other      = target_other;
 	out_ir->submit_enter      = submit_enter;
 	snprintf(out_ir->surface, sizeof(out_ir->surface), "%s", eff_surface);
+
+	/* 1. If capability defines declarative slot rules in ontology.json, evaluate them directly */
+	const jarvis_capability_t *cap_def = find_ont_capability(ont, cid);
+	if (cap_def && (cap_def->slot_rule_count > 0 || cap_def->compile.op[0])) {
+		char open_val[512] = {0};
+		extract_after_verb(ont, raw_stripped, p->lead_verb_span, true, open_val, sizeof(open_val));
+		if (strcmp(cid, "media.play") == 0) {
+			strip_generic_media_object_words(ont, open_val);
+		}
+		for (size_t i = 0; i < cap_def->slot_rule_count; i++) {
+			const jarvis_cap_slot_rule_t *sr = &cap_def->slot_rules[i];
+			const char *resolved = sr->default_val;
+			if (strcmp(sr->source, "literal") == 0) {
+				resolved = sr->default_val;
+			} else if (strcmp(sr->source, "open") == 0 || strcmp(sr->source, "after_verb") == 0 || strcmp(sr->source, "arg") == 0) {
+				resolved = open_val[0] ? open_val : sr->default_val;
+			} else if (strcmp(sr->source, "entity_id") == 0) {
+				for (size_t ti = 0; ti < sr->type_count; ti++) {
+					if (has_entity_type(p, sr->types[ti])) {
+						resolved = get_first_entity_id(p, sr->types[ti], sr->default_val);
+						break;
+					}
+				}
+			} else if (strcmp(sr->source, "entity_id_or_open") == 0) {
+				bool found_ent = false;
+				for (size_t ti = 0; ti < sr->type_count; ti++) {
+					if (has_entity_type(p, sr->types[ti])) {
+						resolved = get_first_entity_id(p, sr->types[ti], "");
+						found_ent = (resolved && resolved[0]);
+						if (found_ent) break;
+					}
+				}
+				if (!found_ent) {
+					resolved = open_val[0] ? open_val : sr->default_val;
+				}
+			}
+			assign_ir_slot(out_ir, sr->slot_name, resolved ? resolved : "");
+		}
+		return true;
+	}
 
 	const char *loc = get_first_entity_id(p, "fs.location", ".");
 
@@ -666,7 +931,7 @@ static bool build_intent_ir(
 			ws = atoi(get_first_entity_id(p, "ui.workspace", "1"));
 		} else {
 			for (size_t i = 0; i < p->residual_count; i++) {
-				int v = parse_digit_1_to_9(p->residual[i]);
+				int v = parse_workspace_digit(ont, p->residual[i]);
 				if (v >= 1 && v <= 9) {
 					ws = v;
 					break;
@@ -681,55 +946,47 @@ static bool build_intent_ir(
 		snprintf(out_ir->surface, sizeof(out_ir->surface), "any");
 		out_ir->explicit_terminal = false;
 		const char *action = get_first_entity_id(p, "ui.window_action", "unknown");
-		char rl[512];
-		jarvis_clean_phrase(raw_stripped, rl, sizeof(rl));
 		if (strcmp(action, "unknown") == 0) {
-			if (strstr(rl, "fullscreen") || strstr(rl, "full screen") || strstr(rl, "maximize")) action = "fullscreen";
-			else if (strstr(rl, "unfloat") || strstr(rl, "tile")) action = "tile";
-			else if (strstr(rl, "float")) action = "float";
-			else if (strstr(rl, "close") || strstr(rl, "kill") || strstr(rl, "quit")) action = "close";
+			if (p->mod_fullscreen) action = "fullscreen";
+			else if (p->mod_floating) action = "float";
 		}
 		if (strcmp(action, "unknown") == 0) return false;
 		snprintf(out_ir->action, sizeof(out_ir->action), "%s", action);
-		bool is_tab = entity_has_id(p, "ui.container_kind", "tab") || strstr(rl, " tab") != NULL;
+		bool is_tab = entity_has_id(p, "ui.container_kind", "tab");
 		snprintf(out_ir->kind, sizeof(out_ir->kind), "%s", is_tab ? "tab" : "window");
 		return true;
 	}
 	if (strcmp(cid, "ui.scroll") == 0) {
 		out_ir->explicit_terminal = false;
-		const char *dir = get_first_entity_id(p, "ui.scroll_direction", "");
-		if (!dir[0]) {
-			if (strstr(p->lead_verb_span, "up") != NULL) dir = "up";
-			else if (strstr(p->lead_verb_span, "left") != NULL) dir = "left";
-			else if (strstr(p->lead_verb_span, "right") != NULL) dir = "right";
-			else dir = "down";
-		}
+		const char *dir = get_first_entity_id(p, "ui.scroll_direction", "down");
 		snprintf(out_ir->direction, sizeof(out_ir->direction), "%s", dir);
 		int amt = 5;
+		bool found_amt = false;
 		for (size_t i = 0; i < p->residual_count; i++) {
 			if (is_all_digits(p->residual[i])) {
 				amt = atoi(p->residual[i]);
-				if (amt < 1) amt = 1;
-				if (amt > 20) amt = 20;
+				found_amt = true;
 			}
 		}
+		if (!found_amt && has_entity_type(p, "ui.workspace")) {
+			int wv = atoi(get_first_entity_id(p, "ui.workspace", "5"));
+			if (wv >= 1) amt = wv;
+		}
+		if (amt < 1) amt = 1;
+		if (amt > 20) amt = 20;
 		out_ir->amount = amt;
 		return true;
 	}
 	if (strcmp(cid, "input.dictate") == 0) {
-		static const char *PREPS[] = {"in ", "out ", NULL};
 		char q_clean[512];
-		extract_after_verb(ont, raw_stripped, p->lead_verb_span, PREPS, q_clean, sizeof(q_clean));
-		static const char *ENTER_SUFFIXES[] = {
-			" and press enter", " and hit enter", " and hit return",
-			" then press enter", " then hit enter", NULL
-		};
-		for (size_t i = 0; ENTER_SUFFIXES[i]; i++) {
-			if (ends_with_ci_space(q_clean, ENTER_SUFFIXES[i] + 1)) {
-				q_clean[strlen(q_clean) - strlen(ENTER_SUFFIXES[i])] = '\0';
-				trim_punct_ws(q_clean);
-				out_ir->submit_enter = true;
-				break;
+		extract_after_verb(ont, raw_stripped, p->lead_verb_span, false, q_clean, sizeof(q_clean));
+		if (ont) {
+			for (size_t i = 0; i < ont->loc_submit_count; i++) {
+				if (ends_with_ci_space(q_clean, ont->loc_submit[i])) {
+					strip_tail_words(q_clean, ont->loc_submit[i]);
+					out_ir->submit_enter = true;
+					break;
+				}
 			}
 		}
 		if (!q_clean[0] && !out_ir->submit_enter) return false;
@@ -737,9 +994,8 @@ static bool build_intent_ir(
 		return true;
 	}
 	if (strcmp(cid, "agent.ask") == 0) {
-		static const char *PREPS[] = {"to ", "for ", "about ", NULL};
 		char q_clean[512];
-		extract_after_verb(ont, raw_stripped, p->lead_verb_span, PREPS, q_clean, sizeof(q_clean));
+		extract_after_verb(ont, raw_stripped, p->lead_verb_span, true, q_clean, sizeof(q_clean));
 		if (!q_clean[0]) return false;
 		snprintf(out_ir->surface, sizeof(out_ir->surface), "any");
 		out_ir->explicit_terminal = false;
@@ -766,9 +1022,8 @@ static bool build_intent_ir(
 		return true;
 	}
 	if (strcmp(cid, "web.search") == 0) {
-		static const char *PREPS[] = {"for ", "about ", "on ", NULL};
 		char q_clean[512];
-		extract_after_verb(ont, raw_stripped, p->lead_verb_span, PREPS, q_clean, sizeof(q_clean));
+		extract_after_verb(ont, raw_stripped, p->lead_verb_span, true, q_clean, sizeof(q_clean));
 		if (!q_clean[0]) return false;
 		snprintf(out_ir->surface, sizeof(out_ir->surface), "any");
 		out_ir->explicit_terminal = false;
@@ -807,17 +1062,16 @@ static bool build_intent_ir(
 			snprintf(out_ir->action, sizeof(out_ir->action), "%s", m0);
 			return true;
 		}
-		static const char *PREPS[] = {"listen to ", "a bit of ", "a little ", "some ", "the ", "a ", "an ", NULL};
 		char q_clean[512];
-		extract_after_verb(ont, raw_stripped, p->lead_verb_span, PREPS, q_clean, sizeof(q_clean));
+		extract_after_verb(ont, raw_stripped, p->lead_verb_span, true, q_clean, sizeof(q_clean));
+		strip_generic_media_object_words(ont, q_clean);
 		if (!q_clean[0]) {
-			if (has_entity_type(p, "media.object") ||
-			    strcmp(p->lead_verb_span, "press play") == 0 ||
-			    strcmp(p->lead_verb_span, "hit play") == 0 ||
-			    strcmp(p->lead_verb_span, "resume") == 0 ||
-			    strcmp(p->lead_verb_span, "unpause") == 0 ||
-			    strcmp(p->lead_verb_span, "continue playing") == 0) {
-				snprintf(q_clean, sizeof(q_clean), "music");
+			if (has_entity_type(p, "media.object") || get_verb_weight(p, "PLAY_STREAM") >= 0.90) {
+				if (m0[0] && strcmp(m0, "music") != 0) {
+					snprintf(q_clean, sizeof(q_clean), "%s", m0);
+				} else {
+					q_clean[0] = '\0';
+				}
 			} else {
 				return false;
 			}
@@ -828,6 +1082,14 @@ static bool build_intent_ir(
 	}
 
 	return false;
+}
+
+static bool padded_contains_phrase(const char *padded_hay, const char *phrase)
+{
+	if (!phrase || !*phrase) return false;
+	char probe[160];
+	snprintf(probe, sizeof(probe), " %s ", phrase);
+	return strstr(padded_hay, probe) != NULL;
 }
 
 bool jarvis_solve_clause(
@@ -847,44 +1109,14 @@ bool jarvis_solve_clause(
 
 	char stripped[512], eff_surface[32];
 	bool explicit_term = false, target_other = false, submit_enter = false;
+	bool new_terminal = false, bg_play = false;
 	strip_locative_modifiers(
 		ont, norm_clause, active_surface,
 		stripped, sizeof(stripped),
 		eff_surface, sizeof(eff_surface),
-		&explicit_term, &target_other, &submit_enter
+		&explicit_term, &target_other, &submit_enter,
+		&new_terminal, &bg_play
 	);
-
-	/* Check for "in/on a new terminal" suffix */
-	bool new_terminal = false;
-	static const char *NEW_TERM_TAILS[] = {
-		"in a new terminal", "on a new terminal", "in new terminal", "on new terminal",
-		"in a new terminal window", "on a new terminal window", "inside a new terminal",
-		"into a new terminal", "using a new terminal", NULL
-	};
-	for (size_t i = 0; NEW_TERM_TAILS[i]; i++) {
-		if (ends_with_ci_space(stripped, NEW_TERM_TAILS[i])) {
-			stripped[strlen(stripped) - strlen(NEW_TERM_TAILS[i])] = '\0';
-			trim_punct_ws(stripped);
-			new_terminal = true;
-			snprintf(eff_surface, sizeof(eff_surface), "terminal");
-			explicit_term = true;
-			break;
-		}
-	}
-
-	/* Check for background playback modifier ("in the background", "without focus") */
-	bool bg_play = false;
-	static const char *BG_TAILS[] = {
-		"in the background", "in background", "without focus", "without stealing focus", NULL
-	};
-	for (size_t i = 0; BG_TAILS[i]; i++) {
-		if (ends_with_ci_space(stripped, BG_TAILS[i])) {
-			stripped[strlen(stripped) - strlen(BG_TAILS[i])] = '\0';
-			trim_punct_ws(stripped);
-			bg_play = true;
-			break;
-		}
-	}
 
 	jarvis_live_index_t *live_idx = calloc(1, sizeof(*live_idx));
 	if (!live_idx) return false;
@@ -912,7 +1144,7 @@ bool jarvis_solve_clause(
 		rw_idx++;
 	}
 
-	/* Fast-path Tier-0 voice interruption ("stop talking", "be quiet", "shut up") */
+	/* Fast-path Tier-0 voice interruption */
 	char raw_core[JARVIS_CLAUSE_LEN] = {0};
 	size_t rc_pos = 0;
 	for (size_t i = rw_idx; i < n_raw; i++) {
@@ -925,161 +1157,87 @@ bool jarvis_solve_clause(
 		return true;
 	}
 
-	/* Tier-0 Casual, Ergonomic & Slang Idiom Fast-Path (< 0.1ms deterministic resolution) */
-	{
+	/* Declarative Tier-0 Casual, Ergonomic & Slang Idiom Fast-Path (< 0.1ms deterministic resolution) */
+	if (!(rw_idx < n_raw && jarvis_ontology_is_interrogative(ont, raw_words[rw_idx]))) {
 		char padded_raw[528];
 		snprintf(padded_raw, sizeof(padded_raw), " %s ", raw_core);
-		if (!strstr(padded_raw, " what ") && !strstr(padded_raw, " whats ") &&
-		    !strstr(padded_raw, " why ") && !strstr(padded_raw, " how ") &&
-		    !strstr(padded_raw, " explain ") && !strstr(padded_raw, " diagnose ")) {
-			/* 1. Font / Zoom / Readability complaints */
-			if (strstr(padded_raw, " too small ") || strstr(padded_raw, " cant read ") ||
-			    strstr(padded_raw, " cannot read ") || strstr(padded_raw, " barely read ") ||
-			    strstr(padded_raw, " text is tiny ") || strstr(padded_raw, " font is tiny ") ||
-			    strstr(padded_raw, " my eyes ")) {
-				if (strstr(padded_raw, " fullscreen ") || strstr(padded_raw, " full screen ") ||
-				    strstr(padded_raw, " maximize ") || strstr(padded_raw, " bigger window ")) {
-					snprintf(out_ir->cap, sizeof(out_ir->cap), "window.control");
-					snprintf(out_ir->action, sizeof(out_ir->action), "fullscreen");
-				} else {
-					snprintf(out_ir->cap, sizeof(out_ir->cap), "input.key");
-					snprintf(out_ir->text, sizeof(out_ir->text), "ctrl+plus");
+		for (size_t ii = 0; ii < ont->idiom_count; ii++) {
+			const jarvis_idiom_t *idm = &ont->idioms[ii];
+			bool phrase_ok = false;
+			for (size_t pi = 0; pi < idm->phrase_count; pi++) {
+				if (padded_contains_phrase(padded_raw, idm->phrases[pi])) {
+					phrase_ok = true;
+					break;
 				}
-				out_ir->score = 0.96;
-				snprintf(out_ir->surface, sizeof(out_ir->surface), "%s", eff_surface);
-				out_ir->target_other = target_other;
-				return true;
 			}
-			if (strstr(padded_raw, " zoom in ") || strstr(padded_raw, " bump the font ") ||
-			    strstr(padded_raw, " make the font bigger ") || strstr(padded_raw, " increase font ")) {
-				snprintf(out_ir->cap, sizeof(out_ir->cap), "input.key");
-				snprintf(out_ir->text, sizeof(out_ir->text), "ctrl+plus");
-				out_ir->score = 0.96;
-				snprintf(out_ir->surface, sizeof(out_ir->surface), "%s", eff_surface);
-				out_ir->target_other = target_other;
-				return true;
-			}
-			if (strstr(padded_raw, " zoom out ") || strstr(padded_raw, " font smaller ") ||
-			    strstr(padded_raw, " shrink the font ") || strstr(padded_raw, " decrease font ")) {
-				snprintf(out_ir->cap, sizeof(out_ir->cap), "input.key");
-				snprintf(out_ir->text, sizeof(out_ir->text), "ctrl+minus");
-				out_ir->score = 0.96;
-				snprintf(out_ir->surface, sizeof(out_ir->surface), "%s", eff_surface);
-				out_ir->target_other = target_other;
-				return true;
-			}
-			/* 2. Browser reload / back */
-			if ((strstr(padded_raw, " reload ") || strstr(padded_raw, " refresh ")) &&
-			    (strstr(padded_raw, " page ") || strstr(padded_raw, " browser ") || strstr(padded_raw, " tab "))) {
-				snprintf(out_ir->cap, sizeof(out_ir->cap), "input.key");
-				snprintf(out_ir->text, sizeof(out_ir->text), "ctrl+r");
-				out_ir->score = 0.96;
-				snprintf(out_ir->surface, sizeof(out_ir->surface), "browser");
-				return true;
-			}
-			if (strstr(padded_raw, " go back a page ") || strstr(padded_raw, " previous page in ")) {
-				snprintf(out_ir->cap, sizeof(out_ir->cap), "input.key");
-				snprintf(out_ir->text, sizeof(out_ir->text), "alt+Left");
-				out_ir->score = 0.96;
-				snprintf(out_ir->surface, sizeof(out_ir->surface), "browser");
-				return true;
-			}
-			/* 3. Audio / Volume ergonomic complaints */
-			if (strstr(padded_raw, " too loud ") || strstr(padded_raw, " ears are ") ||
-			    strstr(padded_raw, " blasting ") || strstr(padded_raw, " turn it down ") ||
-			    strstr(padded_raw, " make it quieter ")) {
-				snprintf(out_ir->cap, sizeof(out_ir->cap), "media.control");
-				snprintf(out_ir->action, sizeof(out_ir->action), "volume_down");
-				out_ir->score = 0.96;
-				snprintf(out_ir->surface, sizeof(out_ir->surface), "any");
-				return true;
-			}
-			if (strstr(padded_raw, " barely hear ") || strstr(padded_raw, " cant hear ") ||
-			    strstr(padded_raw, " cannot hear ") || strstr(padded_raw, " too quiet ") ||
-			    strstr(padded_raw, " turn it up ") || strstr(padded_raw, " make it louder ")) {
-				snprintf(out_ir->cap, sizeof(out_ir->cap), "media.control");
-				snprintf(out_ir->action, sizeof(out_ir->action), "volume_up");
-				out_ir->score = 0.96;
-				snprintf(out_ir->surface, sizeof(out_ir->surface), "any");
-				return true;
-			}
-			/* 4. Casual window close / move / focus / fullscreen */
-			if ((strstr(padded_raw, " get rid of ") || strstr(padded_raw, " ditch ") || strstr(padded_raw, " trash ")) &&
-			    (strstr(padded_raw, " window ") || strstr(padded_raw, " tab ") || strstr(padded_raw, " this "))) {
-				snprintf(out_ir->cap, sizeof(out_ir->cap), "window.control");
-				snprintf(out_ir->action, sizeof(out_ir->action), "close");
-				snprintf(out_ir->kind, sizeof(out_ir->kind), "%s", strstr(padded_raw, " tab ") ? "tab" : "window");
-				out_ir->target_other = strstr(padded_raw, " other ") != NULL;
-				out_ir->score = 0.96;
-				return true;
-			}
-			if ((strstr(padded_raw, " banish ") || strstr(padded_raw, " stash ") || strstr(padded_raw, " throw ")) &&
-			    (strstr(padded_raw, " workspace ") || strstr(padded_raw, " desktop ") || strstr(padded_raw, " tag "))) {
-				int ws = 1;
-				for (const char *d = raw_core; *d; d++) {
-					if (*d >= '1' && *d <= '9' && (d == raw_core || isspace((unsigned char)d[-1]))) {
-						ws = *d - '0';
+			if (!phrase_ok) continue;
+
+			if (idm->require_any_count > 0) {
+				bool req_ok = false;
+				for (size_t ri = 0; ri < idm->require_any_count; ri++) {
+					if (padded_contains_phrase(padded_raw, idm->require_any[ri])) {
+						req_ok = true;
 						break;
 					}
 				}
-				snprintf(out_ir->cap, sizeof(out_ir->cap), "workspace.move_window");
+				if (!req_ok) continue;
+			}
+
+			if (idm->forbid_any_count > 0) {
+				bool fbd_hit = false;
+				for (size_t fi = 0; fi < idm->forbid_any_count; fi++) {
+					if (padded_contains_phrase(padded_raw, idm->forbid_any[fi])) {
+						fbd_hit = true;
+						break;
+					}
+				}
+				if (fbd_hit) continue;
+			}
+
+			snprintf(out_ir->cap, sizeof(out_ir->cap), "%s", idm->cap);
+			if (idm->action[0]) snprintf(out_ir->action, sizeof(out_ir->action), "%s", idm->action);
+			if (idm->text[0]) {
+				snprintf(out_ir->text, sizeof(out_ir->text), "%s", idm->text);
+				if (strcmp(idm->cap, "media.play") == 0 || strcmp(idm->cap, "web.search") == 0 || strcmp(idm->cap, "agent.ask") == 0) {
+					snprintf(out_ir->query, sizeof(out_ir->query), "%s", idm->text);
+				} else if (strcmp(idm->cap, "app.launch") == 0) {
+					snprintf(out_ir->application, sizeof(out_ir->application), "%s", idm->text);
+				} else if (strcmp(idm->cap, "shell.run") == 0) {
+					snprintf(out_ir->program, sizeof(out_ir->program), "%s", idm->text);
+				}
+			}
+			if (idm->relation[0]) snprintf(out_ir->relation, sizeof(out_ir->relation), "%s", idm->relation);
+			if (strcmp(idm->kind, "auto_tab_window") == 0) {
+				bool is_tab = entity_has_id(&p, "ui.container_kind", "tab");
+				snprintf(out_ir->kind, sizeof(out_ir->kind), "%s", is_tab ? "tab" : "window");
+			} else if (idm->kind[0]) {
+				snprintf(out_ir->kind, sizeof(out_ir->kind), "%s", idm->kind);
+			}
+			if (strcmp(idm->cap, "workspace.move_window") == 0 || strcmp(idm->cap, "workspace.switch") == 0) {
+				int ws = 1;
+				if (has_entity_type(&p, "ui.workspace")) {
+					ws = atoi(get_first_entity_id(&p, "ui.workspace", "1"));
+				} else {
+					for (size_t k = rw_idx; k < n_raw; k++) {
+						int v = parse_workspace_digit(ont, raw_words[k]);
+						if (v >= 1 && v <= 9) { ws = v; break; }
+					}
+				}
 				out_ir->workspace = ws;
-				out_ir->target_other = strstr(padded_raw, " other ") != NULL;
-				out_ir->score = 0.96;
-				return true;
 			}
-			if (strstr(padded_raw, " hop over ") &&
-			    (strstr(padded_raw, " other window ") || strstr(padded_raw, " other terminal "))) {
-				snprintf(out_ir->cap, sizeof(out_ir->cap), "window.focus_relative");
-				snprintf(out_ir->relation, sizeof(out_ir->relation), "other");
-				out_ir->score = 0.96;
-				return true;
+			out_ir->target_other = target_other || entity_has_id(&p, "ui.relative_window", "other");
+			out_ir->score = idm->score > 0.0 ? idm->score : 0.96;
+			if (strcmp(idm->surface, "inherit") == 0) {
+				snprintf(out_ir->surface, sizeof(out_ir->surface), "%s", eff_surface);
+			} else {
+				snprintf(out_ir->surface, sizeof(out_ir->surface), "%s", idm->surface[0] ? idm->surface : "any");
 			}
-			if (strstr(padded_raw, " make this window huge ") || strstr(padded_raw, " blow up this window ") ||
-			    strstr(padded_raw, " fill the screen ")) {
-				snprintf(out_ir->cap, sizeof(out_ir->cap), "window.control");
-				snprintf(out_ir->action, sizeof(out_ir->action), "fullscreen");
-				out_ir->score = 0.96;
-				return true;
-			}
-			if (strstr(padded_raw, " stop whatever is running ") || strstr(padded_raw, " kill whatever is running ") ||
-			    strstr(padded_raw, " abort the running command ")) {
-				snprintf(out_ir->cap, sizeof(out_ir->cap), "input.key");
-				snprintf(out_ir->text, sizeof(out_ir->text), "ctrl+c");
-				out_ir->score = 0.96;
-				return true;
-			}
-			/* 5. Voice / TTS enable & disable voice commands ("turn on voice", "turn voice on", "enable voice", "turn off voice", "disable voice") */
-			if (((strstr(padded_raw, " turn on ") || strstr(padded_raw, " enable ") || strstr(padded_raw, " activate ") || strstr(padded_raw, " use ") ||
-			      (strstr(padded_raw, " turn ") && strstr(padded_raw, " on "))) &&
-			     (strstr(padded_raw, " voice ") || strstr(padded_raw, " tts ") || strstr(padded_raw, " speech "))) ||
-			    strcmp(raw_core, "voice on") == 0 || strcmp(raw_core, "tts on") == 0 ||
-			    strcmp(raw_core, "speak to me") == 0 || strcmp(raw_core, "talk to me") == 0) {
-				snprintf(out_ir->cap, sizeof(out_ir->cap), "tts.control");
-				snprintf(out_ir->action, sizeof(out_ir->action), "on");
-				out_ir->score = 0.98;
-				snprintf(out_ir->surface, sizeof(out_ir->surface), "any");
-				return true;
-			}
-			if (((strstr(padded_raw, " turn off ") || strstr(padded_raw, " disable ") || strstr(padded_raw, " deactivate ") ||
-			      (strstr(padded_raw, " turn ") && strstr(padded_raw, " off "))) &&
-			     (strstr(padded_raw, " voice ") || strstr(padded_raw, " tts ") || strstr(padded_raw, " speech "))) ||
-			    strcmp(raw_core, "voice off") == 0 || strcmp(raw_core, "tts off") == 0) {
-				snprintf(out_ir->cap, sizeof(out_ir->cap), "tts.control");
-				snprintf(out_ir->action, sizeof(out_ir->action), "off");
-				out_ir->score = 0.98;
-				snprintf(out_ir->surface, sizeof(out_ir->surface), "any");
-				return true;
-			}
+			return true;
 		}
 	}
 
 	/* Guard against interrogative questions unless fully covered fs/git inspection */
-	static const char *INTERROGATIVES[] = {
-		"what", "whats", "why", "how", "who", "when", "where", "which",
-		"did", "does", "do", "is", "are", "explain", NULL
-	};
-	if (rw_idx < n_raw && in_str_list(raw_words[rw_idx], INTERROGATIVES)) {
+	if (rw_idx < n_raw && jarvis_ontology_is_interrogative(ont, raw_words[rw_idx])) {
 		if (!(p.residual_count == 0 &&
 		      (has_entity_type(&p, "fs.metric") ||
 		       has_entity_type(&p, "fs.collection") ||
@@ -1167,7 +1325,15 @@ bool jarvis_solve_clause(
 				    strcmp(fe, "fs.location") == 0) {
 					bool overlap_ok = (strcmp(cid, "window.control") == 0 ||
 					                   strcmp(cid, "media.play") == 0 ||
-					                   strcmp(cid, "media.control") == 0);
+					                   strcmp(cid, "media.control") == 0 ||
+					                   (strcmp(fe, "ui.container_kind") == 0 &&
+					                    entity_has_id(&p, "ui.container_kind", "terminal") &&
+					                    (strcmp(cid, "shell.run") == 0 ||
+					                     strcmp(cid, "fs.list") == 0 ||
+					                     strcmp(cid, "fs.navigate") == 0 ||
+					                     strcmp(cid, "fs.find") == 0 ||
+					                     strcmp(cid, "fs.metric") == 0 ||
+					                     strcmp(cid, "git.inspect") == 0)));
 					for (size_t ri = 0; ri < cap->req_ent_count && !overlap_ok; ri++) {
 						const char *re_t = cap->required_entities[ri];
 						if (strcmp(re_t, "ui.container_kind") == 0 ||
@@ -1203,7 +1369,7 @@ bool jarvis_solve_clause(
 		if (cap->req_ent_count > 0 && !all_req) {
 			bool has_digit_res = false;
 			for (size_t i = 0; i < p.residual_count; i++) {
-				if (is_digit_1_to_9(p.residual[i])) { has_digit_res = true; break; }
+				if (is_digit_1_to_9(ont, p.residual[i])) { has_digit_res = true; break; }
 			}
 			if (strcmp(cid, "fs.list") == 0 && has_entity_type(&p, "fs.location") &&
 			    get_verb_weight(&p, "PRESENT") > 0.0 && get_verb_weight(&p, "FOCUS_NAV") <= 0.0) {
@@ -1231,11 +1397,7 @@ bool jarvis_solve_clause(
 				}
 				if (strcmp(ra, "residual_with_play_verb") == 0 &&
 				    (p.residual_count > 0 || has_entity_type(&p, "media.object") ||
-				     strcmp(p.lead_verb_span, "press play") == 0 ||
-				     strcmp(p.lead_verb_span, "hit play") == 0 ||
-				     strcmp(p.lead_verb_span, "resume") == 0 ||
-				     strcmp(p.lead_verb_span, "unpause") == 0 ||
-				     strcmp(p.lead_verb_span, "continue playing") == 0) &&
+				     get_verb_weight(&p, "PLAY_STREAM") >= 0.90) &&
 				    get_verb_weight(&p, "PLAY_STREAM") >= 0.80) {
 					ok_any = true;
 				}
@@ -1248,14 +1410,12 @@ bool jarvis_solve_clause(
 			bool all_d19 = true;
 			bool all_d = true;
 			for (size_t i = 0; i < p.residual_count; i++) {
-				if (!is_digit_1_to_9(p.residual[i])) all_d19 = false;
+				if (!is_digit_1_to_9(ont, p.residual[i])) all_d19 = false;
 				if (!is_all_digits(p.residual[i])) all_d = false;
 			}
 			if ((strcmp(cid, "workspace.switch") == 0 || strcmp(cid, "workspace.move_window") == 0) && all_d19) {
 				/* allowed */
 			} else if (strcmp(cid, "ui.scroll") == 0 && all_d) {
-				/* allowed */
-			} else if (strcmp(cid, "window.control") == 0 && p.residual_count == 1 && strcmp(p.residual[0], "it") == 0) {
 				/* allowed */
 			} else {
 				continue;
@@ -1268,12 +1428,12 @@ bool jarvis_solve_clause(
 
 		double ctx_bonus = (strcmp(cap->surface, "any") == 0 || strcmp(cap->surface, eff_surface) == 0 || explicit_term) ? 0.04 : 0.0;
 		double req_bonus = (cap->req_ent_count > 0 || cap->req_any_count > 0) ? 0.03 : 0.0;
-		bool is_open_arg = (strcmp(cid, "media.play") == 0 ||
+		bool is_open_arg = (cap->open_arg[0] != '\0' ||
+		                    strcmp(cid, "media.play") == 0 ||
 		                    strcmp(cid, "web.search") == 0 ||
 		                    strcmp(cid, "input.dictate") == 0 ||
 		                    strcmp(cid, "agent.ask") == 0);
 		size_t eff_res = (is_open_arg ||
-		                  (strcmp(cid, "window.control") == 0 && p.residual_count == 1 && strcmp(p.residual[0], "it") == 0) ||
 		                  (strcmp(cid, "ui.scroll") == 0 && p.residual_count == 1 && is_all_digits(p.residual[0])))
 			? 0 : p.residual_count;
 		double res_penalty = 0.18 * (double)eff_res;
@@ -1287,6 +1447,14 @@ bool jarvis_solve_clause(
 		/* Disambiguation rules */
 		if (strcmp(cid, "app.launch") == 0 && get_verb_weight(&p, "OPEN_LAUNCH") > 0.0 && get_verb_weight(&p, "FOCUS_NAV") <= 0.0) {
 			score = 0.99;
+		}
+		if (has_entity_type(&p, "ui.container_kind") && entity_has_id(&p, "ui.container_kind", "terminal") &&
+		    (strcmp(cid, "shell.run") == 0 || strcmp(cid, "fs.list") == 0 ||
+		     strcmp(cid, "fs.navigate") == 0 || strcmp(cid, "fs.find") == 0 ||
+		     strcmp(cid, "fs.metric") == 0 || strcmp(cid, "git.inspect") == 0)) {
+			new_terminal = true;
+			explicit_term = true;
+			snprintf(eff_surface, sizeof(eff_surface), "terminal");
 		}
 		if (strcmp(cid, "window.focus") == 0 && get_verb_weight(&p, "OPEN_LAUNCH") > 0.0 && has_entity_type(&p, "gui.application")) {
 			continue;
@@ -1336,9 +1504,7 @@ bool jarvis_solve_clause(
 	}
 
 	if (strcmp(best_cap->id, "window.focus_relative") != 0) {
-		if (entity_has_id(&p, "ui.relative_window", "other") ||
-		    strstr(stripped, "other window") != NULL ||
-		    strstr(stripped, "other terminal") != NULL) {
+		if (entity_has_id(&p, "ui.relative_window", "other")) {
 			target_other = true;
 		}
 	}
@@ -1354,6 +1520,122 @@ bool jarvis_solve_clause(
 	return true;
 }
 
+static const char *lookup_ir_slot_str(const jarvis_ir_t *ir, const char *slot_name, char *num_buf, size_t num_sz)
+{
+	if (!ir || !slot_name) return "";
+	if (strcmp(slot_name, "action") == 0 || strcmp(slot_name, "state") == 0) return ir->action;
+	if (strcmp(slot_name, "command") == 0 || strcmp(slot_name, "program") == 0) return ir->program;
+	if (strcmp(slot_name, "identifier") == 0) return ir->identifier[0] ? ir->identifier : ir->application;
+	if (strcmp(slot_name, "application") == 0) return ir->application;
+	if (strcmp(slot_name, "url") == 0) return ir->url;
+	if (strcmp(slot_name, "query") == 0 || strcmp(slot_name, "target_query") == 0) return ir->query;
+	if (strcmp(slot_name, "text") == 0 || strcmp(slot_name, "key_combo") == 0) return ir->text;
+	if (strcmp(slot_name, "kind") == 0) return ir->kind;
+	if (strcmp(slot_name, "relation") == 0) return ir->relation;
+	if (strcmp(slot_name, "direction") == 0) return ir->direction;
+	if (strcmp(slot_name, "mode") == 0 || strcmp(slot_name, "record_target") == 0) return ir->record_target;
+	if (strcmp(slot_name, "location") == 0) return ir->location;
+	if (strcmp(slot_name, "aspect") == 0) return ir->aspect;
+	if (strcmp(slot_name, "metric") == 0) return ir->metric;
+	if (strcmp(slot_name, "pattern") == 0) return ir->pattern;
+	if (strcmp(slot_name, "unit") == 0) return ir->unit;
+	if (strcmp(slot_name, "workspace") == 0) {
+		snprintf(num_buf, num_sz, "%d", ir->workspace > 0 ? ir->workspace : 1);
+		return num_buf;
+	}
+	if (strcmp(slot_name, "amount") == 0 || strcmp(slot_name, "button") == 0 || strcmp(slot_name, "seconds") == 0) {
+		snprintf(num_buf, num_sz, "%d", ir->amount > 0 ? ir->amount : 1);
+		return num_buf;
+	}
+	return ir->query;
+}
+
+static void expand_ir_template(const jarvis_ir_t *ir, const char *tpl, char *out, size_t out_sz)
+{
+	if (!out || out_sz == 0) return;
+	out[0] = '\0';
+	if (!tpl) return;
+	size_t w = 0;
+	for (size_t i = 0; tpl[i] && w + 1 < out_sz; ) {
+		if (tpl[i] == '$' && tpl[i + 1] == '{') {
+			const char *end = strchr(tpl + i + 2, '}');
+			if (end) {
+				char sname[64] = {0}, num_buf[32] = {0};
+				size_t slen = (size_t)(end - (tpl + i + 2));
+				if (slen >= sizeof(sname)) slen = sizeof(sname) - 1;
+				memcpy(sname, tpl + i + 2, slen);
+				sname[slen] = '\0';
+				const char *val = lookup_ir_slot_str(ir, sname, num_buf, sizeof(num_buf));
+				w += (size_t)snprintf(out + w, out_sz - w, "%s", val ? val : "");
+				i = (size_t)(end - tpl) + 1;
+				continue;
+			}
+		}
+		out[w++] = tpl[i++];
+	}
+	out[w] = '\0';
+}
+
+static void assign_dsl_field(jarvis_dsl_t *dsl, const char *field, const char *val)
+{
+	if (!dsl || !field || !val) return;
+	if (strcmp(field, "target.command") == 0) snprintf(dsl->target.command, sizeof(dsl->target.command), "%s", val);
+	else if (strcmp(field, "target.identifier") == 0) snprintf(dsl->target.identifier, sizeof(dsl->target.identifier), "%s", val);
+	else if (strcmp(field, "target.kind") == 0) snprintf(dsl->target.kind, sizeof(dsl->target.kind), "%s", val);
+	else if (strcmp(field, "target.relation") == 0) snprintf(dsl->target.relation, sizeof(dsl->target.relation), "%s", val);
+	else if (strcmp(field, "target.url") == 0) snprintf(dsl->target.url, sizeof(dsl->target.url), "%s", val);
+	else if (strcmp(field, "target.query") == 0) snprintf(dsl->target.query, sizeof(dsl->target.query), "%s", val);
+	else if (strcmp(field, "args.action") == 0) snprintf(dsl->args.action, sizeof(dsl->args.action), "%s", val);
+	else if (strcmp(field, "args.text") == 0) snprintf(dsl->args.text, sizeof(dsl->args.text), "%s", val);
+	else if (strcmp(field, "args.key_combo") == 0) snprintf(dsl->args.key_combo, sizeof(dsl->args.key_combo), "%s", val);
+	else if (strcmp(field, "args.direction") == 0) snprintf(dsl->args.direction, sizeof(dsl->args.direction), "%s", val);
+	else if (strcmp(field, "args.mode") == 0) snprintf(dsl->args.mode, sizeof(dsl->args.mode), "%s", val);
+	else if (strcmp(field, "args.workspace") == 0) dsl->args.workspace = atoi(val);
+	else if (strcmp(field, "args.amount") == 0) dsl->args.amount = atoi(val);
+	else if (strcmp(field, "args.button") == 0) dsl->args.button = atoi(val);
+	else if (strcmp(field, "args.seconds") == 0) dsl->args.seconds = atof(val);
+}
+
+bool jarvis_compile_ir_to_dsl_ex(
+	const jarvis_ontology_t *ont,
+	const jarvis_ir_t       *ir,
+	const char              *active_surface,
+	const jarvis_context_t  *ctx,
+	const jarvis_world_t    *world,
+	jarvis_dsl_t            *out_dsl
+)
+{
+	if (!ir || !out_dsl) return false;
+	if (!ont) ont = jarvis_ontology_get_active();
+
+	const jarvis_capability_t *cap_def = find_ont_capability(ont, ir->cap);
+	if (cap_def && cap_def->compile.op[0]) {
+		memset(out_dsl, 0, sizeof(*out_dsl));
+		const char *op = cap_def->compile.op;
+		if (cap_def->compile.op_if_slot[0]) {
+			char nbuf[32] = {0};
+			const char *sval = lookup_ir_slot_str(ir, cap_def->compile.op_if_slot, nbuf, sizeof(nbuf));
+			if (sval && strcmp(sval, cap_def->compile.op_if_equals) == 0) {
+				if (cap_def->compile.op_then[0]) op = cap_def->compile.op_then;
+			} else if (cap_def->compile.op_else[0]) {
+				op = cap_def->compile.op_else;
+			}
+		}
+		snprintf(out_dsl->op, sizeof(out_dsl->op), "%s", op);
+		for (size_t i = 0; i < cap_def->compile.field_count; i++) {
+			char expanded[512];
+			expand_ir_template(ir, cap_def->compile.fields[i].tpl, expanded, sizeof(expanded));
+			assign_dsl_field(out_dsl, cap_def->compile.fields[i].field, expanded);
+		}
+		if (ir->target_other) snprintf(out_dsl->target.relation, sizeof(out_dsl->target.relation), "other");
+		if (ir->new_terminal) out_dsl->target.new_terminal = true;
+		if (ir->background) out_dsl->args.background = true;
+		return true;
+	}
+
+	return jarvis_compile_ir_to_dsl(ir, active_surface, ctx, world, out_dsl);
+}
+
 bool jarvis_compile_ir_to_dsl(
 	const jarvis_ir_t      *ir,
 	const char             *active_surface,
@@ -1363,6 +1645,11 @@ bool jarvis_compile_ir_to_dsl(
 )
 {
 	if (!ir || !out_dsl) return false;
+	const jarvis_ontology_t *ont = jarvis_ontology_get_active();
+	const jarvis_capability_t *cap_def = find_ont_capability(ont, ir->cap);
+	if (cap_def && cap_def->compile.op[0]) {
+		return jarvis_compile_ir_to_dsl_ex(ont, ir, active_surface, ctx, world, out_dsl);
+	}
 	memset(out_dsl, 0, sizeof(*out_dsl));
 
 	const char *cap = ir->cap;

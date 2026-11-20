@@ -71,26 +71,45 @@ bool               jarvis_normalize_dsl_val(const jjson_val_t *raw, jarvis_dsl_t
  * ------------------------------------------------------------------------- */
 
 #define JARVIS_MAX_STOPWORDS          256
-#define JARVIS_MAX_CLAUSE_SEPS        16
-#define JARVIS_MAX_VERB_MAP           512
+#define JARVIS_MAX_CLAUSE_SEPS        32
+#define JARVIS_MAX_CONJUNCTIONS       8
+#define JARVIS_MAX_VERB_MAP           1024
 #define JARVIS_MAX_VERB_CONCEPTS      6
-#define JARVIS_MAX_VERB_HEADS         256
-#define JARVIS_MAX_ENTITY_MAP         1024
+#define JARVIS_MAX_VERB_HEADS         512
+#define JARVIS_MAX_ENTITY_MAP         2048
 #define JARVIS_MAX_ENTITY_TAGS        6
-#define JARVIS_MAX_VOCAB_WORDS        2048
+#define JARVIS_MAX_VOCAB_WORDS        4096
 #define JARVIS_MAX_LOCATIVES          32
 #define JARVIS_MAX_CAPABILITIES       48
 #define JARVIS_MAX_CAP_VERBS          6
 #define JARVIS_MAX_CAP_REQ_ENTS       4
 #define JARVIS_MAX_CAP_FORBID_ENTS    8
 #define JARVIS_MAX_CAP_REQ_ANY        4
-#define JARVIS_MAX_WAKE_VARIANTS      16
-#define JARVIS_MAX_POLITE_PREFIXES    24
-#define JARVIS_MAX_DICTATION_VERBS    16
-#define JARVIS_MAX_DEICTIC_PRONOUNS   16
-#define JARVIS_MAX_TTS_INTERRUPTS     32
-#define JARVIS_MAX_LOCKDOWN_PHRASES   24
-#define JARVIS_MAX_HALLUCINATIONS     48
+#define JARVIS_MAX_CAP_SLOTS          6
+#define JARVIS_MAX_CAP_SLOT_TYPES     4
+#define JARVIS_MAX_CAP_COMPILE_FIELDS 6
+#define JARVIS_MAX_CAP_PHRASES        24
+#define JARVIS_MAX_UI_STRINGS         32
+#define JARVIS_MAX_REPLY_TEMPLATES    48
+#define JARVIS_MAX_WAKE_VARIANTS      64
+#define JARVIS_MAX_POLITE_PREFIXES    48
+#define JARVIS_MAX_DICTATION_VERBS    32
+#define JARVIS_MAX_DEICTIC_PRONOUNS   32
+#define JARVIS_MAX_TTS_INTERRUPTS     48
+#define JARVIS_MAX_LOCKDOWN_PHRASES   32
+#define JARVIS_MAX_HALLUCINATIONS     64
+#define JARVIS_MAX_ARG_PREPS          48
+#define JARVIS_MAX_INTERROGATIVES     32
+#define JARVIS_MAX_AGENT_TRIGGERS     320
+#define JARVIS_MAX_TEMPLATES          16
+#define JARVIS_MAX_ASR_FIXES          32
+#define JARVIS_MAX_ANAPHORA_PHRASES   16
+#define JARVIS_MAX_IDIOMS             64
+#define JARVIS_MAX_IDIOM_PHRASES      32
+#define JARVIS_MAX_IDIOM_REQ_ANY      24
+#define JARVIS_MAX_REACT_RULES        96
+#define JARVIS_MAX_REACT_PHRASES      48
+#define JARVIS_MAX_REACT_REQ_ANY      48
 #define JARVIS_MAX_LIVE_ENTITIES      1024
 #define JARVIS_MAX_CLAUSE_WORDS       64
 #define JARVIS_MAX_SPAN_WORDS         6
@@ -120,23 +139,120 @@ typedef struct {
 } jarvis_entity_entry_t;
 
 typedef struct {
-	char   id[JARVIS_WORD_LEN];
-	char   verbs[JARVIS_MAX_CAP_VERBS][JARVIS_SHORT_LEN];
-	size_t verb_count;
-	char   required_entities[JARVIS_MAX_CAP_REQ_ENTS][JARVIS_WORD_LEN];
-	size_t req_ent_count;
-	char   forbid_entities[JARVIS_MAX_CAP_FORBID_ENTS][JARVIS_WORD_LEN];
-	size_t forbid_ent_count;
-	char   required_any[JARVIS_MAX_CAP_REQ_ANY][JARVIS_WORD_LEN];
-	size_t req_any_count;
-	bool   forbid_residual;
+	char from[JARVIS_SHORT_LEN];
+	char to[JARVIS_SHORT_LEN];
+} jarvis_asr_fix_t;
+
+typedef struct {
+	char   pause_phrases[JARVIS_MAX_ANAPHORA_PHRASES][JARVIS_ID_LEN];
+	size_t pause_phrase_count;
+	char   pause_target[JARVIS_ID_LEN];
+	char   resume_phrases[JARVIS_MAX_ANAPHORA_PHRASES][JARVIS_ID_LEN];
+	size_t resume_phrase_count;
+	char   resume_prefix[JARVIS_SHORT_LEN];
+	char   resume_default[JARVIS_ID_LEN];
+	char   spatial_pronouns[JARVIS_MAX_ANAPHORA_PHRASES][JARVIS_SHORT_LEN];
+	size_t spatial_pronoun_count;
+	char   spatial_prep[JARVIS_SHORT_LEN];
+} jarvis_anaphora_cfg_t;
+
+typedef struct {
+	char   phrases[JARVIS_MAX_IDIOM_PHRASES][JARVIS_ID_LEN];
+	size_t phrase_count;
+	char   require_any[JARVIS_MAX_IDIOM_REQ_ANY][JARVIS_SHORT_LEN];
+	size_t require_any_count;
+	char   forbid_any[JARVIS_MAX_IDIOM_REQ_ANY][JARVIS_SHORT_LEN];
+	size_t forbid_any_count;
+	char   cap[JARVIS_WORD_LEN];
+	char   action[JARVIS_SHORT_LEN];
+	char   text[JARVIS_SHORT_LEN];
+	char   kind[JARVIS_SHORT_LEN];
+	char   relation[JARVIS_SHORT_LEN];
 	char   surface[JARVIS_SHORT_LEN];
+	double score;
+} jarvis_idiom_t;
+
+typedef struct {
+	char   kind[JARVIS_WORD_LEN];
+	int    turn_filter; /* -1 = any, 0 = turn 0, 1 = turn > 0 */
+	char   obs_op[JARVIS_WORD_LEN];
+	char   phrases[JARVIS_MAX_REACT_PHRASES][JARVIS_ID_LEN];
+	size_t phrase_count;
+	char   require_any[JARVIS_MAX_REACT_REQ_ANY][JARVIS_ID_LEN];
+	size_t require_any_count;
+	char   forbid_any[JARVIS_MAX_REACT_REQ_ANY][JARVIS_ID_LEN];
+	size_t forbid_any_count;
+	char   line_triggers[JARVIS_MAX_REACT_REQ_ANY][JARVIS_SHORT_LEN];
+	size_t line_trigger_count;
+	char   op[JARVIS_WORD_LEN];
+	char   command[JARVIS_STR_LEN];
+	char   arg[JARVIS_STR_LEN];
+} jarvis_react_rule_t;
+
+typedef struct {
+	char   slot_name[JARVIS_SHORT_LEN];
+	char   source[JARVIS_SHORT_LEN]; /* "literal", "entity_id", "open", "entity_id_or_open" */
+	char   types[JARVIS_MAX_CAP_SLOT_TYPES][JARVIS_WORD_LEN];
+	size_t type_count;
+	char   default_val[JARVIS_NAME_LEN];
+} jarvis_cap_slot_rule_t;
+
+typedef struct {
+	char field[JARVIS_WORD_LEN];   /* e.g. "target.command", "args.workspace" */
+	char tpl[JARVIS_NAME_LEN];     /* e.g. "${command}" */
+} jarvis_cap_compile_field_t;
+
+typedef struct {
+	char                       op[JARVIS_WORD_LEN];
+	char                       op_if_slot[JARVIS_SHORT_LEN];
+	char                       op_if_equals[JARVIS_SHORT_LEN];
+	char                       op_then[JARVIS_WORD_LEN];
+	char                       op_else[JARVIS_WORD_LEN];
+	jarvis_cap_compile_field_t fields[JARVIS_MAX_CAP_COMPILE_FIELDS];
+	size_t                     field_count;
+} jarvis_cap_compile_t;
+
+typedef struct {
+	char                   id[JARVIS_WORD_LEN];
+	char                   verbs[JARVIS_MAX_CAP_VERBS][JARVIS_SHORT_LEN];
+	size_t                 verb_count;
+	char                   required_entities[JARVIS_MAX_CAP_REQ_ENTS][JARVIS_WORD_LEN];
+	char                   required_entity_vals[JARVIS_MAX_CAP_REQ_ENTS][JARVIS_SHORT_LEN];
+	size_t                 req_ent_count;
+	char                   forbid_entities[JARVIS_MAX_CAP_FORBID_ENTS][JARVIS_WORD_LEN];
+	size_t                 forbid_ent_count;
+	char                   required_any[JARVIS_MAX_CAP_REQ_ANY][JARVIS_WORD_LEN];
+	size_t                 req_any_count;
+	char                   phrases[JARVIS_MAX_CAP_PHRASES][JARVIS_ID_LEN];
+	size_t                 phrase_count;
+	char                   open_arg[JARVIS_SHORT_LEN];
+	bool                   forbid_residual;
+	char                   surface[JARVIS_SHORT_LEN];
+	jarvis_cap_slot_rule_t slot_rules[JARVIS_MAX_CAP_SLOTS];
+	size_t                 slot_rule_count;
+	jarvis_cap_compile_t   compile;
 } jarvis_capability_t;
 
+typedef struct {
+	char key[JARVIS_WORD_LEN];
+	char val[JARVIS_STR_LEN];
+} jarvis_kv_str_t;
+
 struct jarvis_ontology {
+	char                  lang[JARVIS_SHORT_LEN];
+	char                  lang_name[JARVIS_WORD_LEN];
 	char                  wake_word[JARVIS_SHORT_LEN];
 	char                  wake_variants[JARVIS_MAX_WAKE_VARIANTS][JARVIS_SHORT_LEN];
 	size_t                wake_variant_count;
+
+	char                  whisper_wake_prompt[JARVIS_CLAUSE_LEN];
+	char                  whisper_cmd_prompt[JARVIS_CLAUSE_LEN];
+
+	jarvis_kv_str_t       ui_strings[JARVIS_MAX_UI_STRINGS];
+	size_t                ui_string_count;
+
+	jarvis_kv_str_t       reply_templates[JARVIS_MAX_REPLY_TEMPLATES];
+	size_t                reply_template_count;
 
 	char                  polite_prefixes[JARVIS_MAX_POLITE_PREFIXES][JARVIS_SHORT_LEN];
 	size_t                polite_prefix_count;
@@ -162,6 +278,9 @@ struct jarvis_ontology {
 	char                  clause_seps[JARVIS_MAX_CLAUSE_SEPS][JARVIS_SHORT_LEN];
 	size_t                clause_sep_count;
 
+	char                  conjunctions[JARVIS_MAX_CONJUNCTIONS][JARVIS_SHORT_LEN];
+	size_t                conjunction_count;
+
 	jarvis_verb_entry_t   verb_phrases[JARVIS_MAX_VERB_MAP];
 	size_t                verb_phrase_count;
 
@@ -182,6 +301,37 @@ struct jarvis_ontology {
 	size_t                loc_terminal_count;
 	char                  loc_any[JARVIS_MAX_LOCATIVES][JARVIS_WORD_LEN];
 	size_t                loc_any_count;
+	char                  loc_new_terminal[JARVIS_MAX_LOCATIVES][JARVIS_WORD_LEN];
+	size_t                loc_new_terminal_count;
+	char                  loc_background[JARVIS_MAX_LOCATIVES][JARVIS_WORD_LEN];
+	size_t                loc_background_count;
+
+	char                  arg_preps[JARVIS_MAX_ARG_PREPS][JARVIS_SHORT_LEN];
+	size_t                arg_prep_count;
+
+	char                  interrogatives[JARVIS_MAX_INTERROGATIVES][JARVIS_SHORT_LEN];
+	size_t                interrogative_count;
+
+	char                  agent_triggers[JARVIS_MAX_AGENT_TRIGGERS][JARVIS_ID_LEN];
+	size_t                agent_trigger_count;
+
+	char                  fs_templates[JARVIS_MAX_TEMPLATES][JARVIS_SHORT_LEN];
+	size_t                fs_template_count;
+	char                  window_templates[JARVIS_MAX_TEMPLATES][JARVIS_SHORT_LEN];
+	size_t                window_template_count;
+	char                  tab_templates[JARVIS_MAX_TEMPLATES][JARVIS_SHORT_LEN];
+	size_t                tab_template_count;
+
+	jarvis_asr_fix_t      asr_fixes[JARVIS_MAX_ASR_FIXES];
+	size_t                asr_fix_count;
+
+	jarvis_anaphora_cfg_t anaphora;
+
+	jarvis_idiom_t        idioms[JARVIS_MAX_IDIOMS];
+	size_t                idiom_count;
+
+	jarvis_react_rule_t   react_rules[JARVIS_MAX_REACT_RULES];
+	size_t                react_rule_count;
 
 	jarvis_capability_t   capabilities[JARVIS_MAX_CAPABILITIES];
 	size_t                capability_count;
@@ -194,7 +344,11 @@ bool jarvis_ontology_is_polite_prefix(const jarvis_ontology_t *ont, const char *
 bool jarvis_ontology_is_dictation_verb(const jarvis_ontology_t *ont, const char *word);
 bool jarvis_ontology_is_deictic_pronoun(const jarvis_ontology_t *ont, const char *word);
 bool jarvis_ontology_is_tts_interrupt(const jarvis_ontology_t *ont, const char *clean_clause);
+bool jarvis_ontology_is_interrogative(const jarvis_ontology_t *ont, const char *word);
+bool jarvis_ontology_clause_targets_other(const jarvis_ontology_t *ont, const char *clause);
+int  jarvis_ontology_extract_workspace_number(const jarvis_ontology_t *ont, const char *clause, int def_ws);
 const jarvis_verb_entry_t *jarvis_ontology_find_verb_phrase(const jarvis_ontology_t *ont, const char *phrase);
+const jarvis_ontology_t *jarvis_ontology_get_active(void);
 
 /* Live entity index merging static ontology entities + dynamic host entities */
 typedef struct {
@@ -243,6 +397,8 @@ typedef struct {
 	float vec[JARVIS_EMBED_DIM];
 } jarvis_embed_entry_t;
 
+struct mm_ctx;
+
 struct jarvis_engine {
 	char                  wm[JARVIS_SHORT_LEN];
 	char                  ontology_path[JARVIS_CLAUSE_LEN];
@@ -257,6 +413,7 @@ struct jarvis_engine {
 	bool                  dry_run;
 
 	jarvis_ontology_t    *ont;
+	struct mm_ctx        *mm;
 
 	jarvis_few_shot_t     few_shots[JARVIS_MAX_FEW_SHOTS];
 	size_t                few_shot_count;

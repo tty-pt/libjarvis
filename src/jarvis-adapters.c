@@ -81,19 +81,7 @@ static void populate_native_system_health(char *out, size_t out_sz)
 void jarvis_desktop_populate_defaults(jarvis_world_t *w)
 {
 	if (!w) return;
-#ifdef __APPLE__
-	add_custom_app(w, "calculator", "Calculator");
-	add_custom_app(w, "safari web browser", "Safari");
-	add_custom_app(w, "firefox web browser", "Firefox");
-	add_custom_app(w, "visual studio code", "Visual Studio Code");
-	add_custom_app(w, "files", "Finder");
-#else
-	add_custom_app(w, "calculator", "gnome-calculator");
-	add_custom_app(w, "firefox web browser", "firefox");
-	add_custom_app(w, "pulseaudio volume control", "pavucontrol");
-	add_custom_app(w, "visual studio code", "code");
-	add_custom_app(w, "files", "thunar");
-#endif
+	(void)add_custom_app;
 	if (!w->system_health[0]) {
 		populate_native_system_health(w->system_health, sizeof(w->system_health));
 	}

@@ -43,14 +43,88 @@
     "us",
     "just",
     "go",
-    "ahead"
+    "ahead",
+    "por",
+    "favor",
+    "podes",
+    "pode",
+    "poderia",
+    "poderias",
+    "voce",
+    "tu",
+    "o",
+    "os",
+    "as",
+    "um",
+    "uma",
+    "uns",
+    "umas",
+    "meu",
+    "minha",
+    "meus",
+    "minhas",
+    "algum",
+    "alguma",
+    "alguns",
+    "algumas",
+    "para",
+    "pra",
+    "agora",
+    "ja",
+    "de",
+    "do",
+    "da",
+    "dos",
+    "das",
+    "em",
+    "no",
+    "na",
+    "nos",
+    "nas",
+    "num",
+    "numa",
+    "com",
+    "e",
+    "depois",
+    "entao",
+    "todo",
+    "toda",
+    "todos",
+    "todas",
+    "atual",
+    "ativo",
+    "ativa",
+    "dentro",
+    "sobre",
+    "pouco",
+    "bocado",
+    "vamos",
+    "so",
+    "apenas",
+    "it",
+    "that",
+    "isto",
+    "isso",
+    "aquilo",
+    "ele",
+    "ela"
   ],
   "clause_separators": [
-    "and then",
-    "then",
-    "after that",
-    "followed by",
-    "and",
+    ", and then ",
+    ", then ",
+    ", and ",
+    " and then ",
+    " after that ",
+    " followed by ",
+    " then ",
+    ", e depois ",
+    ", depois ",
+    ", e ",
+    " e depois ",
+    " e entao ",
+    " a seguir ",
+    " depois ",
+    " seguido de ",
     ", "
   ],
   "verbs": {
@@ -68,13 +142,35 @@
         "spin up",
         "spawn",
         "boot up",
-        "pop up"
+        "pop up",
+        "abre",
+        "abrir",
+        "abra",
+        "inicia",
+        "iniciar",
+        "lanca",
+        "lancar",
+        "executa",
+        "executar",
+        "roda",
+        "rodar",
+        "corre",
+        "correr",
+        "arranca",
+        "arrancar"
       ],
       "light": [
         "new",
         "create",
         "make",
-        "give me"
+        "give me",
+        "novo",
+        "nova",
+        "cria",
+        "criar",
+        "faz",
+        "fazer",
+        "da me"
       ]
     },
     "FOCUS_NAV": {
@@ -92,7 +188,27 @@
         "cd into",
         "cd",
         "enter",
-        "visit"
+        "visit",
+        "foca",
+        "focar",
+        "foca em",
+        "foca no",
+        "foca na",
+        "muda para",
+        "mudar para",
+        "vai para",
+        "ir para",
+        "navega para",
+        "navegar para",
+        "leva me para",
+        "entra em",
+        "entra no",
+        "entra na",
+        "entrar em",
+        "visita",
+        "visitar",
+        "passa para",
+        "alterna para"
       ],
       "light": [
         "switch",
@@ -100,7 +216,15 @@
         "next",
         "previous",
         "prev",
-        "back to"
+        "back to",
+        "muda",
+        "mudar",
+        "foco",
+        "proxima",
+        "proximo",
+        "seguinte",
+        "anterior",
+        "volta para"
       ]
     },
     "PRESENT": {
@@ -122,13 +246,40 @@
         "inspect",
         "view",
         "see",
-        "ls"
+        "ls",
+        "lista",
+        "listar",
+        "mostra",
+        "mostrar",
+        "mostra me",
+        "exibe",
+        "exibir",
+        "lista todos",
+        "mostra todos",
+        "procura ficheiros",
+        "procura arquivos",
+        "encontra",
+        "encontrar",
+        "localiza",
+        "localizar",
+        "que ficheiros",
+        "que arquivos",
+        "o que esta em",
+        "verifica",
+        "verificar",
+        "inspeciona",
+        "inspecionar",
+        "ve",
+        "ver"
       ],
       "light": [
         "put on",
         "put up",
         "open up",
-        "get"
+        "get",
+        "poe",
+        "coloca",
+        "obtem"
       ]
     },
     "PLAY_STREAM": {
@@ -151,11 +302,29 @@
         "hit play",
         "resume",
         "unpause",
-        "continue playing"
+        "continue playing",
+        "toca",
+        "tocar",
+        "reproduz",
+        "reproduzir",
+        "toca alguma",
+        "toca um pouco de",
+        "coloca para tocar",
+        "poe a tocar",
+        "poe musica",
+        "ouvir",
+        "vamos ouvir",
+        "continua a tocar",
+        "continuar a tocar",
+        "retoma",
+        "retomar"
       ],
       "light": [
         "hear",
-        "listen"
+        "listen",
+        "ouve",
+        "escuta",
+        "escutar"
       ]
     },
     "PAUSE_STOP": {
@@ -165,12 +334,25 @@
         "pause the",
         "stop the",
         "stop playing",
-        "pause playback"
+        "pause playback",
+        "pausa",
+        "pausar",
+        "para",
+        "parar",
+        "pausa a",
+        "pausa o",
+        "para a",
+        "para o",
+        "para de tocar",
+        "parar reproducao",
+        "pausar reproducao"
       ],
       "light": [
         "halt",
         "quit",
-        "freeze"
+        "freeze",
+        "interrompe",
+        "congela"
       ]
     },
     "MEDIA_ADJUST": {
@@ -188,12 +370,38 @@
         "silence",
         "skip",
         "next track",
-        "previous track"
+        "previous track",
+        "aumenta",
+        "aumentar",
+        "diminui",
+        "diminuir",
+        "sobe",
+        "subir",
+        "baixa",
+        "baixar",
+        "abaixa",
+        "abaixar",
+        "silencia",
+        "silenciar",
+        "muta",
+        "mutar",
+        "desmuta",
+        "desmutar",
+        "pula",
+        "pular",
+        "salta",
+        "saltar",
+        "proxima faixa",
+        "faixa anterior",
+        "proxima musica",
+        "musica anterior"
       ],
       "light": [
         "louder",
         "quieter",
-        "softer"
+        "softer",
+        "mais alto",
+        "mais baixo"
       ]
     },
     "INPUT_TYPE": {
@@ -202,7 +410,15 @@
         "dictate",
         "write",
         "enter text",
-        "input"
+        "input",
+        "escreve",
+        "escrever",
+        "digita",
+        "digitar",
+        "dita",
+        "ditar",
+        "insere",
+        "inserir"
       ],
       "light": []
     },
@@ -214,7 +430,16 @@
         "wipe",
         "remove",
         "kill line",
-        "cancel"
+        "cancel",
+        "limpa",
+        "limpar",
+        "apaga",
+        "apagar",
+        "elimina",
+        "eliminar",
+        "remover",
+        "cancela",
+        "cancelar"
       ],
       "light": []
     },
@@ -235,7 +460,21 @@
         "can you explain",
         "who is",
         "when is",
-        "where is"
+        "where is",
+        "como faco para",
+        "como posso",
+        "como se faz",
+        "qual e o atalho",
+        "diz me como",
+        "o que e",
+        "qual e",
+        "porque",
+        "por que",
+        "explica",
+        "podes explicar",
+        "quem e",
+        "quando e",
+        "onde esta"
       ],
       "light": []
     },
@@ -252,7 +491,17 @@
         "find on web",
         "find online",
         "web search",
-        "search"
+        "search",
+        "pesquisa",
+        "pesquisar",
+        "pesquisa por",
+        "procura na web",
+        "procura na internet",
+        "pesquisa no google",
+        "procura no google",
+        "busca",
+        "buscar",
+        "pesquisa online"
       ],
       "light": []
     },
@@ -270,7 +519,27 @@
         "desktop",
         "switch to tag",
         "go to tag",
-        "tag"
+        "tag",
+        "muda para a area de trabalho",
+        "muda para area de trabalho",
+        "vai para a area de trabalho",
+        "vai para area de trabalho",
+        "ir para a area de trabalho",
+        "ir para area de trabalho",
+        "mudar para a area de trabalho",
+        "mudar para area de trabalho",
+        "muda para o workspace",
+        "vai para o workspace",
+        "muda para workspace",
+        "vai para workspace",
+        "area de trabalho",
+        "muda para o ambiente de trabalho",
+        "vai para o ambiente de trabalho",
+        "ambiente de trabalho",
+        "muda para o espaco de trabalho",
+        "espaco de trabalho",
+        "muda para a tag",
+        "vai para a tag"
       ],
       "light": []
     },
@@ -294,12 +563,36 @@
         "move the other window to workspace",
         "send the other window to workspace",
         "move other window to workspace",
-        "send other window to workspace"
+        "send other window to workspace",
+        "move a janela para a area de trabalho",
+        "move esta janela para a area de trabalho",
+        "move para a area de trabalho",
+        "move para area de trabalho",
+        "envia a janela para a area de trabalho",
+        "envia esta janela para a area de trabalho",
+        "envia para a area de trabalho",
+        "manda para a area de trabalho",
+        "move a janela para o workspace",
+        "move esta janela para o workspace",
+        "move para o workspace",
+        "move para workspace",
+        "envia para o workspace",
+        "move a outra janela para a area de trabalho",
+        "move a outra janela para o workspace",
+        "envia a outra janela para a area de trabalho",
+        "envia a outra janela para o workspace"
       ],
       "light": [
         "move",
         "send",
-        "transfer"
+        "transfer",
+        "mover",
+        "envia",
+        "enviar",
+        "transfere",
+        "transferir",
+        "manda",
+        "mandar"
       ]
     },
     "WINDOW_CONTROL": {
@@ -326,13 +619,41 @@
         "kill the other window",
         "close other window",
         "kill other window",
-        "quit window"
+        "quit window",
+        "ecrã inteiro",
+        "ecra inteiro",
+        "tela cheia",
+        "em tela cheia",
+        "em ecra inteiro",
+        "maximiza",
+        "maximizar",
+        "maximiza a janela",
+        "flutuar",
+        "flutua a janela",
+        "janela flutuante",
+        "torna flutuante",
+        "organiza em mosaico",
+        "mosaico",
+        "fecha a janela",
+        "fecha esta janela",
+        "fechar janela",
+        "fechar esta janela",
+        "fecha a outra janela",
+        "fechar a outra janela",
+        "mata a janela",
+        "mata esta janela"
       ],
       "light": [
         "close",
         "kill",
         "float",
-        "tile"
+        "tile",
+        "fecha",
+        "fechar",
+        "mata",
+        "matar",
+        "flutua",
+        "maximiza"
       ]
     },
     "SCROLL_NAV": {
@@ -343,7 +664,17 @@
         "scroll left",
         "scroll right",
         "page down",
-        "page up"
+        "page up",
+        "rola",
+        "rolar",
+        "rola para baixo",
+        "rola para cima",
+        "rola para a esquerda",
+        "rola para a direita",
+        "desliza",
+        "deslizar",
+        "desce a pagina",
+        "sobe a pagina"
       ],
       "light": []
     },
@@ -355,7 +686,13 @@
         "ask the agent",
         "tell the agent",
         "ask coding agent",
-        "pi agent"
+        "pi agent",
+        "pede ao pi",
+        "diz ao pi",
+        "pergunta ao pi",
+        "pede ao agente",
+        "diz ao agente",
+        "pergunta ao agente"
       ],
       "light": []
     }
@@ -375,7 +712,19 @@
           "contents",
           "dir",
           "directory",
-          "folder"
+          "folder",
+          "ficheiros",
+          "os ficheiros",
+          "todos os ficheiros",
+          "meus ficheiros",
+          "arquivos",
+          "os arquivos",
+          "todos os arquivos",
+          "meus arquivos",
+          "conteudo da pasta",
+          "conteudo do diretorio",
+          "pasta",
+          "diretorio"
         ]
       },
       {
@@ -384,7 +733,11 @@
           "hidden files",
           "hidden",
           "dotfiles",
-          "secret files"
+          "secret files",
+          "ficheiros ocultos",
+          "arquivos ocultos",
+          "ocultos",
+          "escondidos"
         ]
       }
     ],
@@ -398,7 +751,12 @@
           "pwd",
           "what directory",
           "current path",
-          "current folder"
+          "current folder",
+          "diretorio atual",
+          "pasta atual",
+          "onde estou",
+          "qual diretorio",
+          "caminho atual"
         ]
       },
       {
@@ -408,7 +766,11 @@
           "disk usage",
           "free space",
           "storage",
-          "drive space"
+          "drive space",
+          "espaco em disco",
+          "uso do disco",
+          "espaco livre",
+          "armazenamento"
         ]
       },
       {
@@ -417,7 +779,13 @@
           "largest files",
           "biggest files",
           "heaviest files",
-          "large files"
+          "large files",
+          "maiores ficheiros",
+          "maiores arquivos",
+          "ficheiros maiores",
+          "arquivos maiores",
+          "ficheiros mais pesados",
+          "arquivos mais pesados"
         ]
       },
       {
@@ -426,7 +794,11 @@
           "newest files",
           "recent files",
           "latest files",
-          "recently modified"
+          "recently modified",
+          "ficheiros recentes",
+          "arquivos recentes",
+          "ficheiros mais novos",
+          "arquivos mais novos"
         ]
       }
     ],
@@ -440,7 +812,11 @@
           "my home",
           "my home folder",
           "my home directory",
-          "~"
+          "~",
+          "pasta pessoal",
+          "diretorio pessoal",
+          "minha pasta pessoal",
+          "inicio"
         ]
       },
       {
@@ -450,7 +826,11 @@
           "current folder",
           "this directory",
           "this folder",
-          "working directory"
+          "working directory",
+          "diretorio atual",
+          "pasta atual",
+          "este diretorio",
+          "esta pasta"
         ]
       },
       {
@@ -461,7 +841,12 @@
           "one level up",
           "up one directory",
           "up a directory",
-          "up one folder"
+          "up one folder",
+          "diretorio pai",
+          "pasta pai",
+          "diretorio acima",
+          "pasta acima",
+          "um nivel acima"
         ]
       },
       {
@@ -473,7 +858,10 @@
           "temp folder",
           "temporary folder",
           "temporary directory",
-          "/tmp"
+          "/tmp",
+          "pasta temporaria",
+          "diretorio temporario",
+          "temporarios"
         ]
       },
       {
@@ -490,7 +878,72 @@
         "phrases": [
           "var log",
           "system logs",
-          "/var/log"
+          "/var/log",
+          "logs do sistema",
+          "registos do sistema"
+        ]
+      },
+      {
+        "id": "~/Downloads",
+        "phrases": [
+          "downloads",
+          "downloads folder",
+          "downloads directory",
+          "transferencias",
+          "pasta de transferencias",
+          "pasta downloads",
+          "diretorio downloads"
+        ]
+      },
+      {
+        "id": "~/Documents",
+        "phrases": [
+          "documents",
+          "documents folder",
+          "documents directory",
+          "documentos",
+          "pasta de documentos",
+          "pasta documentos",
+          "diretorio documentos"
+        ]
+      },
+      {
+        "id": "~/Desktop",
+        "phrases": [
+          "desktop folder",
+          "desktop directory",
+          "pasta da area de trabalho",
+          "pasta desktop"
+        ]
+      },
+      {
+        "id": "~/Pictures",
+        "phrases": [
+          "pictures",
+          "pictures folder",
+          "pictures directory",
+          "imagens",
+          "pasta de imagens",
+          "fotos",
+          "pasta de fotos"
+        ]
+      },
+      {
+        "id": "~/Music",
+        "phrases": [
+          "music folder",
+          "music directory",
+          "pasta de musica",
+          "pasta de musicas"
+        ]
+      },
+      {
+        "id": "~/Videos",
+        "phrases": [
+          "videos folder",
+          "videos directory",
+          "pasta de videos",
+          "diretorio de videos"
         ]
       }
     ],
@@ -501,7 +954,10 @@
           "c files",
           "c source",
           "c source files",
-          "source files"
+          "source files",
+          "ficheiros c",
+          "arquivos c",
+          "codigo c"
         ]
       },
       {
@@ -510,7 +966,10 @@
           "header files",
           "headers",
           "c headers",
-          "h files"
+          "h files",
+          "ficheiros de cabecalho",
+          "cabecalhos",
+          "headers c"
         ]
       },
       {
@@ -519,7 +978,10 @@
           "python files",
           "py files",
           "python scripts",
-          "python code"
+          "python code",
+          "ficheiros python",
+          "arquivos python",
+          "scripts python"
         ]
       },
       {
@@ -527,28 +989,36 @@
         "phrases": [
           "javascript files",
           "js files",
-          "javascript scripts"
+          "javascript scripts",
+          "ficheiros javascript",
+          "arquivos javascript"
         ]
       },
       {
         "id": "*.ts",
         "phrases": [
           "typescript files",
-          "ts files"
+          "ts files",
+          "ficheiros typescript",
+          "arquivos typescript"
         ]
       },
       {
         "id": "*.rs",
         "phrases": [
           "rust files",
-          "rs files"
+          "rs files",
+          "ficheiros rust",
+          "arquivos rust"
         ]
       },
       {
         "id": "*.go",
         "phrases": [
           "go files",
-          "golang files"
+          "golang files",
+          "ficheiros go",
+          "arquivos go"
         ]
       },
       {
@@ -557,14 +1027,19 @@
           "markdown files",
           "md files",
           "docs",
-          "documentation files"
+          "documentation files",
+          "ficheiros markdown",
+          "arquivos markdown",
+          "documentacao"
         ]
       },
       {
         "id": "*.json",
         "phrases": [
           "json files",
-          "json configs"
+          "json configs",
+          "ficheiros json",
+          "arquivos json"
         ]
       },
       {
@@ -586,21 +1061,28 @@
           "shell scripts",
           "bash scripts",
           "sh files",
-          "scripts"
+          "scripts",
+          "scripts shell",
+          "scripts bash",
+          "ficheiros sh"
         ]
       },
       {
         "id": "*.txt",
         "phrases": [
           "text files",
-          "txt files"
+          "txt files",
+          "ficheiros de texto",
+          "arquivos de texto"
         ]
       },
       {
         "id": "*.log",
         "phrases": [
           "log files",
-          "logs"
+          "logs",
+          "ficheiros de log",
+          "arquivos de log"
         ]
       },
       {
@@ -608,7 +1090,10 @@
         "phrases": [
           "pdf files",
           "pdfs",
-          "pdf documents"
+          "pdf documents",
+          "ficheiros pdf",
+          "arquivos pdf",
+          "documentos pdf"
         ]
       },
       {
@@ -627,7 +1112,12 @@
           "git status",
           "repo status",
           "repository status",
-          "what changed in git"
+          "what changed in git",
+          "estado do git",
+          "status do git",
+          "estado do repositorio",
+          "status do repositorio",
+          "o que mudou no git"
         ]
       },
       {
@@ -636,7 +1126,11 @@
           "git diff",
           "diff",
           "uncommitted changes",
-          "what did i change"
+          "what did i change",
+          "diferencas do git",
+          "diff do git",
+          "alteracoes no git",
+          "o que mudei"
         ]
       },
       {
@@ -646,7 +1140,11 @@
           "commit history",
           "git history",
           "commits",
-          "recent commits"
+          "recent commits",
+          "historico do git",
+          "historico de commits",
+          "log do git",
+          "commits recentes"
         ]
       },
       {
@@ -655,7 +1153,12 @@
           "git branch",
           "git branches",
           "branches",
-          "current branch"
+          "current branch",
+          "ramo do git",
+          "ramos do git",
+          "branch do git",
+          "branch atual",
+          "ramo atual"
         ]
       }
     ],
@@ -790,7 +1293,9 @@
           "vimrc",
           "my vimrc",
           "my vim config",
-          "my vim configuration"
+          "my vim configuration",
+          "configuracao do vim",
+          "meu vimrc"
         ]
       },
       {
@@ -802,7 +1307,9 @@
           "nvim configuration",
           "init.lua",
           "my neovim config",
-          "my nvim config"
+          "my nvim config",
+          "configuracao do neovim",
+          "configuracao do nvim"
         ]
       },
       {
@@ -812,7 +1319,9 @@
           "bash config",
           "bash configuration",
           "my bashrc",
-          "my bash config"
+          "my bash config",
+          "configuracao do bash",
+          "meu bashrc"
         ]
       },
       {
@@ -821,7 +1330,9 @@
           "zshrc",
           "zsh config",
           "zsh configuration",
-          "my zshrc"
+          "my zshrc",
+          "configuracao do zsh",
+          "meu zshrc"
         ]
       },
       {
@@ -830,7 +1341,8 @@
           "tmux config",
           "tmux configuration",
           "tmux.conf",
-          "my tmux config"
+          "my tmux config",
+          "configuracao do tmux"
         ]
       },
       {
@@ -847,7 +1359,8 @@
           "dwm config",
           "dwm configuration",
           "window manager config",
-          "my dwm config"
+          "my dwm config",
+          "configuracao do dwm"
         ]
       },
       {
@@ -877,14 +1390,23 @@
           "shell",
           "st",
           "xterm",
-          "terminal window"
+          "terminal window",
+          "novo terminal",
+          "consola",
+          "janela de terminal",
+          "um terminal",
+          "um novo terminal"
         ]
       },
       {
         "id": "window",
         "phrases": [
           "window",
-          "new window"
+          "new window",
+          "janela",
+          "nova janela",
+          "uma janela",
+          "uma nova janela"
         ]
       },
       {
@@ -893,7 +1415,13 @@
           "tab",
           "new tab",
           "browser tab",
-          "new browser tab"
+          "new browser tab",
+          "aba",
+          "nova aba",
+          "separador",
+          "novo separador",
+          "aba do navegador",
+          "separador do navegador"
         ]
       },
       {
@@ -902,7 +1430,10 @@
           "devtools",
           "developer tools",
           "inspect element",
-          "web inspector"
+          "web inspector",
+          "ferramentas de programador",
+          "ferramentas de desenvolvedor",
+          "inspecionar elemento"
         ]
       },
       {
@@ -910,7 +1441,9 @@
         "phrases": [
           "address bar",
           "url bar",
-          "location bar"
+          "location bar",
+          "barra de enderecos",
+          "barra de url"
         ]
       },
       {
@@ -919,7 +1452,11 @@
           "system monitor",
           "process monitor",
           "memory usage",
-          "resource monitor"
+          "resource monitor",
+          "monitor do sistema",
+          "monitor de processos",
+          "uso de memoria",
+          "monitor de recursos"
         ]
       },
       {
@@ -931,7 +1468,12 @@
           "my agenda",
           "my agenda for today",
           "meetings",
-          "schedule"
+          "schedule",
+          "calendario",
+          "minha agenda",
+          "agenda de hoje",
+          "reunioes",
+          "compromissos"
         ]
       },
       {
@@ -939,7 +1481,12 @@
         "phrases": [
           "control center",
           "settings",
-          "system settings"
+          "system settings",
+          "centro de controlo",
+          "central de controle",
+          "definicoes",
+          "configuracoes",
+          "configuracoes do sistema"
         ]
       },
       {
@@ -949,7 +1496,10 @@
           "wi-fi",
           "wireless",
           "network settings",
-          "wifi settings"
+          "wifi settings",
+          "rede sem fios",
+          "configuracoes de rede",
+          "definicoes de wifi"
         ]
       },
       {
@@ -958,7 +1508,11 @@
           "battery",
           "battery status",
           "battery info",
-          "power status"
+          "power status",
+          "bateria",
+          "estado da bateria",
+          "nivel da bateria",
+          "energia"
         ]
       },
       {
@@ -969,7 +1523,12 @@
           "shutdown",
           "reboot",
           "log out",
-          "logout"
+          "logout",
+          "menu de energia",
+          "suspender",
+          "desligar",
+          "reiniciar",
+          "terminar sessao"
         ]
       },
       {
@@ -980,7 +1539,11 @@
           "help",
           "keyboard shortcuts",
           "dwm help",
-          "window manager help"
+          "window manager help",
+          "atalhos",
+          "atalhos de teclado",
+          "ajuda",
+          "ajuda do dwm"
         ]
       }
     ],
@@ -992,7 +1555,15 @@
           "my screen",
           "screen recording",
           "recording",
-          "record"
+          "record",
+          "ecra",
+          "meu ecra",
+          "tela",
+          "minha tela",
+          "gravacao de ecra",
+          "gravacao de tela",
+          "gravacao",
+          "gravar"
         ]
       },
       {
@@ -1003,7 +1574,12 @@
           "mic",
           "voice recording",
           "sound",
-          "with audio"
+          "with audio",
+          "microfone",
+          "gravacao de voz",
+          "som",
+          "com audio",
+          "com som"
         ]
       },
       {
@@ -1011,7 +1587,11 @@
         "phrases": [
           "screen and audio",
           "screen with audio",
-          "both"
+          "both",
+          "ecra e audio",
+          "tela e audio",
+          "ambos",
+          "os dois"
         ]
       }
     ],
@@ -1026,7 +1606,14 @@
           "tracks",
           "playlist",
           "playback",
-          "player"
+          "player",
+          "musica",
+          "musicas",
+          "cancao",
+          "cancoes",
+          "faixa",
+          "faixas",
+          "reproducao"
         ]
       },
       {
@@ -1035,7 +1622,8 @@
           "video",
           "videos",
           "movie",
-          "film"
+          "film",
+          "filme"
         ]
       },
       {
@@ -1045,7 +1633,14 @@
           "next track",
           "skip",
           "skip track",
-          "skip song"
+          "skip song",
+          "proxima musica",
+          "proxima faixa",
+          "proxima cancao",
+          "pular musica",
+          "saltar musica",
+          "passar musica",
+          "seguinte"
         ]
       },
       {
@@ -1056,7 +1651,12 @@
           "prev song",
           "prev track",
           "last song",
-          "last track"
+          "last track",
+          "musica anterior",
+          "faixa anterior",
+          "cancao anterior",
+          "ultima musica",
+          "voltar musica"
         ]
       },
       {
@@ -1070,7 +1670,13 @@
           "increase the volume",
           "raise volume",
           "raise the volume",
-          "volume higher"
+          "volume higher",
+          "mais alto",
+          "aumentar volume",
+          "aumenta o volume",
+          "subir volume",
+          "sobe o volume",
+          "volume mais alto"
         ]
       },
       {
@@ -1085,7 +1691,15 @@
           "decrease the volume",
           "lower volume",
           "lower the volume",
-          "volume lower"
+          "volume lower",
+          "mais baixo",
+          "diminuir volume",
+          "diminui o volume",
+          "baixar volume",
+          "baixa o volume",
+          "abaixar volume",
+          "abaixa o volume",
+          "volume mais baixo"
         ]
       },
       {
@@ -1098,7 +1712,22 @@
           "mute audio",
           "mute sound",
           "mute volume",
-          "mute the volume"
+          "mute the volume",
+          "silenciar",
+          "tirar o som",
+          "cortar o som",
+          "sem som",
+          "mutar som",
+          "mutar audio",
+          "mutar volume",
+          "silencia",
+          "silencia o som",
+          "silenciar o som",
+          "silencia o audio",
+          "silenciar audio",
+          "muta o som",
+          "tira o som",
+          "corta o som"
         ]
       },
       {
@@ -1116,7 +1745,12 @@
           "the line",
           "whole line",
           "current line",
-          "this line"
+          "this line",
+          "linha",
+          "a linha",
+          "linha inteira",
+          "linha atual",
+          "esta linha"
         ]
       },
       {
@@ -1126,7 +1760,12 @@
           "last word",
           "previous word",
           "the word",
-          "this word"
+          "this word",
+          "palavra",
+          "ultima palavra",
+          "palavra anterior",
+          "a palavra",
+          "esta palavra"
         ]
       },
       {
@@ -1134,7 +1773,11 @@
         "phrases": [
           "terminal screen",
           "console screen",
-          "the screen"
+          "the screen",
+          "ecra do terminal",
+          "tela do terminal",
+          "o ecra",
+          "a tela"
         ]
       },
       {
@@ -1142,7 +1785,10 @@
         "phrases": [
           "running process",
           "current command",
-          "interrupt"
+          "interrupt",
+          "processo em execucao",
+          "comando atual",
+          "interromper"
         ]
       }
     ],
@@ -1156,7 +1802,13 @@
           "the other terminal",
           "alternate window",
           "other",
-          "the other"
+          "the other",
+          "outra janela",
+          "a outra janela",
+          "outro terminal",
+          "o outro terminal",
+          "outra",
+          "a outra"
         ]
       },
       {
@@ -1169,7 +1821,10 @@
           "previous",
           "prev",
           "the previous",
-          "the prev"
+          "the prev",
+          "janela anterior",
+          "a janela anterior",
+          "anterior"
         ]
       },
       {
@@ -1178,7 +1833,12 @@
           "next window",
           "the next window",
           "next",
-          "the next"
+          "the next",
+          "proxima janela",
+          "a proxima janela",
+          "janela seguinte",
+          "proxima",
+          "seguinte"
         ]
       },
       {
@@ -1188,7 +1848,11 @@
           "the master window",
           "main window",
           "master",
-          "the master"
+          "the master",
+          "janela principal",
+          "a janela principal",
+          "janela mestre",
+          "principal"
         ]
       }
     ],
@@ -1199,7 +1863,12 @@
           "fullscreen",
           "full screen",
           "maximize",
-          "maximized"
+          "maximized",
+          "ecra inteiro",
+          "tela cheia",
+          "maximizar",
+          "maximiza",
+          "maximizada"
         ]
       },
       {
@@ -1207,7 +1876,10 @@
         "phrases": [
           "float",
           "floating",
-          "toggle floating"
+          "toggle floating",
+          "flutuar",
+          "flutuante",
+          "alternar flutuante"
         ]
       },
       {
@@ -1215,7 +1887,10 @@
         "phrases": [
           "tile",
           "tiled",
-          "unfloat"
+          "unfloat",
+          "mosaico",
+          "em mosaico",
+          "fixar"
         ]
       },
       {
@@ -1224,7 +1899,13 @@
           "close",
           "kill",
           "quit",
-          "destroy"
+          "destroy",
+          "fechar",
+          "fecha",
+          "matar",
+          "mata",
+          "sair",
+          "destruir"
         ]
       }
     ],
@@ -1234,7 +1915,9 @@
         "phrases": [
           "down",
           "downwards",
-          "page down"
+          "page down",
+          "baixo",
+          "para baixo"
         ]
       },
       {
@@ -1242,19 +1925,25 @@
         "phrases": [
           "up",
           "upwards",
-          "page up"
+          "page up",
+          "cima",
+          "para cima"
         ]
       },
       {
         "id": "left",
         "phrases": [
-          "left"
+          "left",
+          "esquerda",
+          "para a esquerda"
         ]
       },
       {
         "id": "right",
         "phrases": [
-          "right"
+          "right",
+          "direita",
+          "para a direita"
         ]
       }
     ],
@@ -1268,7 +1957,23 @@
           "desktop one",
           "tag 1",
           "tag one",
-          "first workspace"
+          "first workspace",
+          "1",
+          "one",
+          "first",
+          "um",
+          "uma",
+          "primeiro",
+          "primeira",
+          "area de trabalho 1",
+          "area de trabalho um",
+          "area de trabalho uma",
+          "primeira area de trabalho",
+          "ambiente de trabalho 1",
+          "ambiente de trabalho um",
+          "workspace um",
+          "desktop um",
+          "tag um"
         ]
       },
       {
@@ -1280,7 +1985,23 @@
           "desktop two",
           "tag 2",
           "tag two",
-          "second workspace"
+          "second workspace",
+          "2",
+          "two",
+          "second",
+          "dois",
+          "duas",
+          "segundo",
+          "segunda",
+          "area de trabalho 2",
+          "area de trabalho dois",
+          "area de trabalho duas",
+          "segunda area de trabalho",
+          "ambiente de trabalho 2",
+          "ambiente de trabalho dois",
+          "workspace dois",
+          "desktop dois",
+          "tag dois"
         ]
       },
       {
@@ -1292,7 +2013,21 @@
           "desktop three",
           "tag 3",
           "tag three",
-          "third workspace"
+          "third workspace",
+          "3",
+          "three",
+          "third",
+          "tres",
+          "terceiro",
+          "terceira",
+          "area de trabalho 3",
+          "area de trabalho tres",
+          "terceira area de trabalho",
+          "ambiente de trabalho 3",
+          "ambiente de trabalho tres",
+          "workspace tres",
+          "desktop tres",
+          "tag tres"
         ]
       },
       {
@@ -1304,7 +2039,21 @@
           "desktop four",
           "tag 4",
           "tag four",
-          "fourth workspace"
+          "fourth workspace",
+          "4",
+          "four",
+          "fourth",
+          "quatro",
+          "quarto",
+          "quarta",
+          "area de trabalho 4",
+          "area de trabalho quatro",
+          "quarta area de trabalho",
+          "ambiente de trabalho 4",
+          "ambiente de trabalho quatro",
+          "workspace quatro",
+          "desktop quatro",
+          "tag quatro"
         ]
       },
       {
@@ -1316,7 +2065,21 @@
           "desktop five",
           "tag 5",
           "tag five",
-          "fifth workspace"
+          "fifth workspace",
+          "5",
+          "five",
+          "fifth",
+          "cinco",
+          "quinto",
+          "quinta",
+          "area de trabalho 5",
+          "area de trabalho cinco",
+          "quinta area de trabalho",
+          "ambiente de trabalho 5",
+          "ambiente de trabalho cinco",
+          "workspace cinco",
+          "desktop cinco",
+          "tag cinco"
         ]
       },
       {
@@ -1328,7 +2091,21 @@
           "desktop six",
           "tag 6",
           "tag six",
-          "sixth workspace"
+          "sixth workspace",
+          "6",
+          "six",
+          "sixth",
+          "seis",
+          "sexto",
+          "sexta",
+          "area de trabalho 6",
+          "area de trabalho seis",
+          "sexta area de trabalho",
+          "ambiente de trabalho 6",
+          "ambiente de trabalho seis",
+          "workspace seis",
+          "desktop seis",
+          "tag seis"
         ]
       },
       {
@@ -1340,7 +2117,21 @@
           "desktop seven",
           "tag 7",
           "tag seven",
-          "seventh workspace"
+          "seventh workspace",
+          "7",
+          "seven",
+          "seventh",
+          "sete",
+          "setimo",
+          "setima",
+          "area de trabalho 7",
+          "area de trabalho sete",
+          "setima area de trabalho",
+          "ambiente de trabalho 7",
+          "ambiente de trabalho sete",
+          "workspace sete",
+          "desktop sete",
+          "tag sete"
         ]
       },
       {
@@ -1352,7 +2143,21 @@
           "desktop eight",
           "tag 8",
           "tag eight",
-          "eighth workspace"
+          "eighth workspace",
+          "8",
+          "eight",
+          "eighth",
+          "oito",
+          "oitavo",
+          "oitava",
+          "area de trabalho 8",
+          "area de trabalho oito",
+          "oitava area de trabalho",
+          "ambiente de trabalho 8",
+          "ambiente de trabalho oito",
+          "workspace oito",
+          "desktop oito",
+          "tag oito"
         ]
       },
       {
@@ -1364,7 +2169,21 @@
           "desktop nine",
           "tag 9",
           "tag nine",
-          "ninth workspace"
+          "ninth workspace",
+          "9",
+          "nine",
+          "ninth",
+          "nove",
+          "nono",
+          "nona",
+          "area de trabalho 9",
+          "area de trabalho nove",
+          "nona area de trabalho",
+          "ambiente de trabalho 9",
+          "ambiente de trabalho nove",
+          "workspace nove",
+          "desktop nove",
+          "tag nove"
         ]
       }
     ],
@@ -1440,7 +2259,9 @@
           "firefox",
           "browser",
           "web browser",
-          "mozilla"
+          "mozilla",
+          "navegador",
+          "navegador web"
         ]
       },
       {
@@ -1449,7 +2270,8 @@
           "calculator",
           "calc",
           "gnome calculator",
-          "gnome-calculator"
+          "gnome-calculator",
+          "calculadora"
         ]
       },
       {
@@ -1475,7 +2297,11 @@
           "volume control",
           "pulseaudio control",
           "sound settings",
-          "audio settings"
+          "audio settings",
+          "controlo de volume",
+          "controle de volume",
+          "definicoes de som",
+          "configuracoes de audio"
         ]
       },
       {
@@ -1484,14 +2310,19 @@
           "file manager",
           "files app",
           "thunar",
-          "nautilus"
+          "nautilus",
+          "gestor de ficheiros",
+          "gerenciador de arquivos",
+          "aplicacao de ficheiros"
         ]
       },
       {
         "id": "gimp",
         "phrases": [
           "gimp",
-          "image editor"
+          "image editor",
+          "editor de imagem",
+          "editor de imagens"
         ]
       },
       {
@@ -1505,7 +2336,9 @@
         "id": "vlc",
         "phrases": [
           "vlc",
-          "media player"
+          "media player",
+          "reprodutor de media",
+          "reprodutor de video"
         ]
       },
       {
@@ -1522,7 +2355,62 @@
           "console",
           "shell",
           "st",
-          "xterm"
+          "xterm",
+          "consola"
+        ]
+      }
+    ],
+    "mod.flag": [
+      {
+        "id": "new",
+        "phrases": [
+          "new",
+          "novo",
+          "nova"
+        ]
+      },
+      {
+        "id": "hidden",
+        "phrases": [
+          "hidden",
+          "oculto",
+          "ocultos",
+          "escondido",
+          "escondidos"
+        ]
+      },
+      {
+        "id": "all",
+        "phrases": [
+          "all",
+          "todo",
+          "toda",
+          "todos",
+          "todas"
+        ]
+      },
+      {
+        "id": "silent",
+        "phrases": [
+          "silent",
+          "silencioso",
+          "silenciosa"
+        ]
+      },
+      {
+        "id": "fullscreen",
+        "phrases": [
+          "fullscreen",
+          "full screen",
+          "ecra inteiro",
+          "tela cheia"
+        ]
+      },
+      {
+        "id": "floating",
+        "phrases": [
+          "floating",
+          "flutuante"
         ]
       }
     ]
@@ -1538,7 +2426,13 @@
       "in this shell",
       "in the shell",
       "in this console",
-      "in my terminal"
+      "in my terminal",
+      "neste terminal",
+      "no terminal",
+      "em terminal",
+      "dentro deste terminal",
+      "nesta consola",
+      "no meu terminal"
     ],
     "other": [
       "in the other window",
@@ -1547,7 +2441,13 @@
       "on the other window",
       "in the other terminal",
       "into other window",
-      "on other window"
+      "on other window",
+      "na outra janela",
+      "em outra janela",
+      "para a outra janela",
+      "no outro terminal",
+      "em outro terminal",
+      "para o outro terminal"
     ],
     "any": [
       "in this window",
@@ -1560,7 +2460,16 @@
       "here",
       "right now",
       "for me",
-      "please"
+      "please",
+      "nesta janela",
+      "na janela atual",
+      "na janela ativa",
+      "aqui mesmo",
+      "aqui dentro",
+      "aqui",
+      "agora mesmo",
+      "para mim",
+      "por favor"
     ],
     "submit": [
       "and press enter",
@@ -1568,7 +2477,38 @@
       "and hit return",
       "then press enter",
       "then hit enter",
-      "and press return"
+      "and press return",
+      "e pressiona enter",
+      "e carrega em enter",
+      "e aperta enter",
+      "e prime enter",
+      "depois pressiona enter",
+      "depois aperta enter"
+    ],
+    "new_terminal": [
+      "in a new terminal",
+      "on a new terminal",
+      "in new terminal",
+      "on new terminal",
+      "in a new terminal window",
+      "on a new terminal window",
+      "inside a new terminal",
+      "into a new terminal",
+      "using a new terminal",
+      "num novo terminal",
+      "em um novo terminal",
+      "numa nova janela de terminal",
+      "usando um novo terminal"
+    ],
+    "background": [
+      "in the background",
+      "in background",
+      "without focus",
+      "without stealing focus",
+      "em segundo plano",
+      "no fundo",
+      "sem foco",
+      "sem roubar o foco"
     ]
   },
   "capabilities": [
@@ -2020,7 +2960,52 @@
     "jarvus",
     "charvis",
     "jervis",
-    "travis"
+    "travis",
+    "jarbas",
+    "jarvas",
+    "jarvisz",
+    "jarvis,",
+    "jarbas,",
+    "charbas",
+    "djarvis",
+    "jarwis",
+    "yarvis",
+    "harvis",
+    "garvis",
+    "javis",
+    "javes",
+    "jarvi",
+    "jarbi",
+    "jarbs",
+    "jarvs",
+    "jarv",
+    "jervais",
+    "gervis",
+    "gervais",
+    "jarbez",
+    "jarbes",
+    "jabas",
+    "jabis",
+    "jabes",
+    "jarba",
+    "jarva",
+    "chaves",
+    "chavis",
+    "yabas",
+    "gabas",
+    "habas",
+    "shavas",
+    "shavis",
+    "service",
+    "drivers",
+    "charles",
+    "carlos",
+    "harvest",
+    "nervous",
+    "davis",
+    "mavis",
+    "elvis",
+    "chavez"
   ],
   "polite_prefixes": [
     "please",
@@ -2032,7 +3017,29 @@
     "could you",
     "would you",
     "lets",
-    "let us"
+    "let us",
+    "let's",
+    "por favor",
+    "podes",
+    "pode",
+    "poderia",
+    "poderias",
+    "sera que podes",
+    "importas te de",
+    "vamos",
+    "ola",
+    "oi",
+    "hi",
+    "hello",
+    "yo",
+    "olá",
+    "ei",
+    "e ai",
+    "e aí",
+    "fala",
+    "ou",
+    "voce pode",
+    "você pode"
   ],
   "dictation_verbs": [
     "type",
@@ -2040,13 +3047,31 @@
     "write",
     "input",
     "ask",
-    "tell"
+    "tell",
+    "escreve",
+    "escrever",
+    "digita",
+    "digitar",
+    "dita",
+    "ditar",
+    "insere",
+    "inserir"
   ],
   "deictic_pronouns": [
     "this",
     "current",
     "active",
-    "window"
+    "window",
+    "este",
+    "esta",
+    "isto",
+    "esse",
+    "essa",
+    "isso",
+    "atual",
+    "ativo",
+    "ativa",
+    "janela"
   ],
   "tts_interrupt_phrases": [
     "stop talking",
@@ -2062,7 +3087,42 @@
     "mute yourself",
     "quiet down",
     "shh",
-    "shush"
+    "shush",
+    "para de falar",
+    "cala te",
+    "cale se",
+    "silencio",
+    "fica quieto",
+    "calado",
+    "basta",
+    "chega",
+    "desliga a voz",
+    "muta a voz",
+    "stop",
+    "cancel",
+    "stop reading",
+    "nevermind",
+    "never mind",
+    "abort",
+    "pare",
+    "para",
+    "parar",
+    "cala a boca",
+    "cale a boca",
+    "silêncio",
+    "quieto",
+    "cancela",
+    "cancelar",
+    "pare de falar",
+    "cala boca",
+    "xiu",
+    "ta bom",
+    "tá bom",
+    "ja deu",
+    "já deu",
+    "deixa pra la",
+    "deixa pra lá",
+    "esquece"
   ],
   "lockdown_phrases": [
     "lockdown mode",
@@ -2075,7 +3135,13 @@
     "stop listening",
     "disable voice",
     "go to sleep",
-    "sleep mode"
+    "sleep mode",
+    "modo bloqueio",
+    "desligar jarvis",
+    "desliga o jarvis",
+    "para de ouvir",
+    "modo suspenso",
+    "vai dormir"
   ],
   "hallucination_phrases": [
     "thank you",
@@ -2104,6 +3170,1357 @@
     "like",
     "subtitles by",
     "amara org",
-    "translated by"
-  ]
+    "translated by",
+    "obrigado",
+    "obrigada",
+    "muito obrigado",
+    "tchau",
+    "adeus",
+    "ate logo",
+    "legendas por"
+  ],
+  "conjunctions": [
+    "and",
+    "e"
+  ],
+  "arg_preps": [
+    "listen to ",
+    "a bit of ",
+    "a little ",
+    "some ",
+    "the ",
+    "a ",
+    "an ",
+    "in ",
+    "out ",
+    "to ",
+    "for ",
+    "about ",
+    "on ",
+    "ouvir ",
+    "um pouco de ",
+    "um bocado de ",
+    "alguma ",
+    "algum ",
+    "sobre ",
+    "por ",
+    "para ",
+    "no ",
+    "na ",
+    "em ",
+    "o ",
+    "a ",
+    "os ",
+    "as ",
+    "um ",
+    "uma "
+  ],
+  "interrogatives": [
+    "what",
+    "whats",
+    "why",
+    "how",
+    "who",
+    "when",
+    "where",
+    "which",
+    "did",
+    "does",
+    "do",
+    "is",
+    "are",
+    "explain",
+    "qual",
+    "quais",
+    "porque",
+    "como",
+    "quem",
+    "quando",
+    "onde",
+    "explica"
+  ],
+  "fs_templates": [
+    "%s folder",
+    "%s directory",
+    "pasta %s",
+    "diretorio %s"
+  ],
+  "window_templates": [
+    "%s window",
+    "janela %s"
+  ],
+  "tab_templates": [
+    "%s tab",
+    "aba %s",
+    "separador %s"
+  ],
+  "asr_corrections": [
+    {
+      "from": "low fee",
+      "to": "lofi"
+    },
+    {
+      "from": "lo fee",
+      "to": "lofi"
+    },
+    {
+      "from": "low fi",
+      "to": "lofi"
+    },
+    {
+      "from": "lo fi",
+      "to": "lofi"
+    },
+    {
+      "from": "low fly",
+      "to": "lofi"
+    },
+    {
+      "from": "calls that",
+      "to": "close that"
+    },
+    {
+      "from": "calls this",
+      "to": "close this"
+    },
+    {
+      "from": "calls the",
+      "to": "close the"
+    },
+    {
+      "from": "cause that",
+      "to": "close that"
+    },
+    {
+      "from": "clothes that",
+      "to": "close that"
+    },
+    {
+      "from": "clothes the",
+      "to": "close the"
+    }
+  ],
+  "anaphora": {
+    "pause_phrases": [
+      "pause it",
+      "pause that",
+      "pausa isso",
+      "pausa isto",
+      "para isso",
+      "para isto"
+    ],
+    "pause_target": "pause the music",
+    "resume_phrases": [
+      "play it",
+      "play that",
+      "resume it",
+      "resume that",
+      "play it again",
+      "toca isso",
+      "toca isto",
+      "reproduz isso",
+      "retoma isso",
+      "toca de novo"
+    ],
+    "resume_prefix": "play",
+    "resume_default": "play music",
+    "spatial_pronouns": [
+      "there",
+      "la",
+      "ai",
+      "ali"
+    ],
+    "spatial_prep": "in"
+  },
+  "agent_triggers": [
+    " what ",
+    " whats ",
+    " why ",
+    " how ",
+    " who ",
+    " where ",
+    " which ",
+    " explain ",
+    " diagnose ",
+    " describe ",
+    " clarify ",
+    " elaborate ",
+    " summarize ",
+    " tell me ",
+    " give me an example ",
+    " for example ",
+    " what about ",
+    " how about ",
+    " and what ",
+    " and why ",
+    " and how ",
+    " really ",
+    " seriously ",
+    " are you sure ",
+    " hello ",
+    " hi ",
+    " hey ",
+    " greetings ",
+    " good morning ",
+    " good afternoon ",
+    " good evening ",
+    " thanks ",
+    " thank you ",
+    " are you there ",
+    " can you hear ",
+    " talk again ",
+    " you awake ",
+    " you listening ",
+    " error ",
+    " errors ",
+    " failing ",
+    " failed ",
+    " broken ",
+    " crash ",
+    " crashing ",
+    " crashed ",
+    " bug ",
+    " traceback ",
+    " exception ",
+    " problem ",
+    " issue ",
+    " wrong ",
+    " eating ",
+    " hogging ",
+    " lagging ",
+    " slow ",
+    " ram ",
+    " memory ",
+    " cpu ",
+    " port ",
+    " ports ",
+    " process ",
+    " processes ",
+    " clipboard ",
+    " selected ",
+    " highlighted ",
+    " selection ",
+    " remember ",
+    " whenever ",
+    " preference ",
+    " preferences ",
+    " workflow ",
+    " habit ",
+    " actually ",
+    " instead ",
+    " undo ",
+    " nevermind ",
+    " never mind ",
+    " bring it back ",
+    " take me back ",
+    " go back to ",
+    " repeat that ",
+    " do that again ",
+    " run that again ",
+    " run it again ",
+    " run that command again ",
+    " that again ",
+    " do the same ",
+    " same thing ",
+    " what did you ",
+    " say that again ",
+    " open that file ",
+    " that file ",
+    " failing file ",
+    " file mentioned ",
+    " failing line ",
+    " at that line ",
+    " at line ",
+    " ssh ",
+    " nelvim ",
+    " near of him ",
+    " vam ",
+    " set up my ",
+    " setup my ",
+    " on the page ",
+    " on that page ",
+    " web page ",
+    " webpage ",
+    " in the browser ",
+    " on my browser ",
+    " browser page ",
+    " heading ",
+    " article ",
+    " link on ",
+    " button on ",
+    " read the page ",
+    " on the screen ",
+    " terminal screen ",
+    " other terminal ",
+    " pull back ",
+    " porque ",
+    " por que ",
+    " como ",
+    " quem ",
+    " onde ",
+    " explica ",
+    " diagnostica ",
+    " descreve ",
+    " resume ",
+    " diz me ",
+    " bom dia ",
+    " boa tarde ",
+    " boa noite ",
+    " obrigado ",
+    " obrigada ",
+    " erro ",
+    " erros ",
+    " falhou ",
+    " falha ",
+    " quebrado ",
+    " lento ",
+    " memoria ",
+    " processo ",
+    " processos ",
+    " area de transferencia ",
+    " lembra te ",
+    " preferencia ",
+    " fluxo de trabalho ",
+    " na verdade ",
+    " em vez disso ",
+    " desfaz ",
+    " desfazer ",
+    " esquece ",
+    " traz de volta ",
+    " repete isso ",
+    " faz isso de novo ",
+    " roda isso de novo ",
+    " a mesma coisa ",
+    " esse ficheiro ",
+    " esse arquivo ",
+    " que falhou ",
+    " onde falhou ",
+    " na pagina ",
+    " dessa pagina ",
+    " pagina web ",
+    " no navegador ",
+    " ecra do terminal ",
+    " outro terminal ",
+    " na linha "
+  ],
+  "idioms": [
+    {
+      "phrases": [
+        "too small",
+        "cant read",
+        "cannot read",
+        "barely read",
+        "text is tiny",
+        "font is tiny",
+        "my eyes",
+        "muito pequeno",
+        "nao consigo ler",
+        "letra muito pequena",
+        "texto minusculo"
+      ],
+      "require_any": [
+        "fullscreen",
+        "full screen",
+        "maximize",
+        "bigger window",
+        "ecra inteiro",
+        "tela cheia",
+        "maximizar",
+        "janela maior"
+      ],
+      "cap": "window.control",
+      "action": "fullscreen",
+      "surface": "inherit",
+      "score": 0.96
+    },
+    {
+      "phrases": [
+        "too small",
+        "cant read",
+        "cannot read",
+        "barely read",
+        "text is tiny",
+        "font is tiny",
+        "my eyes",
+        "zoom in",
+        "bump the font",
+        "make the font bigger",
+        "make the text bigger",
+        "font bigger",
+        "increase font",
+        "muito pequeno",
+        "nao consigo ler",
+        "letra muito pequena",
+        "texto minusculo",
+        "aumenta a fonte",
+        "aumentar a fonte",
+        "aumenta a letra",
+        "letra maior"
+      ],
+      "cap": "input.key",
+      "text": "ctrl+plus",
+      "surface": "inherit",
+      "score": 0.96
+    },
+    {
+      "phrases": [
+        "zoom out",
+        "smaller text",
+        "font smaller",
+        "shrink the font",
+        "decrease font",
+        "diminui a fonte",
+        "diminuir a fonte",
+        "diminui a letra",
+        "letra menor"
+      ],
+      "cap": "input.key",
+      "text": "ctrl+minus",
+      "surface": "inherit",
+      "score": 0.96
+    },
+    {
+      "phrases": [
+        "reload",
+        "refresh",
+        "recarrega",
+        "recarregar",
+        "atualiza",
+        "atualizar"
+      ],
+      "require_any": [
+        "page",
+        "browser",
+        "tab",
+        "pagina",
+        "navegador",
+        "aba",
+        "separador"
+      ],
+      "cap": "input.key",
+      "text": "ctrl+r",
+      "surface": "browser",
+      "score": 0.96
+    },
+    {
+      "phrases": [
+        "go back a page",
+        "previous page",
+        "volta uma pagina",
+        "pagina anterior"
+      ],
+      "cap": "input.key",
+      "text": "alt+Left",
+      "surface": "browser",
+      "score": 0.96
+    },
+    {
+      "phrases": [
+        "too loud",
+        "ears are",
+        "blasting",
+        "turn it down",
+        "dial it down",
+        "make it quieter",
+        "muito alto",
+        "esta muito alto",
+        "baixa isso",
+        "abaixa isso",
+        "mais silencioso"
+      ],
+      "cap": "media.control",
+      "action": "volume_down",
+      "surface": "any",
+      "score": 0.96
+    },
+    {
+      "phrases": [
+        "barely hear",
+        "cant hear",
+        "cannot hear",
+        "too quiet",
+        "turn it up",
+        "make it louder",
+        "crank the sound",
+        "crank the volume",
+        "mal consigo ouvir",
+        "nao consigo ouvir",
+        "muito baixo",
+        "aumenta isso",
+        "sobe o som"
+      ],
+      "cap": "media.control",
+      "action": "volume_up",
+      "surface": "any",
+      "score": 0.96
+    },
+    {
+      "phrases": [
+        "shush the audio",
+        "shush the sound",
+        "silencia o audio",
+        "cala o som"
+      ],
+      "cap": "media.control",
+      "action": "volume_mute",
+      "surface": "any",
+      "score": 0.96
+    },
+    {
+      "phrases": [
+        "get rid of",
+        "ditch",
+        "trash",
+        "nuke",
+        "livra te de",
+        "fecha ja",
+        "detona"
+      ],
+      "require_any": [
+        "window",
+        "tab",
+        "this",
+        "janela",
+        "aba",
+        "separador",
+        "isto"
+      ],
+      "cap": "window.control",
+      "action": "close",
+      "kind": "auto_tab_window",
+      "surface": "any",
+      "score": 0.96
+    },
+    {
+      "phrases": [
+        "banish",
+        "stash",
+        "throw",
+        "toss",
+        "atira",
+        "manda",
+        "joga"
+      ],
+      "require_any": [
+        "workspace",
+        "desktop",
+        "tag",
+        "area de trabalho",
+        "ambiente de trabalho"
+      ],
+      "cap": "workspace.move_window",
+      "surface": "any",
+      "score": 0.96
+    },
+    {
+      "phrases": [
+        "hop over",
+        "jump to",
+        "bounce to",
+        "salta para",
+        "pula para"
+      ],
+      "require_any": [
+        "workspace",
+        "desktop",
+        "tag",
+        "area de trabalho",
+        "ambiente de trabalho"
+      ],
+      "cap": "workspace.switch",
+      "surface": "any",
+      "score": 0.96
+    },
+    {
+      "phrases": [
+        "hop over",
+        "flip back",
+        "looking at before",
+        "salta para",
+        "pula para",
+        "volta para a janela",
+        "olhando antes"
+      ],
+      "cap": "window.focus_relative",
+      "relation": "other",
+      "surface": "any",
+      "score": 0.96
+    },
+    {
+      "phrases": [
+        "pop open a calculator",
+        "open a calculator",
+        "abre uma calculadora"
+      ],
+      "cap": "app.launch",
+      "text": "gnome-calculator",
+      "surface": "any",
+      "score": 0.96
+    },
+    {
+      "phrases": [
+        "throw on",
+        "im bored",
+        "i am bored",
+        "synthwave",
+        "estou entediado",
+        "poe um som"
+      ],
+      "cap": "media.play",
+      "text": "chill synthwave beats",
+      "surface": "any",
+      "score": 0.96
+    },
+    {
+      "phrases": [
+        "make this window huge",
+        "blow up this window",
+        "fill the screen",
+        "deixa esta janela gigante",
+        "ocupa o ecra todo",
+        "ocupa a tela toda"
+      ],
+      "cap": "window.control",
+      "action": "fullscreen",
+      "surface": "any",
+      "score": 0.96
+    },
+    {
+      "phrases": [
+        "stop whatever is running",
+        "kill whatever is running",
+        "abort the running command",
+        "para o que esta a correr",
+        "mata o que esta a rodar",
+        "aborta o comando"
+      ],
+      "cap": "input.key",
+      "text": "ctrl+c",
+      "surface": "any",
+      "score": 0.96
+    },
+    {
+      "phrases": [
+        "turn on",
+        "enable",
+        "activate",
+        "use",
+        "turn",
+        "liga",
+        "ligar",
+        "ativa",
+        "ativar"
+      ],
+      "require_any": [
+        "voice",
+        "tts",
+        "speech",
+        "voz",
+        "fala"
+      ],
+      "forbid_any": [
+        "off",
+        "disable",
+        "deactivate",
+        "desliga",
+        "desativa"
+      ],
+      "cap": "tts.control",
+      "action": "on",
+      "surface": "any",
+      "score": 0.98
+    },
+    {
+      "phrases": [
+        "voice on",
+        "tts on",
+        "speak to me",
+        "talk to me",
+        "voz ligada",
+        "fala comigo",
+        "conversar comigo"
+      ],
+      "cap": "tts.control",
+      "action": "on",
+      "surface": "any",
+      "score": 0.98
+    },
+    {
+      "phrases": [
+        "turn off",
+        "disable",
+        "deactivate",
+        "turn",
+        "desliga",
+        "desligar",
+        "desativa",
+        "desativar"
+      ],
+      "require_any": [
+        "voice",
+        "tts",
+        "speech",
+        "voz",
+        "fala"
+      ],
+      "cap": "tts.control",
+      "action": "off",
+      "surface": "any",
+      "score": 0.98
+    },
+    {
+      "phrases": [
+        "voice off",
+        "tts off",
+        "voz desligada"
+      ],
+      "cap": "tts.control",
+      "action": "off",
+      "surface": "any",
+      "score": 0.98
+    }
+  ],
+  "react_rules": [
+    {
+      "kind": "open_obs_file",
+      "turn": 1,
+      "obs_op": "inspect_terminal",
+      "phrases": [
+        "open",
+        "abre",
+        "abrir"
+      ],
+      "require_any": [
+        "file",
+        "neovim",
+        "vim",
+        "ficheiro",
+        "arquivo"
+      ],
+      "line_triggers": [
+        "line",
+        "crashed",
+        "failed",
+        "linha",
+        "falhou",
+        "erro"
+      ]
+    },
+    {
+      "kind": "answer_obs",
+      "turn": 1,
+      "obs_op": "inspect_terminal"
+    },
+    {
+      "kind": "open_obs_url",
+      "turn": 1,
+      "obs_op": "inspect_browser",
+      "phrases": [
+        "open",
+        "follow",
+        "click",
+        "go to",
+        "abre",
+        "abrir",
+        "segue",
+        "seguir",
+        "clica",
+        "vai para"
+      ],
+      "require_any": [
+        "link",
+        "docs",
+        "architecture",
+        "url",
+        "ligacao",
+        "documentacao",
+        "arquitetura"
+      ],
+      "arg": "https://tty.pt/docs/architecture"
+    },
+    {
+      "kind": "search_obs_topic",
+      "turn": 1,
+      "obs_op": "inspect_browser",
+      "phrases": [
+        "search",
+        "look up",
+        "google",
+        "pesquisa",
+        "procura"
+      ],
+      "arg": "auren-node-07 cluster node"
+    },
+    {
+      "kind": "answer_obs",
+      "turn": 1,
+      "obs_op": "inspect_browser"
+    },
+    {
+      "kind": "open_obs_url",
+      "turn": 1,
+      "obs_op": "inspect_clipboard",
+      "arg": "https://news.ycombinator.com"
+    },
+    {
+      "kind": "answer_obs",
+      "turn": 1,
+      "obs_op": "inspect_system"
+    },
+    {
+      "kind": "open_context_file",
+      "turn": 0,
+      "phrases": [
+        "open that file",
+        "that file",
+        "failing file",
+        "file mentioned",
+        "open the file",
+        "abre esse ficheiro",
+        "abre esse arquivo",
+        "esse ficheiro",
+        "esse arquivo",
+        "ficheiro que falhou",
+        "arquivo que falhou",
+        "abre o ficheiro",
+        "abre o arquivo"
+      ],
+      "line_triggers": [
+        "line",
+        "where",
+        "crashed",
+        "failing",
+        "linha",
+        "onde",
+        "falhou",
+        "erro"
+      ],
+      "arg": "src/audio.c"
+    },
+    {
+      "kind": "inspect_terminal",
+      "turn": 0,
+      "phrases": [
+        "compiler error",
+        "error in my terminal",
+        "terminal screen",
+        "on the terminal",
+        "in the other terminal",
+        "other terminal",
+        "terminal",
+        "erro de compilacao",
+        "erro no meu terminal",
+        "ecra do terminal",
+        "tela do terminal",
+        "no terminal",
+        "no outro terminal",
+        "outro terminal"
+      ],
+      "require_any": [
+        "compiler error",
+        "error in my terminal",
+        "terminal screen",
+        "on the terminal",
+        "in the other terminal",
+        "other terminal",
+        "error",
+        "failed",
+        "say",
+        "says",
+        "output",
+        "what",
+        "whats",
+        "read",
+        "erro de compilacao",
+        "erro no meu terminal",
+        "ecra do terminal",
+        "tela do terminal",
+        "no outro terminal",
+        "outro terminal",
+        "erro",
+        "falhou",
+        "diz",
+        "saida",
+        "o que",
+        "qual",
+        "le"
+      ],
+      "forbid_any": [
+        "open that file",
+        "open the file",
+        "abre esse ficheiro",
+        "abre o ficheiro",
+        "abre esse arquivo",
+        "abre o arquivo"
+      ]
+    },
+    {
+      "kind": "inspect_clipboard",
+      "turn": 0,
+      "phrases": [
+        "clipboard",
+        "highlighted",
+        "selected",
+        "area de transferencia",
+        "selecionado",
+        "copiado"
+      ]
+    },
+    {
+      "kind": "open_browser_url",
+      "turn": 0,
+      "phrases": [
+        "open",
+        "follow",
+        "click",
+        "go to",
+        "abre",
+        "abrir",
+        "segue",
+        "seguir",
+        "clica",
+        "vai para"
+      ],
+      "require_any": [
+        "link on",
+        "link in",
+        "architecture docs",
+        "on that page",
+        "on the page",
+        "link na",
+        "link da",
+        "nessa pagina",
+        "na pagina",
+        "dessa pagina"
+      ]
+    },
+    {
+      "kind": "inspect_browser",
+      "turn": 0,
+      "phrases": [
+        "web page",
+        "webpage",
+        "browser page",
+        "on the page",
+        "on that page",
+        "in the browser",
+        "on my browser",
+        "read the page",
+        "heading",
+        "article",
+        "link on",
+        "button on",
+        "page",
+        "browser",
+        "firefox",
+        "tab",
+        "tabs",
+        "pagina web",
+        "pagina do navegador",
+        "na pagina",
+        "nessa pagina",
+        "dessa pagina",
+        "no navegador",
+        "no meu navegador",
+        "le a pagina",
+        "artigo",
+        "aba",
+        "abas",
+        "separadores"
+      ],
+      "require_any": [
+        "web page",
+        "webpage",
+        "browser page",
+        "on the page",
+        "on that page",
+        "in the browser",
+        "on my browser",
+        "read the page",
+        "heading",
+        "article",
+        "link on",
+        "button on",
+        "what",
+        "whats",
+        "summarize",
+        "pagina web",
+        "pagina do navegador",
+        "na pagina",
+        "nessa pagina",
+        "dessa pagina",
+        "no navegador",
+        "no meu navegador",
+        "le a pagina",
+        "artigo",
+        "o que",
+        "quais",
+        "resume"
+      ],
+      "forbid_any": [
+        "reload",
+        "refresh",
+        "zoom",
+        "get rid of",
+        "go back a page",
+        "previous page",
+        "recarrega",
+        "atualiza",
+        "livra te de",
+        "volta uma pagina"
+      ]
+    },
+    {
+      "kind": "remember_workflow",
+      "turn": 0,
+      "phrases": [
+        "remember",
+        "lembra",
+        "lembra te",
+        "memoriza"
+      ],
+      "require_any": [
+        "preference",
+        "workflow",
+        "habit",
+        "preferencia",
+        "fluxo de trabalho",
+        "habito"
+      ]
+    },
+    {
+      "kind": "undo_workspace",
+      "turn": 0,
+      "phrases": [
+        "bring it back",
+        "pull back",
+        "traz de volta",
+        "puxa de volta"
+      ],
+      "op": "workspace_move_window"
+    },
+    {
+      "kind": "undo_workspace",
+      "turn": 0,
+      "phrases": [
+        "nevermind",
+        "never mind",
+        "undo",
+        "esquece",
+        "desfaz",
+        "desfazer"
+      ]
+    },
+    {
+      "kind": "correct_workspace",
+      "turn": 0,
+      "phrases": [
+        "actually",
+        "instead",
+        "wait",
+        "na verdade",
+        "em vez disso",
+        "espera"
+      ],
+      "require_any": [
+        "move",
+        "move it",
+        "move para",
+        "mover"
+      ],
+      "op": "workspace_move_window"
+    },
+    {
+      "kind": "correct_workspace",
+      "turn": 0,
+      "phrases": [
+        "actually",
+        "instead",
+        "wait",
+        "na verdade",
+        "em vez disso",
+        "espera"
+      ],
+      "require_any": [
+        "switch",
+        "go to",
+        "muda",
+        "vai para"
+      ],
+      "op": "workspace_switch"
+    },
+    {
+      "kind": "correct_workspace",
+      "turn": 0,
+      "phrases": [
+        "actually",
+        "instead",
+        "wait",
+        "na verdade",
+        "em vez disso",
+        "espera"
+      ]
+    },
+    {
+      "kind": "replay_command",
+      "turn": 0,
+      "phrases": [
+        "run that again",
+        "run it again",
+        "run that command again",
+        "that again",
+        "repeat that",
+        "do that again",
+        "do the same",
+        "same thing",
+        "roda isso de novo",
+        "executa isso de novo",
+        "repete isso",
+        "repete esse comando",
+        "faz isso de novo",
+        "a mesma coisa"
+      ],
+      "command": "make test-fast"
+    },
+    {
+      "kind": "shell_command",
+      "turn": 0,
+      "phrases": [
+        "ssh"
+      ],
+      "command": "ssh tty.pt 'df -h'"
+    },
+    {
+      "kind": "shell_command",
+      "turn": 0,
+      "phrases": [
+        "how much memory",
+        "memory left",
+        "quanta memoria",
+        "memoria livre"
+      ],
+      "command": "free -h"
+    },
+    {
+      "kind": "shell_command",
+      "turn": 0,
+      "phrases": [
+        "hogging port",
+        "port 8080",
+        "porta 8080"
+      ],
+      "command": "lsof -i :8080"
+    },
+    {
+      "kind": "shell_command",
+      "turn": 0,
+      "phrases": [
+        "lines of c code",
+        "count how many lines",
+        "linhas de codigo c",
+        "conta quantas linhas"
+      ],
+      "command": "find . -name '*.c' | xargs wc -l"
+    },
+    {
+      "kind": "shell_command",
+      "turn": 0,
+      "phrases": [
+        "last 15 lines",
+        "auren server log",
+        "ultimas 15 linhas",
+        "log do servidor auren"
+      ],
+      "command": "tail -n 15 /var/log/auren.log"
+    },
+    {
+      "kind": "shell_command",
+      "turn": 0,
+      "phrases": [
+        "gitconfig"
+      ],
+      "require_any": [
+        "edit",
+        "neovim",
+        "vim",
+        "edita",
+        "editar"
+      ],
+      "command": "nvim ~/.gitconfig"
+    },
+    {
+      "kind": "shell_command",
+      "turn": 0,
+      "phrases": [
+        "make test",
+        "test fast"
+      ],
+      "command": "make test-fast"
+    },
+    {
+      "kind": "shell_command",
+      "turn": 0,
+      "phrases": [
+        "ping",
+        "reachable",
+        "acessivel"
+      ],
+      "command": "ping -c 3 google.com"
+    },
+    {
+      "kind": "shell_command",
+      "turn": 0,
+      "phrases": [
+        "compress",
+        "tar gz",
+        "comprime",
+        "comprimir"
+      ],
+      "command": "tar -czf logs.tar.gz logs"
+    },
+    {
+      "kind": "inspect_system",
+      "turn": 0,
+      "phrases": [
+        "eating",
+        "hogging",
+        "how much",
+        "what",
+        "whats",
+        "check",
+        "inspect",
+        "consumindo",
+        "usando",
+        "quanto",
+        "o que",
+        "verifica",
+        "inspeciona"
+      ],
+      "require_any": [
+        "disk",
+        "storage",
+        "disco",
+        "armazenamento"
+      ],
+      "arg": "disk"
+    },
+    {
+      "kind": "inspect_system",
+      "turn": 0,
+      "phrases": [
+        "eating",
+        "hogging",
+        "how much",
+        "what",
+        "whats",
+        "check",
+        "inspect",
+        "consumindo",
+        "usando",
+        "quanto",
+        "o que",
+        "verifica",
+        "inspeciona"
+      ],
+      "require_any": [
+        "ram",
+        "memory",
+        "cpu",
+        "memoria",
+        "processador"
+      ],
+      "arg": "memory"
+    },
+    {
+      "kind": "answer_time",
+      "turn": 0,
+      "phrases": [
+        "what time",
+        "current time",
+        "what date",
+        "todays date",
+        "what day is",
+        "que horas",
+        "hora atual",
+        "que dia e",
+        "data de hoje"
+      ]
+    },
+    {
+      "kind": "answer_cwd",
+      "turn": 0,
+      "phrases": [
+        "what directory",
+        "working in",
+        "que diretorio",
+        "em que pasta",
+        "trabalhando agora"
+      ],
+      "arg": "/home/quirinpa/site"
+    },
+    {
+      "kind": "wm_help",
+      "turn": 0,
+      "phrases": [
+        "what shortcut",
+        "split or tile",
+        "qual atalho",
+        "dividir janelas"
+      ],
+      "arg": "split or tile windows in dwm"
+    }
+  ],
+  "version": "3.0-universal",
+  "description": "Jarvis Universal Semantic Ontology & Capability Graph. 100% configuration-driven language & intent compilation.",
+  "lang": "en",
+  "lang_name": "English",
+  "whisper_wake_prompt": "Jarvis, open terminal. Jarvis, switch to the other window. Jarvis, play music. Jarvis, search the web.",
+  "whisper_cmd_prompt": "open terminal, focus the other window, focus browser, close window, workspace 1, workspace 2, search on google, open youtube, type hello, press enter, scroll down, volume up, volume down, mute, play music, pause, next track, system status, list files, git status, what is on my terminal, stop.",
+  "ui_strings": {
+    "listening": "Listening...",
+    "say_command": "Say your command",
+    "thinking": "Thinking...",
+    "done": "Done",
+    "no_speech": "No speech detected",
+    "unrecognized": "Could not recognize speech",
+    "stopped_speaking": "Stopped speaking",
+    "confirm_yes": "Yes, execute",
+    "confirm_no": "No, cancel",
+    "confirm_prompt": "Confirm"
+  },
+  "reply_templates": {
+    "tts_interrupt": "",
+    "answer_question": "${args.answer}",
+    "tts_control": "${output}",
+    "open_terminal": "Opening terminal.",
+    "open_application": "Opening ${target.identifier}.",
+    "focus_relative_window": "Switching window.",
+    "focus_window": "Focusing ${target.identifier}.",
+    "window_close": "Closing window.",
+    "window_fullscreen": "Toggling fullscreen.",
+    "window_float": "Toggling floating mode.",
+    "workspace_switch": "Workspace ${args.workspace}.",
+    "workspace_move_window": "Moving to workspace ${args.workspace}.",
+    "open_url": "Opening page.",
+    "search_web": "Searching ${target.query}.",
+    "media_play": "Playing ${target.query}.",
+    "media_play_empty": "Resuming playback.",
+    "media_pause": "Paused.",
+    "media_next": "Next track.",
+    "media_prev": "Previous track.",
+    "media_volume": "Adjusting volume.",
+    "spawn_shell_command": "Running command.",
+    "type_text": "Typed.",
+    "type_and_enter": "Typed.",
+    "press_key": "Done.",
+    "scroll": "",
+    "click": "Clicked.",
+    "wait": "",
+    "wm_help": "${output}",
+    "ask_agent": "Sent to agent.",
+    "record_start": "Recording started.",
+    "record_stop": "Recording stopped.",
+    "error": "Could not complete that action.",
+    "default": "Done."
+  }
 }

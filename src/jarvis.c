@@ -178,29 +178,57 @@ static void autoload_xylem_modules(const char *wm)
 	}
 }
 
-static void build_prompt_candidates(char *out, size_t out_sz)
+static void build_prompt_candidates(const char *fs_path, char *out, size_t out_sz)
 {
-	static const char *const defaults[] = {
-		"open a new terminal                   ▸ open_terminal",
-		"switch to workspace 2                 ▸ workspace_switch",
-		"move this window to workspace 3       ▸ workspace_move_window",
-		"go to the other window                ▸ focus_relative_window",
-		"play some lofi jazz music             ▸ media_play",
-		"pause the music                       ▸ media_pause",
-		"turn up the volume                    ▸ media_volume",
-		"show git status                       ▸ spawn_shell_command",
-		"show me my agenda for today           ▸ open_application",
-		"open system monitor                   ▸ open_application",
-		"open wifi settings                    ▸ open_application",
-		"what directory am I working in?       ▸ answer_question",
-		NULL
-	};
 	out[0] = '\0';
-	size_t pos = 0;
-	for (size_t i = 0; defaults[i]; i++) {
-		pos += (size_t)snprintf(out + pos, pos < out_sz ? out_sz - pos : 0,
-		                        "%s%s", i ? "\n" : "", defaults[i]);
+	if (!fs_path || !*fs_path) return;
+	FILE *fp = fopen(fs_path, "rb");
+	if (!fp) return;
+	fseek(fp, 0, SEEK_END);
+	long sz = ftell(fp);
+	fseek(fp, 0, SEEK_SET);
+	if (sz <= 0 || sz > 256 * 1024) {
+		fclose(fp);
+		return;
 	}
+	char *buf = (char *)malloc((size_t)sz + 1);
+	if (!buf) {
+		fclose(fp);
+		return;
+	}
+	size_t rd = fread(buf, 1, (size_t)sz, fp);
+	buf[rd] = '\0';
+	fclose(fp);
+
+	size_t pos = 0;
+	size_t count = 0;
+	const char *p = buf;
+	while ((p = strstr(p, "\"utterance\"")) != NULL && count < 16) {
+		p = strchr(p + 11, '"');
+		if (!p) break;
+		p++;
+		const char *u_end = strchr(p, '"');
+		if (!u_end) break;
+		size_t u_len = (size_t)(u_end - p);
+		const char *op_p = strstr(u_end, "\"op\"");
+		if (!op_p) break;
+		op_p = strchr(op_p + 4, '"');
+		if (!op_p) break;
+		op_p++;
+		const char *op_end = strchr(op_p, '"');
+		if (!op_end) break;
+		size_t op_len = (size_t)(op_end - op_p);
+		if (u_len > 0 && u_len < 120 && op_len > 0 && op_len < 64) {
+			pos += (size_t)snprintf(out + pos, pos < out_sz ? out_sz - pos : 0,
+			                        "%s%-38.*s ▸ %.*s",
+			                        count ? "\n" : "",
+			                        (int)u_len, p,
+			                        (int)op_len, op_p);
+			count++;
+		}
+		p = op_end + 1;
+	}
+	free(buf);
 }
 
 int main(int argc, char **argv)
@@ -338,12 +366,12 @@ int main(int argc, char **argv)
 			return 0;
 		}
 		if (strcmp(subcmd, "warmup") == 0) {
-			cfg.dry_run = true;
-			quiet = true;
-			snprintf(utterance, sizeof(utterance), "switch to workspace 1");
+			jarvis_engine_t *w_eng = jarvis_engine_create(&cfg);
+			jarvis_engine_destroy(w_eng);
+			return 0;
 		} else if (strcmp(subcmd, "dmenu") == 0 || strcmp(subcmd, "omni") == 0) {
 			char candidates[4096];
-			build_prompt_candidates(candidates, sizeof(candidates));
+			build_prompt_candidates(fs_path, candidates, sizeof(candidates));
 			char selection[512] = {0};
 			if (jarvis_xy_prompt(" Jarvis:", candidates, selection, sizeof(selection)) <= 0 || !selection[0]) {
 				return 0;

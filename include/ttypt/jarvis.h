@@ -129,6 +129,15 @@ jarvis_ontology_t *jarvis_ontology_create_from_json(const char *json_str);
  */
 void jarvis_ontology_destroy(jarvis_ontology_t *ont);
 
+bool jarvis_ontology_is_tts_interrupt(const jarvis_ontology_t *ont, const char *cleaned_text);
+const char *jarvis_ontology_get_wake_word(const jarvis_ontology_t *ont);
+const char *jarvis_ontology_get_lang(const jarvis_ontology_t *ont);
+const char *jarvis_ontology_get_lang_name(const jarvis_ontology_t *ont);
+const char *jarvis_ontology_get_wake_prompt(const jarvis_ontology_t *ont);
+const char *jarvis_ontology_get_cmd_prompt(const jarvis_ontology_t *ont);
+const char *jarvis_ontology_get_ui_string(const jarvis_ontology_t *ont, const char *key, const char *fallback);
+const char *jarvis_ontology_get_reply_template(const jarvis_ontology_t *ont, const char *key);
+
 /**
  * @brief Vocabulary-driven ASR post-processor.
  *
@@ -171,6 +180,15 @@ bool jarvis_compile_ir_to_dsl(
 	const jarvis_context_t *ctx,
 	const jarvis_world_t   *world,
 	jarvis_dsl_t           *out_dsl
+);
+
+bool jarvis_compile_ir_to_dsl_ex(
+	const jarvis_ontology_t *ont,
+	const jarvis_ir_t       *ir,
+	const char              *active_surface,
+	const jarvis_context_t  *ctx,
+	const jarvis_world_t    *world,
+	jarvis_dsl_t            *out_dsl
 );
 
 /* ---------------------------------------------------------------------------
@@ -268,6 +286,11 @@ jarvis_engine_t *jarvis_engine_create(const jarvis_config_t *cfg);
 void jarvis_engine_destroy(jarvis_engine_t *eng);
 
 /**
+ * @brief Get the active SemanticOntology instance owned by @p eng.
+ */
+const jarvis_ontology_t *jarvis_engine_get_ontology(const jarvis_engine_t *eng);
+
+/**
  * @brief Split a compound utterance into atomic clauses while protecting
  *        `"and press enter"`, `"screen and audio"`, and dictation spans.
  *
@@ -363,6 +386,35 @@ bool jarvis_voice_extract_wake_command(
 	const char *wake_word,
 	char       *out_command,
 	size_t      out_sz
+);
+
+/**
+ * @brief Match wake word (and ontology polite prefixes / wake_variants) at prefix or anywhere.
+ *
+ * @return 0 = no match, 1 = wake word only, 2 = wake word + trailing command in @p out_cmd.
+ */
+int jarvis_voice_match_wake(
+	const jarvis_ontology_t *ont,
+	const char              *text,
+	const char              *custom_wake_word,
+	bool                     allow_anywhere,
+	char                    *out_cmd,
+	size_t                   out_sz
+);
+
+/**
+ * @brief Check if a transcribed string is a known Whisper non-speech hallucination.
+ */
+bool jarvis_is_non_speech_hallucination(const char *text);
+
+/**
+ * @brief Format a natural spoken reply from ontology `reply_templates` and @p res.
+ */
+void jarvis_format_voice_reply(
+	const jarvis_ontology_t       *ont,
+	const jarvis_process_result_t *res,
+	char                          *out,
+	size_t                         out_sz
 );
 
 /**

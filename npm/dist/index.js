@@ -1,13 +1,8 @@
+import fs from "node:fs";
 import { loadWasmModule, loadNativeAddon, getSubstrate } from "@tty-pt/stele";
 
 const nativeBinding = loadNativeAddon(import.meta.url, "jarvis");
 let wasmInstance = null;
-
-export function getJarvisWasm() {
-  if (wasmInstance) return wasmInstance;
-  wasmInstance = loadWasmModule(new URL("./jarvis.wasm", import.meta.url));
-  return wasmInstance;
-}
 
 function allocUtf8(wasm, str) {
   const bytes = new TextEncoder().encode(str || "");
@@ -16,6 +11,38 @@ function allocUtf8(wasm, str) {
   mem.set(bytes, ptr);
   mem[ptr + bytes.length] = 0;
   return ptr;
+}
+
+export function loadOntologyJson(jsonStr) {
+  const wasm = getJarvisWasm();
+  if (!wasm.exports.jarvis_wasm_load_ontology_json) return false;
+  const jPtr = allocUtf8(wasm, String(jsonStr || ""));
+  const ok = wasm.exports.jarvis_wasm_load_ontology_json(jPtr) !== 0;
+  wasm.exports.free(jPtr);
+  return ok;
+}
+
+export function getJarvisWasm() {
+  if (wasmInstance) return wasmInstance;
+  wasmInstance = loadWasmModule(new URL("./jarvis.wasm", import.meta.url));
+  if (wasmInstance && wasmInstance.exports.jarvis_wasm_load_ontology_json) {
+    try {
+      const candidates = [
+        new URL("../../data/ontology.json", import.meta.url),
+        new URL("../data/ontology.json", import.meta.url)
+      ];
+      for (const u of candidates) {
+        if (fs.existsSync(u)) {
+          const jsonStr = fs.readFileSync(u, "utf8");
+          const jPtr = allocUtf8(wasmInstance, jsonStr);
+          wasmInstance.exports.jarvis_wasm_load_ontology_json(jPtr);
+          wasmInstance.exports.free(jPtr);
+          break;
+        }
+      }
+    } catch (_) {}
+  }
+  return wasmInstance;
 }
 
 function readUtf8(ptr, maxLen = 65536) {
