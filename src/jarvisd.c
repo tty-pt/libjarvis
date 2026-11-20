@@ -912,14 +912,37 @@ normalize_pcm_agc(const float *pcm, int n_samples)
 		sum_sq += (double)y * (double)y;
 	}
 
-	double rms = sqrt(sum_sq / (double)n_samples);
+	/* Measure active-speech RMS on 20ms frames (320 samples) whose energy is at
+	 * least -22 dB relative to peak (or > 0.015), so leading/trailing silence frames
+	 * never underestimate speech RMS and cause over-gain clipping of consonants.
+	 */
+	double total_rms = sqrt(sum_sq / (double)n_samples);
+	double active_sq = 0.0;
+	int active_n = 0;
+	float frame_thresh = peak * 0.08f;
+	if (frame_thresh < 0.008f)
+		frame_thresh = 0.008f;
+	for (int base = 0; base + 320 <= n_samples; base += 320) {
+		double f_sq = 0.0;
+		for (int k = 0; k < 320; k++) {
+			float v = buf[base + k];
+			f_sq += (double)v * (double)v;
+		}
+		double f_rms = sqrt(f_sq / 320.0);
+		if (f_rms >= (double)frame_thresh) {
+			active_sq += f_sq;
+			active_n += 320;
+		}
+	}
+	double rms = (active_n >= 1600) ? sqrt(active_sq / (double)active_n) : total_rms;
+
 	/* Only apply boost if signal contains genuine acoustic energy above silence floor */
-	if (peak > 0.008f && rms > 0.0015) {
-		float gain_peak = 0.707f / peak;
+	if (peak > 0.010f && rms > 0.0020) {
+		float gain_peak = 0.78f / peak;
 		float gain_rms = (float)(0.11 / rms);
 		float gain = (gain_rms < gain_peak) ? gain_rms : gain_peak;
-		if (gain > 8.0f)
-			gain = 8.0f;
+		if (gain > 5.0f)
+			gain = 5.0f;
 		if (gain < 0.85f)
 			gain = 0.85f;
 		if (fabsf(gain - 1.0f) > 0.05f) {
@@ -1096,7 +1119,8 @@ run_whisper_slice(struct whisper_context *ctx, int n_threads, const float *pcm, 
 			max_tok = cap;
 	}
 
-	struct whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+	struct whisper_full_params wparams = whisper_full_default_params(
+		(is_wake || is_partial) ? WHISPER_SAMPLING_GREEDY : WHISPER_SAMPLING_BEAM_SEARCH);
 	wparams.n_threads        = n_threads;
 	wparams.single_segment   = true;
 	wparams.no_context       = true;
@@ -1105,7 +1129,11 @@ run_whisper_slice(struct whisper_context *ctx, int n_threads, const float *pcm, 
 	wparams.suppress_nst     = true;
 	wparams.temperature      = 0.0f;
 	wparams.temperature_inc  = (is_wake || is_partial) ? 0.0f : 0.2f;
-	wparams.greedy.best_of   = (is_wake || is_partial) ? 1 : 3;
+	if (is_wake || is_partial) {
+		wparams.greedy.best_of = 1;
+	} else {
+		wparams.beam_search.beam_size = 3;
+	}
 	wparams.max_tokens       = max_tok;
 	wparams.audio_ctx        = compute_audio_ctx(n_samples, is_wake, is_partial);
 
@@ -2151,16 +2179,16 @@ handle_jarvis_wait(int srv, int cli, struct whisper_context *ctx_wake, int n_thr
 
 			/* 1. Pause wake check: user spoke "Jarvis" (or "Jarvis <cmd>") and paused >= 160ms (8 frames)
 			 *    after at least 10 voiced frames (200ms) or >= 240ms silence after shorter speech.
-			 * 2. Continuous wake check: user has spoken continuously for >= 24 voiced frames (480ms)
-			 *    without pausing (and repeats every 24 new voiced frames), with no upper utter_f cap
-			 *    so ongoing background phone/TV audio never creates a wake-word blind spot.
+			 * 2. Continuous wake check: user has spoken continuously for >= 18 voiced frames (360ms)
+			 *    without pausing (and repeats every 18 new voiced frames), so the indicator turns RED
+			 *    immediately during a one-shot "<wake> <command>" utterance!
 			 */
 			int pause_wake_check = (((silence_frames >= 8 && voiced_frames >= 10) ||
 			                         (silence_frames >= 12 && voiced_frames >= 5)) &&
 			                        last_voiced_f > decoded_wake_voiced_f);
-			int cont_wake_check  = (voiced_frames >= 24 && silence_frames < 8 &&
+			int cont_wake_check  = (voiced_frames >= 18 && silence_frames < 8 &&
 			                        (decoded_wake_voiced_f < 0 ||
-			                         (last_voiced_f - decoded_wake_voiced_f) >= 24));
+			                         (last_voiced_f - decoded_wake_voiced_f) >= 18));
 
 			if (pause_wake_check || cont_wake_check) {
 				int64_t end_f = cont_wake_check ? (last_voiced_f + 4) : (last_voiced_f + 6);
@@ -2202,12 +2230,13 @@ handle_jarvis_wait(int srv, int cli, struct whisper_context *ctx_wake, int n_thr
 					int64_t cur_tf = g_audio.total_frames;
 					double chk_keep_db = calc_vad_keep_db(utter_amb_avg, utter_amb_std,
 					                                      utter_start_db, peak_speech_db);
+					double speech_cont_db = (peak_speech_db - 9.0 > chk_keep_db) ? (peak_speech_db - 9.0) : chk_keep_db;
 					int v_during = 0;
 					for (int64_t f = end_f; f < cur_tf; f++) {
-						if (g_audio.db[f % RING_FRAMES] >= chk_keep_db)
+						if (g_audio.db[f % RING_FRAMES] >= speech_cont_db)
 							v_during++;
 					}
-					if (v_during >= 2)
+					if (v_during >= 3)
 						spoke_during_decode = 1;
 					pthread_mutex_unlock(&g_audio.mtx);
 
@@ -2551,9 +2580,9 @@ read_jarvis_runtime_cfg(char *lang, size_t lang_sz,
 	const char *def_lang = (ont_lang && *ont_lang) ? ont_lang : "pt";
 
 	jarvis_rc_get("lang", def_lang, lang, lang_sz);
-	*out_followup_ms = jarvis_rc_get_int("followup_ms", 8000);
+	*out_followup_ms = jarvis_rc_get_int("followup_ms", 0);
 	if (*out_followup_ms < 0 || *out_followup_ms > 3600000)
-		*out_followup_ms = 8000;
+		*out_followup_ms = 0;
 	jarvis_rc_get("llm_mode", "auto", llm_mode, mode_sz);
 }
 
@@ -2743,14 +2772,22 @@ run_inprocess_jarvis_turn(int srv, struct whisper_context *ctx_wake, int n_threa
 
 		if (jarvis_voice_is_lockdown_phrase(cmd_text)) {
 			jarvis_set_active(0);
-			jarvis_xy_notify(jarvis_ontology_get_ui_string(get_daemon_ont(), "lockdown_title", "  Jarbas Bloqueio"),
-			                 jarvis_ontology_get_ui_string(get_daemon_ont(), "lockdown_body", "Escuta contínua desativada. A bloquear o ecrã."), 0);
-			char lock_cmd[256];
-			jarvis_rc_get("lock_cmd", "slock", lock_cmd, sizeof(lock_cmd));
-			if (lock_cmd[0] && fork() == 0) {
-				setsid();
-				execl("/bin/sh", "sh", "-c", lock_cmd, (char *)NULL);
-				_exit(0);
+			char clean_ld[256];
+			jarvis_clean_phrase(cmd_text, clean_ld, sizeof(clean_ld));
+			int want_screen_lock = (strstr(clean_ld, "lock") != NULL ||
+			                        strstr(clean_ld, "bloque") != NULL);
+			if (want_screen_lock) {
+				jarvis_xy_notify(jarvis_ontology_get_ui_string(get_daemon_ont(), "lockdown_title", "  Jarbas Bloqueio"),
+				                 jarvis_ontology_get_ui_string(get_daemon_ont(), "lockdown_body", "Escuta contínua desativada. A bloquear o ecrã."), 0);
+				char lock_cmd[256];
+				jarvis_rc_get("lock_cmd", "slock", lock_cmd, sizeof(lock_cmd));
+				if (lock_cmd[0] && fork() == 0) {
+					setsid();
+					execl("/bin/sh", "sh", "-c", lock_cmd, (char *)NULL);
+					_exit(0);
+				}
+			} else {
+				jarvis_xy_notify("  Jarbas Desligado", "Escuta contínua desativada.", 0);
 			}
 			return;
 		}
@@ -3129,9 +3166,9 @@ resolve_default_whisper_models(char *main_out, size_t main_sz, char *wake_out, s
 
 	if (!jarvis_rc_get("whisper_model", NULL, main_out, main_sz) || !main_out[0] || access(main_out, R_OK) != 0) {
 		static const char *const main_cands[] = {
-			"ggml-base-q8_0.bin",
 			"ggml-small-q8_0.bin",
 			"ggml-small-q5_1.bin",
+			"ggml-base-q8_0.bin",
 			"ggml-base-q5_1.bin",
 			"ggml-base.bin",
 			"ggml-base.en-q8_0.bin",

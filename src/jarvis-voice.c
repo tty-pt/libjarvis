@@ -363,11 +363,31 @@ bool jarvis_voice_is_lockdown_phrase(const char *phrase)
 	if (!phrase) return false;
 	char clean[JARVIS_STR_LEN];
 	jarvis_clean_phrase(phrase, clean, sizeof(clean));
+	if (!clean[0]) return false;
 
 	const jarvis_ontology_t *ont = jarvis_voice_default_ontology();
 	if (!ont) return false;
-	for (size_t i = 0; i < ont->lockdown_phrase_count; i++) {
-		if (strcmp(clean, ont->lockdown_phrases[i]) == 0) return true;
+
+	/* Also normalize ASR polite tails and wake prefixes before matching */
+	char norm[JARVIS_STR_LEN], stripped[JARVIS_STR_LEN];
+	jarvis_ontology_normalize_asr(ont, NULL, clean, norm, sizeof(norm));
+	stripped[0] = '\0';
+	if (jarvis_voice_match_wake(ont, norm[0] ? norm : clean, NULL, false, stripped, sizeof(stripped)) != 2) {
+		stripped[0] = '\0';
+	}
+	const char *cands[3] = { clean, norm[0] ? norm : clean, stripped[0] ? stripped : clean };
+
+	for (int c = 0; c < 3; c++) {
+		const char *p = cands[c];
+		for (size_t i = 0; i < ont->lockdown_phrase_count; i++) {
+			const char *lp = ont->lockdown_phrases[i];
+			if (!lp[0]) continue;
+			if (strcmp(p, lp) == 0) return true;
+			if (strlen(p) >= 6 && strlen(lp) >= 6 &&
+			    jarvis_token_similarity(p, lp) >= 0.86) {
+				return true;
+			}
+		}
 	}
 	return false;
 }

@@ -4492,8 +4492,8 @@
   "description": "Jarvis Universal Semantic Ontology & Capability Graph. 100% configuration-driven language & intent compilation.",
   "lang": "pt",
   "lang_name": "European Portuguese (pt-PT)",
-  "whisper_wake_prompt": "Jarbas, abrir terminal. Jarbas, mudar para a outra janela. Jarbas, tocar música. Jarbas, pesquisar na web.",
-  "whisper_cmd_prompt": "Jarbas, calculadora, terminal, navegador, Firefox, janela, área de trabalho, espaço, volume, música, ficheiros, diretório, pesquisar.",
+  "whisper_wake_prompt": "Jarbas, abrir terminal. Jarbas, abrir a calculadora. Jarbas, mudar para a outra janela. Jarbas, meter música.",
+  "whisper_cmd_prompt": "Jarbas, abre a calculadora, abre o terminal, abre o Firefox, muda para a outra janela, fecha a janela, espaço de trabalho, mete uma música, aumenta o volume, baixa o volume, pesquisa na web.",
   "ui_strings": {
     "listening": "A ouvir...",
     "say_command": "Diga o seu comando agora.",
