@@ -752,7 +752,7 @@ jarvis_engine_t *jarvis_engine_create(const jarvis_config_t *cfg)
 	const char *env_m = getenv("JARVIS_LLM_MODEL");
 	snprintf(eng->llm_model, sizeof(eng->llm_model), "%s",
 	         (cfg->llm_model && *cfg->llm_model) ? cfg->llm_model :
-	         ((env_m && *env_m) ? env_m : "kilo-auto/free"));
+	         ((env_m && *env_m) ? env_m : "fast"));
 	eng->infer_mode = cfg->infer_mode;
 	eng->dry_run    = cfg->dry_run;
 
@@ -1945,9 +1945,11 @@ bool jarvis_auren_run_react_agent(
 			jjson_escape_str(SYS_PROMPT, esc_sys, sizeof(esc_sys));
 			jjson_escape_str(user_msg0, esc_u0, sizeof(esc_u0));
 
-			const char *models[3] = {eng->llm_model, "kilo-auto/free", "fast"};
+			const char *models[3] = {eng->llm_model, "fast", "kilo-auto/free"};
 
 			for (int mi = 0; mi < 3 && !llm_content[0]; mi++) {
+				if (mi > 0 && strcmp(models[mi], models[mi - 1]) == 0)
+					continue;
 				char req_body[32768];
 				int rpos = snprintf(
 					req_body, sizeof(req_body),
