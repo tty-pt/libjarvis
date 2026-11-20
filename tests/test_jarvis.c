@@ -394,6 +394,12 @@ static void test_06_voice_vad_wake_and_streaming_tts(void)
 	assert(strcmp(cmd, "switch to workspace 3") == 0);
 	assert(jarvis_voice_extract_wake_command("Hey Jarviz, open firefox", "jarvis", cmd, sizeof(cmd)));
 	assert(strcmp(cmd, "open firefox") == 0);
+	assert(jarvis_voice_extract_wake_command("Computer, open a terminal", "computer", cmd, sizeof(cmd)));
+	assert(strcmp(cmd, "open a terminal") == 0);
+	assert(jarvis_voice_extract_wake_command("Komputer, close window", "computer", cmd, sizeof(cmd)));
+	assert(strcmp(cmd, "close window") == 0);
+	assert(!jarvis_voice_extract_wake_command("Jarvis, open firefox", "computer", cmd, sizeof(cmd)));
+	assert(!jarvis_voice_extract_wake_command("Jarbas, abre um terminal", "computer", cmd, sizeof(cmd)));
 	assert(jarvis_voice_is_lockdown_phrase("Jarvis, lockdown"));
 	assert(jarvis_voice_is_lockdown_phrase("go to sleep"));
 	assert(!jarvis_voice_is_lockdown_phrase("open a new terminal"));

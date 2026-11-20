@@ -2432,7 +2432,7 @@ bool jarvis_auren_run_react_agent(
 		"=== DESKTOP & SHELL ACTION TOOLS ===\n"
 		"- open_terminal: {\"op\": \"open_terminal\", \"target\": {}}\n"
 		"- open_application: {\"op\": \"open_application\", \"target\": {\"identifier\": \"<app_binary>\"}}\n"
-		"- spawn_shell_command: {\"op\": \"spawn_shell_command\", \"target\": {\"command\": \"<shell_cmd>\"}}\n"
+		"- spawn_shell_command: {\"op\": \"spawn_shell_command\", \"target\": {\"command\": \"<shell_cmd>\", \"new_terminal\": true}} (omit new_terminal or set false to run in the current idle terminal; set new_terminal:true whenever the user explicitly asks to open a new terminal)\n"
 		"- focus_window: {\"op\": \"focus_window\", \"target\": {\"identifier\": \"<window_class_or_title>\"}}\n"
 		"- focus_relative_window: {\"op\": \"focus_relative_window\", \"target\": {\"kind\": \"relative\", \"relation\": \"other|next|previous|master\"}}\n"
 		"- open_url: {\"op\": \"open_url\", \"target\": {\"url\": \"https://...\"}}\n"
@@ -2462,8 +2462,8 @@ bool jarvis_auren_run_react_agent(
 		"3. If the user asks about clipboard / highlighted text, call `inspect_clipboard` first.\n"
 		"4. If the user asks a quick question about the current time, date, free RAM, disk space, CPU load, or active directory/window, answer IMMEDIATELY in 1 turn with `answer_question` using the live fields below (never spawn a terminal just to run `date` or `pwd` for a spoken question).\n"
 		"5. If the user asks to remember a preference or workflow, emit `remember_fact`. If they invoke a remembered workflow later, expand it into a JSON array `[step1, step2, ...]` of all actions in that workflow.\n"
-		"5. If the user refers to a previous turn ('actually move it to workspace 6 instead', 'nevermind bring it back', 'open that file', 'run that again in the other terminal'), use Recent Conversation Turns, Live Terminal Panes, Live Browser Content, and Recent action context.\n"
-		"6. For any local or remote shell command, SSH command (e.g. `ssh tty.pt 'df -h'`), or CLI tool (nvim, git, grep, find, make), use `spawn_shell_command`.\n";
+		"6. If the user refers to a previous turn ('actually move it to workspace 6 instead', 'nevermind bring it back', 'open that file', 'run that again in the other terminal'), use Recent Conversation Turns, Live Terminal Panes, Live Browser Content, and Recent action context.\n"
+		"7. For any local or remote shell command, SSH command (e.g. `ssh tty.pt 'df -h'`), or CLI tool (nvim, vim, git, grep, find, make), use `spawn_shell_command`. If the user asks to OPEN A TERMINAL with a command/program/config (e.g. 'open a terminal with vim', 'abre um terminal com a minha configuracao de vim'), you MUST set \"new_terminal\": true on `spawn_shell_command`!\n";
 
 	char state_sum[4096];
 	summarize_world_for_prompt(eng, world, state_sum, sizeof(state_sum));
@@ -2604,7 +2604,13 @@ bool jarvis_auren_run_react_agent(
 			out_res->last_dsl = st->dsl;
 			update_context_from_step(&eng->ctx, &st->dsl, world, st->result.output);
 
-			if (!st->result.success) all_ok = false;
+			if (!st->result.success) {
+				all_ok = false;
+				if (strcmp(st->dsl.op, "open_terminal") == 0) {
+					has_action = true;
+					break;
+				}
+			}
 
 			size_t oplen = strlen(combined_ops);
 			snprintf(combined_ops + oplen, sizeof(combined_ops) - oplen, "%s%s", oplen ? "," : "", st->dsl.op);

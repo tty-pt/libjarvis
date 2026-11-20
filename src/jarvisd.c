@@ -92,6 +92,20 @@ get_wake_initial_prompt(void)
 }
 
 static const char *
+build_wake_initial_prompt(const char *wake_word, char *buf, size_t buf_sz)
+{
+	const char *ont_p = get_wake_initial_prompt();
+	if (ont_p && *ont_p)
+		return ont_p;
+	if (!wake_word || !*wake_word || !buf || buf_sz < 4)
+		return NULL;
+	snprintf(buf, buf_sz, "%s.", wake_word);
+	if (buf[0] >= 'a' && buf[0] <= 'z')
+		buf[0] = (char)(buf[0] - 'a' + 'A');
+	return buf;
+}
+
+static const char *
 get_cmd_initial_prompt(void)
 {
 	const char *p = jarvis_ontology_get_cmd_prompt(get_daemon_ont());
@@ -2071,13 +2085,7 @@ handle_jarvis_wait(int srv, int cli, struct whisper_context *ctx_wake, int n_thr
 							 * bleed/echo never cuts off Jarvis's own voice.
 							 */
 						} else {
-							const char *p = raw_res;
-							if (!chime_played && !is_followup_window &&
-							    (strncasecmp(p, "já ", 4) == 0 || strncasecmp(p, "ja ", 3) == 0)) {
-								while (*p && !isspace((unsigned char)*p)) p++;
-								while (*p && isspace((unsigned char)*p)) p++;
-							}
-							candidate = (*p) ? p : raw_res;
+							candidate = raw_res;
 						}
 					}
 
@@ -2311,10 +2319,12 @@ handle_jarvis_wait(int srv, int cli, struct whisper_context *ctx_wake, int n_thr
 				if (n_samp >= 2400) {
 					char heard[1024];
 					char inline_cmd[1024];
+					char wake_prompt_buf[128];
+					const char *wake_prompt = build_wake_initial_prompt(wake_word, wake_prompt_buf, sizeof(wake_prompt_buf));
 					int w_tok = cont_wake_check ? 16 : 28;
 					int wake_all_silent = 0;
 					run_whisper_slice(ctx_wake, n_threads, wake_pcm, n_samp,
-					                  lang, get_wake_initial_prompt(), w_tok, 1, 0, 0,
+					                  lang, wake_prompt, w_tok, 1, 0, 0,
 					                  heard, sizeof(heard), &wake_all_silent);
 					decoded_wake_voiced_f = snap_voiced_f;
 
@@ -2449,8 +2459,8 @@ handle_jarvis_wait(int srv, int cli, struct whisper_context *ctx_wake, int n_thr
 						g_audio.in_speech_hint = 0;
 						pthread_mutex_unlock(&g_audio.mtx);
 						continue;
-					} else if ((snap_voiced_f - speech_start_f) >= 40) {
-						/* Over 0.8s of continuous voiced audio (e.g. phone/TV or user chat)
+					} else if ((snap_voiced_f - speech_start_f) >= 75) {
+						/* Over 1.5s of continuous voiced audio (e.g. phone/TV or user chat)
 						 * without wake word: unconditionally slide the window forward with a
 						 * 15-frame (300ms) overlap even if sound continued during decode,
 						 * and refresh the ambient baseline!
@@ -2485,7 +2495,10 @@ handle_jarvis_wait(int srv, int cli, struct whisper_context *ctx_wake, int n_thr
 
 		if (wake_confirmed && !waiting_post_wake) {
 			int64_t cmd_len_f = scan_f - cmd_start_f;
-			const char *eff_prompt = chime_played ? get_cmd_initial_prompt() : get_wake_initial_prompt();
+			char eff_wake_prompt_buf[128];
+			const char *eff_prompt = chime_played
+				? get_cmd_initial_prompt()
+				: build_wake_initial_prompt(wake_word, eff_wake_prompt_buf, sizeof(eff_wake_prompt_buf));
 
 			if (silence_frames < 8 && cmd_len_f >= 16 &&
 			    last_voiced_f > decoded_cmd_voiced_f + 12) {
@@ -2622,13 +2635,7 @@ handle_jarvis_wait(int srv, int cli, struct whisper_context *ctx_wake, int n_thr
 								live_cmd[0] = '\0';
 							}
 						} else {
-							const char *p = final_raw;
-							if (!chime_played && !is_followup_window &&
-							    (strncasecmp(p, "já ", 4) == 0 || strncasecmp(p, "ja ", 3) == 0)) {
-								while (*p && !isspace((unsigned char)*p)) p++;
-								while (*p && isspace((unsigned char)*p)) p++;
-							}
-							snprintf(live_cmd, sizeof(live_cmd), "%s", (*p) ? p : final_raw);
+							snprintf(live_cmd, sizeof(live_cmd), "%s", final_raw);
 						}
 					} else {
 						live_cmd[0] = '\0';
@@ -2879,7 +2886,7 @@ run_inprocess_jarvis_turn(int srv, struct whisper_context *ctx_wake, int n_threa
 	char wake_buf[64];
 	const char *ont_wake = jarvis_ontology_get_wake_word(get_daemon_ont());
 	if (!ont_wake || !*ont_wake)
-		ont_wake = "jarbas";
+		ont_wake = "jarvis";
 	jarvis_rc_get("wake_word", ont_wake, wake_buf, sizeof(wake_buf));
 
 	char cmd_text[4096] = {0};
@@ -3376,6 +3383,21 @@ main(int argc, char *argv[])
 	const char *main_model_path = NULL;
 	const char *wake_model_path = NULL;
 	const char *client_req      = NULL;
+	{
+		const char *home = getenv("HOME");
+		const char *cur_path = getenv("PATH");
+		if (home && *home) {
+			char local_bin[512];
+			snprintf(local_bin, sizeof(local_bin), "%s/.local/bin", home);
+			if (!cur_path || !*cur_path) {
+				setenv("PATH", local_bin, 1);
+			} else if (!strstr(cur_path, local_bin)) {
+				char new_path[4096];
+				snprintf(new_path, sizeof(new_path), "%s:%s", local_bin, cur_path);
+				setenv("PATH", new_path, 1);
+			}
+		}
+	}
 	int port = jarvis_rc_get_int("port", 8179);
 	int n_threads = jarvis_rc_get_int("threads", 6);
 	int start_jarvis = 0;
