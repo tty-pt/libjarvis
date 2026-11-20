@@ -129,7 +129,48 @@ To enforce strict encapsulation across dynamically loaded `.so` adapter modules:
 
 ---
 
-## 5. Installation & Build
+## 5. English & Portuguese Language Support (`en` / `pt`)
+
+`libjarvis` and its companion voice pipeline (`dwm-whisperd`, `dwm-voice`, `mod_tts.so`) support both **English (`en`)** and **Portuguese (`pt`)** speech recognition, natural language execution, and neural voice synthesis:
+
+### 1. Automatic Keyboard-Synchronized or Explicit Language Selection
+Configure the active spoken language in `~/.config/dwm-voice/lang` (or via the `dwm-voice menu` $\rightarrow$ **Whisper Language** selector):
+- **`kbd` (Default — Keyboard Layout Sync)**: Automatically follows your active keyboard layout (`Mod+Space` toggles between `US — English` and `PT — Português`), routing speech recognition to `"en"` or `"pt"` dynamically.
+- **`en` (English)**: Forces English speech recognition and command processing:
+  ```bash
+  mkdir -p ~/.config/dwm-voice
+  printf 'en\n' > ~/.config/dwm-voice/lang
+  ```
+- **`pt` (Portuguese — Português)**: Forces Portuguese speech recognition and multilingual command processing:
+  ```bash
+  mkdir -p ~/.config/dwm-voice
+  printf 'pt\n' > ~/.config/dwm-voice/lang
+  ```
+- **`auto` (Multilingual Auto-Detect)**: Lets Whisper detect the spoken language per utterance (`printf 'auto\n' > ~/.config/dwm-voice/lang`).
+
+### 2. English vs. Multilingual (Portuguese) Whisper Models
+Place quantized GGML Whisper models in `~/.local/share/whisper/` and select the active model in `~/.config/dwm-voice/model`:
+- **English-Only Ultra-Fast (Default for `en`)**:
+  - `ggml-base.en-q8_0.bin` (78 MB) or `ggml-small.en-q5_1.bin` (182 MB)
+  ```bash
+  printf '%s/.local/share/whisper/ggml-base.en-q8_0.bin\n' "$HOME" > ~/.config/dwm-voice/model
+  ```
+- **Portuguese & Multilingual (`pt` + `en`)**:
+  - Use a multilingual model (`ggml-base-q8_0.bin` or `ggml-small-q5_1.bin` without the `.en` suffix) so both Portuguese and English utterances transcribe cleanly:
+  ```bash
+  curl -L -o ~/.local/share/whisper/ggml-small-q5_1.bin \
+    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin
+  printf '%s/.local/share/whisper/ggml-small-q5_1.bin\n' "$HOME" > ~/.config/dwm-voice/model
+  ```
+
+### 3. Neural TTS Voices & Multilingual Custom Ontology
+- **Neural TTS (`~/.config/dwm-voice/tts_voice`)**: Supports Kokoro-82M (`bm_daniel`, `bm_george`, `am_michael`, `bf_emma`, `af_heart` in `~/.local/share/kokoro/`) and Piper ONNX (`piper:gb`, `piper:us`, or Portuguese Piper models in `~/.local/share/piper/`) via `libespeak-ng` IPA phonemization (`en-gb-x-rp`, `en-us`, `pt`).
+- **Bilingual Compositional Ontology & ReAct Reasoning**:
+  - Custom Portuguese and English verb/entity synonyms can be added side-by-side in `~/.config/jarvis/ontology.json` (or `$JARVIS_ONTOLOGY_JSON`), while `axil-auren` remote inference (`qwen3.5-4b`) natively understands and translates both Portuguese and English queries into canonical Action DSL (`jarvis "muda para o workspace dois e abre um terminal"` / `jarvis "switch to workspace two and open a terminal"`).
+
+---
+
+## 6. Installation & Build
 
 ### Prebuilt Packages
 Prebuilt packages for Linux (APT / Alpine / Arch / Fedora-RHEL), macOS (Homebrew), Windows (winget / MSYS2), and OpenBSD are distributed via [tty.pt packages](https://github.com/tty-pt/ci/blob/main/docs/install.md). Use **libjarvis** as the package name.
@@ -143,7 +184,7 @@ sudo make install     # installs headers, shared libraries, CLI binary, and pkg-
 
 ---
 
-## 6. JavaScript & WebAssembly Bindings (`@tty-pt/jarvis`)
+## 7. JavaScript & WebAssembly Bindings (`@tty-pt/jarvis`)
 
 Official Node.js (N-API) and Browser (WebAssembly) bindings are colocated in [`npm/`](npm/README.md):
 - **Universal Runtime**: Native Node-API addon (`jarvis_node.node`) with automatic fallback to the freestanding WebAssembly reactor (`dist/jarvis.wasm`) mounted on the `@tty-pt/stele` shared-memory substrate.
