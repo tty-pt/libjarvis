@@ -197,8 +197,9 @@ static const char *match_folded_wake_span(
 			jarvis_clean_phrase(raw_span, clean_span, sizeof(clean_span));
 			if (strcmp(clean_span, wake_clean) == 0 ||
 			    (allow_fuzzy && n_words == 1 && strlen(wake_clean) >= 5 && strlen(clean_span) >= 5 &&
-			     clean_span[0] == wake_clean[0] &&
-			     jarvis_token_similarity(clean_span, wake_clean) >= 0.85)) {
+			     (clean_span[0] == wake_clean[0] ||
+			      (wake_clean[0] == 'j' && strchr("jzxgsc", clean_span[0]) != NULL)) &&
+			     jarvis_token_similarity(clean_span, wake_clean) >= 0.80)) {
 				return cur;
 			}
 		}

@@ -101,7 +101,7 @@ int jarvis_desktop_execute_fallback(const jarvis_dsl_t *dsl, jarvis_adapter_resu
 #ifdef __APPLE__
 		run_capture("pbpaste 2>/dev/null", res->output, sizeof(res->output));
 #else
-		run_capture("wl-paste 2>/dev/null || xclip -o -selection primary 2>/dev/null || xclip -o -selection clipboard 2>/dev/null",
+		run_capture("xclip -o -selection primary 2>/dev/null || xsel -op 2>/dev/null || wl-paste -p 2>/dev/null || wl-paste 2>/dev/null || xclip -o -selection clipboard 2>/dev/null || xsel -ob 2>/dev/null",
 		            res->output, sizeof(res->output));
 #endif
 		res->handled = true;

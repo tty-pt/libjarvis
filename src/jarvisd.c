@@ -509,7 +509,8 @@ spawn_pw_record(pid_t *out_pid)
 			close(devnull);
 		}
 		execlp("pw-record", "pw-record", "--raw", "--rate=16000",
-		       "--channels=1", "--format=s16", "--latency=20ms", "-", (char *)NULL);
+		       "--channels=1", "--format=s16", "--latency=20ms",
+		       "--properties=media.role=Communication", "-", (char *)NULL);
 		_exit(127);
 	}
 	close(pfd[1]);
@@ -1172,7 +1173,7 @@ run_whisper_slice(struct whisper_context *ctx, int n_threads, const float *pcm, 
 	if (whisper_full(ctx, wparams, eff_pcm, n_samples) == 0) {
 		int n_seg = whisper_full_n_segments(ctx);
 		int valid_seg = 0;
-		float nsp_limit = is_wake ? 0.55f : 0.58f;
+		float nsp_limit = is_wake ? 0.68f : 0.58f;
 		whisper_token eot_id = whisper_token_eot(ctx);
 		char prev_seg[1024] = {0};
 		for (int i = 0; i < n_seg; i++) {
@@ -1199,7 +1200,7 @@ run_whisper_slice(struct whisper_context *ctx, int n_threads, const float *pcm, 
 				sum_p += td.p;
 				word_toks++;
 			}
-			if (word_toks > 0 && (sum_p / (float)word_toks) < (is_wake ? 0.35f : 0.18f))
+			if (word_toks > 0 && (sum_p / (float)word_toks) < (is_wake ? 0.20f : 0.18f))
 				continue;
 
 			if (!is_wake && word_toks >= 2) {
@@ -1505,6 +1506,47 @@ is_bargein_stop_phrase(const char *text)
 	return jarvis_ontology_is_tts_interrupt(get_daemon_ont(), norm) ? 1 : 0;
 }
 
+/*
+ * Exact Acoustic Self-Echo Verification (`is_tts_self_echo`):
+ * Compares the normalized words decoded by Whisper during TTS playback against
+ * the active spoken TTS transcript (`/tmp/jarvis-tts-active-$USER.state`).
+ * If >= 60% of the heard words (>= 3 chars) appear in the currently playing TTS
+ * text, it is speaker bleed / room echo rather than user barge-in.
+ */
+static int
+is_tts_self_echo(const char *heard_text, const char *active_tts_text)
+{
+	if (!heard_text || !*heard_text || !active_tts_text || !*active_tts_text)
+		return 0;
+
+	char h_clean[512], t_clean[1024], t_pad[1032];
+	jarvis_clean_phrase(heard_text, h_clean, sizeof(h_clean));
+	jarvis_clean_phrase(active_tts_text, t_clean, sizeof(t_clean));
+	if (!h_clean[0] || !t_clean[0])
+		return 0;
+
+	/* Exact substring check first */
+	if (strstr(t_clean, h_clean) != NULL)
+		return 1;
+
+	snprintf(t_pad, sizeof(t_pad), " %s ", t_clean);
+	char *save = NULL;
+	int total_w = 0, matched_w = 0;
+	for (char *tok = strtok_r(h_clean, " ", &save); tok; tok = strtok_r(NULL, " ", &save)) {
+		size_t tl = strlen(tok);
+		if (tl < 3) continue;
+		total_w++;
+		char probe[128];
+		snprintf(probe, sizeof(probe), " %s ", tok);
+		if (strstr(t_pad, probe) != NULL || strstr(t_clean, tok) != NULL) {
+			matched_w++;
+		}
+	}
+	if (total_w == 0)
+		return 1;
+	return (matched_w * 100 >= total_w * 60) ? 1 : 0;
+}
+
 static void
 jarvis_set_active(int active)
 {
@@ -1625,6 +1667,26 @@ poll_control_socket(int srv, int cli, int is_jarvis_idle)
 			if (*txt) {
 				interrupt_tts_and_clear_cache();
 				jarvis_xy_speak_clause("oneshot", txt, 1);
+			}
+			write_all(cfd, "OK\n", 3);
+			close(cfd);
+		} else if (strncmp(cbuf, "TTS_NOTIFY|", 11) == 0) {
+			char *payload = cbuf + 11;
+			char *nl = strpbrk(payload, "\r\n");
+			if (nl) *nl = '\0';
+			char *sep = strchr(payload, '|');
+			const char *title = "  Jarbas";
+			const char *msg = payload;
+			if (sep) {
+				*sep = '\0';
+				if (payload[0]) title = payload;
+				msg = sep + 1;
+			}
+			if (*msg) {
+				jarvis_xy_notify(title, msg, 1);
+				if (!g_audio.in_speech_hint) {
+					jarvis_xy_speak_clause("notify", msg, 0);
+				}
 			}
 			write_all(cfd, "OK\n", 3);
 			close(cfd);
@@ -1998,17 +2060,24 @@ handle_jarvis_wait(int srv, int cli, struct whisper_context *ctx_wake, int n_thr
 							interrupt_tts_and_clear_cache();
 					} else if (wm == 0) {
 						if (tts_on) {
-							if (is_bargein_stop_phrase(raw_res)) {
+							if (is_bargein_stop_phrase(raw_res) ||
+							    (is_followup_window && !is_tts_self_echo(raw_res, active_tts))) {
 								interrupt_tts_and_clear_cache();
 								candidate = raw_res;
 							}
-							/* While TTS is actively speaking, require either the wake word
-							 * ("Jarvis ...") or an explicit stop phrase ("stop / shut up")
-							 * before interrupting TTS mid-sentence, so background room/phone
-							 * audio or residual speaker echo never cuts off Jarvis's voice.
+							/* While TTS is actively speaking, require the wake word, an explicit
+							 * stop phrase, or a verified non-self-echo utterance during an active
+							 * follow-up window before interrupting TTS mid-sentence, so speaker
+							 * bleed/echo never cuts off Jarvis's own voice.
 							 */
-						} else if (chime_played || is_followup_window) {
-							candidate = raw_res;
+						} else {
+							const char *p = raw_res;
+							if (!chime_played && !is_followup_window &&
+							    (strncasecmp(p, "já ", 4) == 0 || strncasecmp(p, "ja ", 3) == 0)) {
+								while (*p && !isspace((unsigned char)*p)) p++;
+								while (*p && isspace((unsigned char)*p)) p++;
+							}
+							candidate = (*p) ? p : raw_res;
 						}
 					}
 
@@ -2213,14 +2282,15 @@ handle_jarvis_wait(int srv, int cli, struct whisper_context *ctx_wake, int n_thr
 			 *    without pausing (and repeats every 18 new voiced frames), so the indicator turns RED
 			 *    immediately during a one-shot "<wake> <command>" utterance!
 			 */
-			int tts_speaking_now = is_tts_currently_speaking(NULL, 0);
-			int cont_step_f = tts_speaking_now ? 35 : 18;
+			char active_tts_now[512] = {0};
+			int tts_speaking_now = is_tts_currently_speaking(active_tts_now, sizeof(active_tts_now));
+			int cont_step_f = tts_speaking_now ? 16 : 18;
 			int pause_wake_check = (((silence_frames >= 8 && voiced_frames >= 10) ||
 			                         (silence_frames >= 12 && voiced_frames >= 5)) &&
 			                        last_voiced_f > decoded_wake_voiced_f &&
-			                        (!tts_speaking_now || peak_speech_db >= utter_start_db + 2.5));
+			                        (!tts_speaking_now || peak_speech_db >= utter_start_db + 1.5));
 			int cont_wake_check  = (voiced_frames >= cont_step_f && silence_frames < 8 &&
-			                        (!tts_speaking_now || peak_speech_db >= utter_start_db + 3.0) &&
+			                        (!tts_speaking_now || peak_speech_db >= utter_start_db + 1.5) &&
 			                        (decoded_wake_voiced_f < 0 ||
 			                         (last_voiced_f - decoded_wake_voiced_f) >= cont_step_f));
 
@@ -2274,15 +2344,35 @@ handle_jarvis_wait(int srv, int cli, struct whisper_context *ctx_wake, int n_thr
 						spoke_during_decode = 1;
 					pthread_mutex_unlock(&g_audio.mtx);
 
-					if (wmatch >= 1) {
-						/* Candidate wake trigger from ctx_wake (ggml-base): enter continuous
-						 * decode mode (chime_played = 0) so the background ctx_main (ggml-small)
-						 * worker verifies the wake word on the full audio from wake_slice_start.
-						 * If the user spoke ONLY "Jarbas" and paused, ctx_main confirms wm == 1
-						 * at the final decode step, plays the chime, and opens the 6s post-wake
-						 * command window — preventing false wakes from ggml-base on room noise!
+					if (wmatch == 1 && !cont_wake_check && !spoke_during_decode) {
+						/* User spoke ONLY wake word and genuinely paused: interrupt any TTS, warmup TTS engine, play chime, duck speaker, and wait for command */
+						interrupt_tts_and_clear_cache();
+						jarvis_xy_speak_clause("warmup", "", 0);
+						wake_confirmed = 1;
+						chime_played = 1;
+						play_chime_async(chime_wav);
+						duck_speaker_for_command();
+						waiting_post_wake = 1;
+						in_speech = 0;
+						consec_voiced = 0;
+						voiced_frames = 0;
+						silence_frames = 0;
+						pthread_mutex_lock(&g_audio.mtx);
+						g_audio.in_speech_hint = 0;
+						chime_ignore_until_f = g_audio.total_frames + 7;
+						wake_end_f = g_audio.total_frames + 5;
+						pthread_mutex_unlock(&g_audio.mtx);
+						post_wake_deadline_ms = now_ms() + 6000L;
+						write_state_file(state_file, "jarvis-cmd", NULL, NULL);
+						notify_osd_async(jarvis_ontology_get_ui_string(get_daemon_ont(), "listening_title", "  Jarvis Listening..."),
+						                 jarvis_ontology_get_ui_string(get_daemon_ont(), "listening_body", "Speak your command now."), 4500);
+						continue;
+					} else if (wmatch >= 1) {
+						/* User is speaking a continuous one-shot "<wake> <command>" utterance.
+						 * Interrupt any active TTS immediately ("barge-in") and pre-warm TTS!
 						 */
 						interrupt_tts_and_clear_cache();
+						jarvis_xy_speak_clause("warmup", "", 0);
 						duck_speaker_for_command();
 						wake_confirmed = 1;
 						waiting_post_wake = 0;
@@ -2294,9 +2384,16 @@ handle_jarvis_wait(int srv, int cli, struct whisper_context *ctx_wake, int n_thr
 						                           &utter_amb_avg, &utter_amb_std);
 						utter_start_db = calc_vad_start_db(utter_amb_avg, utter_amb_std);
 						pthread_mutex_unlock(&g_audio.mtx);
-						live_cmd[0] = '\0';
-						write_state_file(state_file, "jarvis-cmd", NULL, NULL);
-					} else if (is_tts_currently_speaking(NULL, 0) && is_bargein_stop_phrase(heard)) {
+						if (wmatch == 2 && inline_cmd[0] != '\0') {
+							snprintf(live_cmd, sizeof(live_cmd), "%s", inline_cmd);
+							decoded_cmd_voiced_f = snap_voiced_f;
+							write_state_file(state_file, "cmd", live_cmd,
+							                 jarvis_ontology_get_ui_string(get_daemon_ont(), "command_live", "  Jarvis Command (Live)..."));
+						} else {
+							live_cmd[0] = '\0';
+							write_state_file(state_file, "jarvis-cmd", NULL, NULL);
+						}
+					} else if (tts_speaking_now && is_bargein_stop_phrase(heard)) {
 						interrupt_tts_and_clear_cache();
 						in_speech = 0;
 						consec_voiced = 0;
@@ -2305,6 +2402,22 @@ handle_jarvis_wait(int srv, int cli, struct whisper_context *ctx_wake, int n_thr
 						decoded_wake_voiced_f = -1;
 						pthread_mutex_lock(&g_audio.mtx);
 						g_audio.in_speech_hint = 0;
+						pthread_mutex_unlock(&g_audio.mtx);
+						continue;
+					} else if (tts_speaking_now && is_tts_self_echo(heard, active_tts_now)) {
+						/* Acoustic self-echo of Jarvis's own currently playing TTS voice:
+						 * reset VAD and adapt ambient baseline so speaker bleed is ignored.
+						 */
+						in_speech = 0;
+						consec_voiced = 0;
+						voiced_frames = 0;
+						silence_frames = 0;
+						decoded_wake_voiced_f = -1;
+						pthread_mutex_lock(&g_audio.mtx);
+						g_audio.in_speech_hint = 0;
+						calc_ambient_window_locked(g_audio.total_frames, 80,
+						                           &g_audio.noise_floor_db,
+						                           &g_audio.ambient_std_db);
 						pthread_mutex_unlock(&g_audio.mtx);
 						continue;
 					} else if (wake_all_silent || heard[0] == '\0') {
@@ -2501,22 +2614,21 @@ handle_jarvis_wait(int srv, int cli, struct whisper_context *ctx_wake, int n_thr
 						continue;
 					} else if (wm == 0) {
 						if (tts_on) {
-							if (is_bargein_stop_phrase(final_raw)) {
+							if (is_bargein_stop_phrase(final_raw) ||
+							    (is_followup_window && !is_tts_self_echo(final_raw, active_tts))) {
 								interrupt_tts_and_clear_cache();
 								snprintf(live_cmd, sizeof(live_cmd), "%s", final_raw);
 							} else {
 								live_cmd[0] = '\0';
 							}
-						} else if (!chime_played && !is_followup_window) {
-							/* Continuous one-shot mode where cmd_start_f includes the wake
-							 * word slice, yet the authoritative full decode by ctx_main contains
-							 * no wake word at all: reject false wake trigger from ctx_wake and
-							 * do not loop on resumed_speaking.
-							 */
-							live_cmd[0] = '\0';
-							resumed_speaking = 0;
 						} else {
-							snprintf(live_cmd, sizeof(live_cmd), "%s", final_raw);
+							const char *p = final_raw;
+							if (!chime_played && !is_followup_window &&
+							    (strncasecmp(p, "já ", 4) == 0 || strncasecmp(p, "ja ", 3) == 0)) {
+								while (*p && !isspace((unsigned char)*p)) p++;
+								while (*p && isspace((unsigned char)*p)) p++;
+							}
+							snprintf(live_cmd, sizeof(live_cmd), "%s", (*p) ? p : final_raw);
 						}
 					} else {
 						live_cmd[0] = '\0';
@@ -3071,6 +3183,33 @@ serve_client_request(int srv, int cli, char *buf,
 		if (*txt) {
 			interrupt_tts_and_clear_cache();
 			jarvis_xy_speak_clause("oneshot", txt, 1);
+		}
+		write_all(cli, "OK\n", 3);
+		close(cli);
+		return;
+	}
+	if (strncmp(buf, "TTS_NOTIFY|", 11) == 0) {
+		char *rest = buf + 11;
+		char *nl = strpbrk(rest, "\r\n");
+		if (nl)
+			*nl = '\0';
+		char *sep = strchr(rest, '|');
+		const char *title = "Jarbas";
+		const char *msg = rest;
+		char title_buf[128] = {0};
+		if (sep) {
+			size_t tlen = (size_t)(sep - rest);
+			if (tlen > 0 && tlen < sizeof(title_buf)) {
+				memcpy(title_buf, rest, tlen);
+				title_buf[tlen] = '\0';
+				title = title_buf;
+			}
+			msg = sep + 1;
+		}
+		if (*msg) {
+			notify_osd_async(title, msg, 5500);
+			if (!is_tts_currently_speaking(NULL, 0))
+				jarvis_xy_speak_clause("notify", msg, 2);
 		}
 		write_all(cli, "OK\n", 3);
 		close(cli);

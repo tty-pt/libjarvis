@@ -31,6 +31,7 @@ static void print_usage(const char *prog)
 		"  tts-off                                   Disable neural TTS (0 KB idle RAM)\n"
 		"  tts-interrupt | quiet                     Interrupt active TTS speech immediately\n"
 		"  speak <text>                              Speak text via TTS\n"
+		"  notify <text>                             Announce background completion via OSD + non-preemptive TTS\n"
 		"  dmenu | omni                              Open interactive command bar via jarvis_xy_prompt\n"
 		"  warmup                                    Pre-warm ontology and inference engine\n"
 		"  llm-mode [auto|cloud|embedding|off]       Get or set persistent inference mode\n"
@@ -375,6 +376,7 @@ static void do_jarvis_menu(void)
 		else do_jarvis_start(false);
 	} else if (strncmp(choice, "2.", 2) == 0) {
 		const char *vitems =
+			"pm_tuga                      (Português de Portugal — Masculino, Tuga)\n"
 			"pm_alex                      (Português — Masculino, Alex)\n"
 			"pm_santa                     (Português — Masculino, Santa)\n"
 			"pf_dora                      (Português — Feminino, Dora)\n"
@@ -637,6 +639,7 @@ int main(int argc, char **argv)
 			    strcmp(argv[i], "warmup") == 0 || strcmp(argv[i], "clear-learned") == 0 ||
 			    strcmp(argv[i], "tts-interrupt") == 0 || strcmp(argv[i], "interrupt") == 0 ||
 			    strcmp(argv[i], "quiet") == 0 || strcmp(argv[i], "speak") == 0 ||
+			    strcmp(argv[i], "notify") == 0 ||
 			    strcmp(argv[i], "start") == 0 || strcmp(argv[i], "on") == 0 ||
 			    strcmp(argv[i], "jarvis-start") == 0 || strcmp(argv[i], "server-start") == 0 ||
 			    strcmp(argv[i], "stop") == 0 || strcmp(argv[i], "off") == 0 ||
@@ -786,6 +789,21 @@ int main(int argc, char **argv)
 				if (!daemon_cmd(cmd, resp, sizeof(resp)))
 #endif
 					jarvis_xy_speak_clause("cli", utterance, 1);
+			}
+			return 0;
+		}
+		if (strcmp(subcmd, "notify") == 0) {
+			if (utterance[0]) {
+#ifndef _WIN32
+				char cmd[1024], resp[64];
+				snprintf(cmd, sizeof(cmd), "TTS_NOTIFY| Jarbas|%s", utterance);
+				if (!daemon_cmd(cmd, resp, sizeof(resp)))
+#endif
+				{
+					if (!quiet)
+						jarvis_xy_notify(" Jarbas", utterance, 1);
+					jarvis_xy_speak_clause("notify", utterance, 2);
+				}
 			}
 			return 0;
 		}

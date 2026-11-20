@@ -378,10 +378,15 @@ static void test_06_voice_vad_wake_and_streaming_tts(void)
 	assert(jarvis_extract_streaming_answer_prefix(partial, ans_prefix, sizeof(ans_prefix)));
 	assert(strcmp(ans_prefix, "Quantum physics describes nature at the atomic scale, where particles behave as waves") == 0);
 
+	/* Also verify streaming extraction when LLM emits "reply" instead of "answer" */
+	const char *partial_reply = "{\"op\":\"answer_question\",\"args\":{\"reply\":\"O erro está na linha duzentos e quinze do ficheiro de rede.";
+	assert(jarvis_extract_streaming_answer_prefix(partial_reply, ans_prefix, sizeof(ans_prefix)));
+	assert(strcmp(ans_prefix, "O erro está na linha duzentos e quinze do ficheiro de rede.") == 0);
+
 	char c0[256], rem0[512];
 	assert(jarvis_pop_ready_tts_clause(ans_prefix, true, c0, sizeof(c0), rem0, sizeof(rem0)));
-	assert(strlen(c0) >= 15 && strlen(c0) <= 55);
-	assert(strstr(c0, "Quantum physics") != NULL);
+	assert(strlen(c0) >= 14 && strlen(c0) <= 55);
+	assert(strstr(c0, "O erro") != NULL);
 
 	/* 2. Wake-word extraction & lockdown phrase detection */
 	char cmd[256];
@@ -703,6 +708,16 @@ static void test_10_multilingual_portuguese_and_libmm_memory(jarvis_engine_t *en
 	assert(jarvis_process(eng, "qual é o erro no ecrã do terminal?", "terminal", &pt3));
 	assert(strcmp(pt3.last_dsl.op, "answer_question") == 0);
 	assert(strstr(pt3.combined_result.output, "src/net_loop.c:215") != NULL);
+
+	/* Deictic error explanation ("explica este erro") and deictic selection/clipboard ("resume isto") */
+	jarvis_process_result_t pt_err, pt_clip;
+	assert(jarvis_process(eng, "explica este erro", "terminal", &pt_err));
+	assert(strcmp(pt_err.last_dsl.op, "answer_question") == 0);
+	assert(strstr(pt_err.combined_result.output, "src/net_loop.c:215") != NULL);
+
+	assert(jarvis_process(eng, "resume isto", "terminal", &pt_clip));
+	assert(strcmp(pt_clip.last_dsl.op, "answer_question") == 0);
+	assert(pt_clip.combined_result.success);
 
 	assert(jarvis_process(eng, "abre esse ficheiro na linha onde falhou", "terminal", &pt4));
 	assert(strcmp(pt4.last_dsl.op, "spawn_shell_command") == 0);

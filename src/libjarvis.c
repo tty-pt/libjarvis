@@ -32,25 +32,27 @@ static double now_ms(void)
  * Streaming TTS Answer Prefix & Clause Extractor
  * ------------------------------------------------------------------------- */
 
-bool jarvis_extract_streaming_answer_prefix(
+static bool extract_streaming_answer_or_reply(
 	const char *raw_json_fragment,
 	char       *out_answer,
-	size_t      out_sz
+	size_t      out_sz,
+	bool       *out_closed
 )
 {
+	if (out_closed) *out_closed = false;
 	if (!out_answer || out_sz == 0) return false;
 	out_answer[0] = '\0';
 	if (!raw_json_fragment || !*raw_json_fragment) return false;
 
-	if (!strstr(raw_json_fragment, "\"answer_question\"") &&
-	    !strstr(raw_json_fragment, "\"answer\"") &&
-	    !strstr(raw_json_fragment, "\"reply\"")) {
-		return false;
-	}
-
 	const char *ans_key = strstr(raw_json_fragment, "\"answer\"");
+	size_t key_len = 8;
+	if (!ans_key) {
+		ans_key = strstr(raw_json_fragment, "\"reply\"");
+		key_len = 7;
+	}
 	if (!ans_key) return false;
-	const char *p = ans_key + 8;
+
+	const char *p = ans_key + key_len;
 	while (*p && isspace((unsigned char)*p)) p++;
 	if (*p != ':') return false;
 	p++;
@@ -61,7 +63,10 @@ bool jarvis_extract_streaming_answer_prefix(
 	size_t w = 0;
 	while (*p && w + 1 < out_sz) {
 		char ch = *p;
-		if (ch == '"') break;
+		if (ch == '"') {
+			if (out_closed) *out_closed = true;
+			break;
+		}
 		if (ch == '\\') {
 			if (!p[1]) break;
 			char nxt = p[1];
@@ -105,6 +110,15 @@ bool jarvis_extract_streaming_answer_prefix(
 	}
 	out_answer[w] = '\0';
 	return w > 0;
+}
+
+bool jarvis_extract_streaming_answer_prefix(
+	const char *raw_json_fragment,
+	char       *out_answer,
+	size_t      out_sz
+)
+{
+	return extract_streaming_answer_or_reply(raw_json_fragment, out_answer, out_sz, NULL);
 }
 
 static bool is_prep_conj_at(const char *s, size_t *out_word_len)
@@ -1634,6 +1648,245 @@ static bool http_post_json(
 	free(raw);
 	return out_resp[0] != '\0';
 }
+
+/*
+ * SSE Streaming LLM client with real-time TTS clause synthesis:
+ * Sends a `"stream":true` request to axil-auren (:4242/v1/chat/completions),
+ * incrementally unescapes SSE `delta.content` chunks as they arrive over the socket,
+ * extracts `"answer"` or `"reply"` prefixes on the fly, and dispatches complete
+ * clauses to `jarvis_xy_speak_clause()` BEFORE the full LLM response finishes.
+ */
+static bool http_post_json_sse_stream(
+	const char *base_url,
+	const char *path,
+	const char *json_body,
+	bool        enable_live_tts,
+	char       *out_content,
+	size_t      content_sz,
+	bool       *out_streamed_tts
+)
+{
+	if (out_streamed_tts) *out_streamed_tts = false;
+	if (!out_content || content_sz == 0) return false;
+	out_content[0] = '\0';
+
+	char host[128] = "127.0.0.1";
+	int port = 4242;
+	if (base_url && strncmp(base_url, "http://", 7) == 0) {
+		const char *hp = base_url + 7;
+		const char *colon = strchr(hp, ':');
+		const char *slash = strchr(hp, '/');
+		if (colon && (!slash || colon < slash)) {
+			size_t hlen = (size_t)(colon - hp);
+			if (hlen < sizeof(host)) {
+				memcpy(host, hp, hlen);
+				host[hlen] = '\0';
+			}
+			port = atoi(colon + 1);
+		}
+	}
+
+	int fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (fd < 0) return false;
+
+	struct timeval tv;
+	tv.tv_sec = 14;
+	tv.tv_usec = 0;
+	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof(tv));
+	setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof(tv));
+
+	struct sockaddr_in addr;
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons((uint16_t)port);
+	if (inet_pton(AF_INET, host, &addr.sin_addr) <= 0) {
+		struct hostent *he = gethostbyname(host);
+		if (!he || !he->h_addr_list[0]) {
+			close(fd);
+			return false;
+		}
+		memcpy(&addr.sin_addr, he->h_addr_list[0], sizeof(addr.sin_addr));
+	}
+
+	if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		close(fd);
+		return false;
+	}
+
+	size_t body_len = strlen(json_body);
+	char hdr[512];
+	int hlen = snprintf(
+		hdr, sizeof(hdr),
+		"POST %s HTTP/1.1\r\n"
+		"Host: %s:%d\r\n"
+		"Content-Type: application/json\r\n"
+		"Accept: text/event-stream\r\n"
+		"Content-Length: %zu\r\n"
+		"Connection: close\r\n\r\n",
+		path, host, port, body_len
+	);
+
+	if (send(fd, hdr, (size_t)hlen, 0) < 0 || send(fd, json_body, body_len, 0) < 0) {
+		close(fd);
+		return false;
+	}
+
+	size_t cap = 32768;
+	size_t total = 0;
+	char *raw = (char *)malloc(cap);
+	if (!raw) {
+		close(fd);
+		return false;
+	}
+
+	bool headers_done = false;
+	bool is_sse = false;
+	size_t line_cursor = 0;
+	size_t content_len = 0;
+	size_t spoken_offset = 0;
+	bool is_first_clause = true;
+	bool did_stream_tts = false;
+
+	for (;;) {
+		if (total + 4096 >= cap) {
+			cap *= 2;
+			char *nr = (char *)realloc(raw, cap);
+			if (!nr) break;
+			raw = nr;
+		}
+		ssize_t r = recv(fd, raw + total, cap - total - 1, 0);
+		if (r <= 0) break;
+		total += (size_t)r;
+		raw[total] = '\0';
+
+		if (!headers_done) {
+			const char *hdr_end = strstr(raw, "\r\n\r\n");
+			if (!hdr_end) continue;
+			headers_done = true;
+			line_cursor = (size_t)(hdr_end - raw) + 4;
+			if (strstr(raw, "text/event-stream") || strstr(raw + line_cursor, "data: ")) {
+				is_sse = true;
+			}
+		}
+
+		if (!is_sse && strstr(raw + line_cursor, "data: ")) {
+			is_sse = true;
+		}
+
+		while (is_sse && line_cursor < total) {
+			char *nl = strchr(raw + line_cursor, '\n');
+			if (!nl) break;
+			size_t line_len = (size_t)(nl - (raw + line_cursor));
+			char line[8192];
+			if (line_len >= sizeof(line)) line_len = sizeof(line) - 1;
+			memcpy(line, raw + line_cursor, line_len);
+			line[line_len] = '\0';
+			line_cursor = (size_t)(nl - raw) + 1;
+
+			while (line_len > 0 && (line[line_len - 1] == '\r' || line[line_len - 1] == ' ')) {
+				line[--line_len] = '\0';
+			}
+			const char *dp = strstr(line, "data:");
+			if (!dp) continue;
+			dp += 5;
+			while (*dp == ' ') dp++;
+			if (strcmp(dp, "[DONE]") == 0) break;
+
+			jjson_val_t *cv = jjson_parse(dp);
+			if (cv) {
+				const jjson_val_t *choices = jjson_obj_get(cv, "choices");
+				if (choices && choices->type == JJSON_ARRAY && choices->u.arr.count > 0) {
+					const jjson_val_t *delta = jjson_obj_get(choices->u.arr.items[0], "delta");
+					if (!delta) delta = jjson_obj_get(choices->u.arr.items[0], "message");
+					const char *piece = jjson_obj_get_str(delta, "content", NULL);
+					if (piece && *piece) {
+						size_t plen = strlen(piece);
+						if (content_len + plen + 1 < content_sz) {
+							memcpy(out_content + content_len, piece, plen);
+							content_len += plen;
+							out_content[content_len] = '\0';
+						}
+					}
+				}
+				jjson_free(cv);
+			}
+
+			if (enable_live_tts && content_len > 16) {
+				char full_ans[2048];
+				bool ans_closed = false;
+				if (extract_streaming_answer_or_reply(out_content, full_ans, sizeof(full_ans), &ans_closed)) {
+					size_t ans_len = strlen(full_ans);
+					while (spoken_offset < ans_len) {
+						const char *unspoken = full_ans + spoken_offset;
+						while (*unspoken && isspace((unsigned char)*unspoken)) {
+							unspoken++;
+							spoken_offset++;
+						}
+						if (!*unspoken) break;
+
+						char clause[512], rem[2048];
+						if (jarvis_pop_ready_tts_clause(unspoken, is_first_clause, clause, sizeof(clause), rem, sizeof(rem))) {
+							jarvis_xy_speak_clause("stream", clause, 0);
+							did_stream_tts = true;
+							is_first_clause = false;
+							size_t rem_len = strlen(rem);
+							spoken_offset = ans_len >= rem_len ? (ans_len - rem_len) : ans_len;
+						} else if (ans_closed) {
+							jarvis_xy_speak_clause("stream", unspoken, 1);
+							did_stream_tts = true;
+							is_first_clause = false;
+							spoken_offset = ans_len;
+							break;
+						} else {
+							break;
+						}
+					}
+				}
+			}
+		}
+	}
+	close(fd);
+
+	/* Fallback if server returned non-SSE single JSON response */
+	if (!is_sse && content_len == 0 && total > 0) {
+		const char *body = strstr(raw, "\r\n\r\n");
+		body = body ? (body + 4) : raw;
+		jjson_val_t *rv = jjson_parse(body);
+		if (rv) {
+			const jjson_val_t *choices = jjson_obj_get(rv, "choices");
+			if (choices && choices->type == JJSON_ARRAY && choices->u.arr.count > 0) {
+				const jjson_val_t *msg = jjson_obj_get(choices->u.arr.items[0], "message");
+				const char *c = jjson_obj_get_str(msg, "content", NULL);
+				if (!c || !*c) c = jjson_obj_get_str(msg, "reasoning_content", NULL);
+				if (c && *c) {
+					snprintf(out_content, content_sz, "%s", c);
+					content_len = strlen(out_content);
+				}
+			}
+			jjson_free(rv);
+		}
+	}
+
+	/* Flush any remaining unspoken tail of "answer"/"reply" once the stream ends */
+	if (enable_live_tts && content_len > 0) {
+		char full_ans[2048];
+		if (extract_streaming_answer_or_reply(out_content, full_ans, sizeof(full_ans), NULL)) {
+			size_t ans_len = strlen(full_ans);
+			if (spoken_offset < ans_len) {
+				const char *tail = full_ans + spoken_offset;
+				while (*tail && isspace((unsigned char)*tail)) tail++;
+				if (*tail) {
+					jarvis_xy_speak_clause("stream", tail, 1);
+					did_stream_tts = true;
+				}
+			}
+		}
+	}
+
+	if (out_streamed_tts) *out_streamed_tts = did_stream_tts;
+	free(raw);
+	return out_content[0] != '\0';
+}
 #endif
 
 static void summarize_world_for_prompt(
@@ -2235,6 +2488,7 @@ bool jarvis_auren_run_react_agent(
 
 	for (int turn = 0; turn < 3; turn++) {
 		char llm_content[8192] = {0};
+		bool turn_streamed_tts = false;
 
 #ifndef __wasm__
 		if (eng->infer_mode == JARVIS_INFER_AUTO || eng->infer_mode == JARVIS_INFER_LLM) {
@@ -2250,7 +2504,7 @@ bool jarvis_auren_run_react_agent(
 				char req_body[32768];
 				int rpos = snprintf(
 					req_body, sizeof(req_body),
-					"{\"model\":\"%s\",\"temperature\":0.0,\"max_tokens\":512,\"messages\":["
+					"{\"model\":\"%s\",\"stream\":true,\"temperature\":0.0,\"max_tokens\":512,\"messages\":["
 					"{\"role\":\"system\",\"content\":\"%s\"},"
 					"{\"role\":\"user\",\"content\":\"%s\"}",
 					models[mi], esc_sys, esc_u0
@@ -2273,20 +2527,10 @@ bool jarvis_auren_run_react_agent(
 					"]}"
 				);
 
-				char resp_buf[16384];
-				if (!http_post_json(eng->auren_url, "/v1/chat/completions", req_body, resp_buf, sizeof(resp_buf))) {
+				if (!http_post_json_sse_stream(eng->auren_url, "/v1/chat/completions", req_body,
+				                               !eng->dry_run, llm_content, sizeof(llm_content),
+				                               &turn_streamed_tts)) {
 					continue;
-				}
-				jjson_val_t *rv = jjson_parse(resp_buf);
-				if (rv) {
-					const jjson_val_t *choices = jjson_obj_get(rv, "choices");
-					if (choices && choices->type == JJSON_ARRAY && choices->u.arr.count > 0) {
-						const jjson_val_t *msg = jjson_obj_get(choices->u.arr.items[0], "message");
-						const char *c = jjson_obj_get_str(msg, "content", NULL);
-						if (!c || !*c) c = jjson_obj_get_str(msg, "reasoning_content", NULL);
-						if (c && *c) snprintf(llm_content, sizeof(llm_content), "%s", c);
-					}
-					jjson_free(rv);
 				}
 			}
 		}
@@ -2345,6 +2589,9 @@ bool jarvis_auren_run_react_agent(
 		bool has_action = false;
 
 		for (size_t si = 0; si < n_turn_steps && out_res->step_count < JARVIS_MAX_STEPS; si++) {
+			if (turn_streamed_tts) {
+				turn_steps[si].args.streamed_tts = true;
+			}
 			jarvis_step_t *st = &out_res->steps[out_res->step_count++];
 			memset(st, 0, sizeof(*st));
 			snprintf(st->clause, sizeof(st->clause), "%s", utterance);

@@ -227,6 +227,7 @@ static struct {
 	void           *ort_sess;
 
 	bool            is_piper;
+	bool            is_kokoro_pt;
 	char            loaded_model[512];
 	char            loaded_voice[64];
 	float          *kokoro_style; /* 510 * 256 floats = 510 KB, NULL when unloaded */
@@ -320,7 +321,7 @@ static void get_tts_voice(char *out, size_t out_sz)
 	if (rc_lookup("tts_voice", out, out_sz) && out[0]) {
 		return;
 	}
-	snprintf(out, out_sz, "pm_alex");
+	snprintf(out, out_sz, "pm_tuga");
 }
 
 static void set_mic_mute(bool muted)
@@ -641,7 +642,7 @@ static void phonemize_to_ipa(const char *text, const char *espeak_voice, char *o
  * 4. Normalize word-final European Portuguese ʃ (U+0283, CA 83) before whitespace/punctuation/EOS
  *    to 's' so Kokoro's pm_alex voice does not over-palatalize final -s into English "-sh" ("Jarbash").
  */
-static void postprocess_kokoro_pt_ipa(char *ipa, size_t max_sz)
+static void postprocess_kokoro_pt_ipa(char *ipa, size_t max_sz, bool is_native_pt_pt)
 {
 	if (!ipa || !ipa[0]) return;
 	char out[1024];
@@ -669,7 +670,7 @@ static void postprocess_kokoro_pt_ipa(char *ipa, size_t max_sz)
 			s += 5;
 			continue;
 		}
-		if (s[0] == 0xCA && s[1] == 0x83) {
+		if (!is_native_pt_pt && s[0] == 0xCA && s[1] == 0x83) {
 			unsigned char nxt = s[2];
 			if (nxt == '\0' || nxt == ' ' || nxt == ',' || nxt == '.' ||
 			    nxt == '!' || nxt == '?' || nxt == ';' || nxt == ':') {
@@ -739,6 +740,7 @@ static bool tts_engine_ensure_loaded(const char *voice)
 	if (!home || !*home) return false;
 
 	bool want_piper = (strncmp(voice, "piper:", 6) == 0);
+	bool want_kokoro_pt = false;
 	char model_path[512];
 	char voices_bin[512];
 	snprintf(voices_bin, sizeof(voices_bin), "%s/.local/share/kokoro/voices-v1.0.bin", home);
@@ -755,10 +757,16 @@ static bool tts_engine_ensure_loaded(const char *voice)
 			snprintf(model_path, sizeof(model_path), "%s/.local/share/piper/%s.onnx", home, p_name);
 		}
 	} else {
-		snprintf(model_path, sizeof(model_path), "%s/.local/share/kokoro/kokoro-v1.0.int8.onnx", home);
-		if (access(model_path, R_OK) != 0 || access(voices_bin, R_OK) != 0) {
-			want_piper = true;
-			snprintf(model_path, sizeof(model_path), "%s/.local/share/piper/en_GB-northern_english_male-medium.onnx", home);
+		bool is_pt_voice = (!voice || !*voice || tolower((unsigned char)voice[0]) == 'p');
+		snprintf(model_path, sizeof(model_path), "%s/.local/share/kokoro/kokoro-pt-pt.onnx", home);
+		if (is_pt_voice && access(model_path, R_OK) == 0 && access(voices_bin, R_OK) == 0) {
+			want_kokoro_pt = true;
+		} else {
+			snprintf(model_path, sizeof(model_path), "%s/.local/share/kokoro/kokoro-v1.0.int8.onnx", home);
+			if (access(model_path, R_OK) != 0 || access(voices_bin, R_OK) != 0) {
+				want_piper = true;
+				snprintf(model_path, sizeof(model_path), "%s/.local/share/piper/en_GB-northern_english_male-medium.onnx", home);
+			}
 		}
 	}
 
@@ -869,7 +877,7 @@ static bool tts_engine_ensure_loaded(const char *voice)
 		void *st = create_so(&so);
 		if (st) { ort_release_status(st); return false; }
 		ort_release_status(set_opt(so, 99 /* ORT_ENABLE_ALL */));
-		ort_release_status(set_intra(so, 6));
+		ort_release_status(set_intra(so, 4));
 		ort_release_status(set_inter(so, 1));
 
 		st = create_sess(g_tts.ort_env, model_path, so, &g_tts.ort_sess);
@@ -880,14 +888,22 @@ static bool tts_engine_ensure_loaded(const char *voice)
 		}
 		snprintf(g_tts.loaded_model, sizeof(g_tts.loaded_model), "%s", model_path);
 		g_tts.is_piper = want_piper;
+		g_tts.is_kokoro_pt = want_kokoro_pt;
 	}
 
 	/* 4. Load single 510 KB Kokoro voice style matrix if using Kokoro */
 	if (!g_tts.is_piper) {
-		const char *vname = (voice && *voice) ? voice : "bm_daniel";
+		const char *vname = (voice && *voice) ? voice : (g_tts.is_kokoro_pt ? "pm_tuga" : "bm_daniel");
+		if (g_tts.is_kokoro_pt && strcmp(vname, "pm_alex") == 0) {
+			vname = "pm_tuga";
+		}
 		if (!g_tts.kokoro_style || strcmp(g_tts.loaded_voice, vname) != 0) {
 			free(g_tts.kokoro_style);
 			g_tts.kokoro_style = load_kokoro_voice_npy(voices_bin, vname);
+			if (!g_tts.kokoro_style && g_tts.is_kokoro_pt && strcmp(vname, "pm_tuga") != 0) {
+				vname = "pm_tuga";
+				g_tts.kokoro_style = load_kokoro_voice_npy(voices_bin, vname);
+			}
 			if (!g_tts.kokoro_style && strcmp(vname, "bm_daniel") != 0) {
 				vname = "bm_daniel";
 				g_tts.kokoro_style = load_kokoro_voice_npy(voices_bin, vname);
@@ -968,7 +984,7 @@ static int16_t *synthesize_segment_pcm(const char *seg_text, const char *voice, 
 	phonemize_to_ipa(seg_text, espeak_lang, ipa, sizeof(ipa));
 	if (!ipa[0]) return NULL;
 	if (!g_tts.is_piper && strncmp(espeak_lang, "pt", 2) == 0) {
-		postprocess_kokoro_pt_ipa(ipa, sizeof(ipa));
+		postprocess_kokoro_pt_ipa(ipa, sizeof(ipa), g_tts.is_kokoro_pt);
 	}
 
 	ort_CreateTensorWithData_fn create_tensor = (ort_CreateTensorWithData_fn)g_tts.ort_vtbl[ORT_IDX_CreateTensorWithData];
@@ -1003,7 +1019,7 @@ static int16_t *synthesize_segment_pcm(const char *seg_text, const char *voice, 
 		size_t eff_inner = (n_inner < 65) ? 65 : n_inner;
 		size_t style_row = (eff_inner <= KOKORO_STYLE_ROWS) ? (eff_inner - 1) : (KOKORO_STYLE_ROWS - 1);
 		float *style_vec = g_tts.kokoro_style + (style_row * KOKORO_STYLE_DIM);
-		float speed_val = 1.06f;
+		float speed_val = g_tts.is_kokoro_pt ? 1.02f : 1.06f;
 
 		int64_t tok_shape[2] = { 1, (int64_t)seq_len };
 		int64_t style_shape[2] = { 1, KOKORO_STYLE_DIM };
@@ -1014,9 +1030,9 @@ static int16_t *synthesize_segment_pcm(const char *seg_text, const char *voice, 
 		ort_release_status(create_tensor(g_tts.ort_mem_info, style_vec, KOKORO_STYLE_DIM * sizeof(float), style_shape, 2, ONNX_TENSOR_FLOAT, &v_style));
 		ort_release_status(create_tensor(g_tts.ort_mem_info, &speed_val, sizeof(float), speed_shape, 1, ONNX_TENSOR_FLOAT, &v_speed));
 
-		const char *in_names[3] = { "tokens", "style", "speed" };
+		const char *in_names[3] = { g_tts.is_kokoro_pt ? "input_ids" : "tokens", "style", "speed" };
 		const void *in_vals[3] = { v_tok, v_style, v_speed };
-		const char *out_names[1] = { "audio" };
+		const char *out_names[1] = { g_tts.is_kokoro_pt ? "waveform" : "audio" };
 
 		void *st = ort_run(g_tts.ort_sess, NULL, in_names, in_vals, 3, out_names, 1, &out_val);
 		if (v_tok) rel_val(v_tok);
@@ -1111,16 +1127,52 @@ static int16_t *synthesize_segment_pcm(const char *seg_text, const char *voice, 
 }
 
 /* ---------------------------------------------------------------------------
- * Raw PCM PipeWire Playback with Instant SIGKILL Preemption
+ * Persistent PipeWire Playback Stream & Instant SIGKILL Preemption
  * ------------------------------------------------------------------------- */
 
-static void play_pcm_blocking(const int16_t *pcm, size_t n_samples, int sample_rate, uint64_t my_gen)
+static int      g_pw_pipe_fd = -1;
+static int      g_pw_rate    = 0;
+
+static void close_persistent_player_locked(bool kill_immediate)
 {
-	if (!pcm || n_samples == 0) return;
+	if (g_pw_pipe_fd >= 0) {
+		close(g_pw_pipe_fd);
+		g_pw_pipe_fd = -1;
+	}
+	pid_t pid = g_tts.player_pid;
+	g_tts.player_pid = -1;
+	g_pw_rate = 0;
+	if (pid > 1) {
+		if (kill_immediate) {
+			kill(pid, SIGKILL);
+		}
+		pthread_mutex_unlock(&g_tts.mtx);
+		int st = 0;
+		waitpid(pid, &st, 0);
+		pthread_mutex_lock(&g_tts.mtx);
+	}
+}
+
+static int ensure_persistent_player_locked(int sample_rate)
+{
+	if (g_tts.player_pid > 1 && g_pw_pipe_fd >= 0 && g_pw_rate == sample_rate) {
+		int st = 0;
+		pid_t w = waitpid(g_tts.player_pid, &st, WNOHANG);
+		if (w == 0) {
+			return g_pw_pipe_fd;
+		}
+		close(g_pw_pipe_fd);
+		g_pw_pipe_fd = -1;
+		g_tts.player_pid = -1;
+	} else if (g_tts.player_pid > 1 || g_pw_pipe_fd >= 0) {
+		close_persistent_player_locked(false);
+	}
 
 	int pfd[2];
-	if (pipe(pfd) < 0) return;
-
+	if (pipe(pfd) < 0) return -1;
+#ifdef F_SETPIPE_SZ
+	(void)fcntl(pfd[1], F_SETPIPE_SZ, 1048576);
+#endif
 	char rate_arg[32];
 	snprintf(rate_arg, sizeof(rate_arg), "--rate=%d", sample_rate);
 
@@ -1135,51 +1187,20 @@ static void play_pcm_blocking(const int16_t *pcm, size_t n_samples, int sample_r
 			dup2(devnull, STDERR_FILENO);
 			if (devnull > 2) close(devnull);
 		}
-		execlp("pw-cat", "pw-cat", "-p", "--raw", rate_arg, "--channels=1", "--format=s16", "-", (char *)NULL);
+		execlp("pw-cat", "pw-cat", "-p", "--raw", rate_arg,
+		       "--channels=1", "--format=s16",
+		       "--properties=media.role=Communication", "-", (char *)NULL);
 		_exit(127);
 	}
 	close(pfd[0]);
 	if (pid < 0) {
 		close(pfd[1]);
-		return;
-	}
-
-	pthread_mutex_lock(&g_tts.mtx);
-	if (g_tts.cancel_gen != my_gen) {
-		pthread_mutex_unlock(&g_tts.mtx);
-		close(pfd[1]);
-		kill(pid, SIGKILL);
-		waitpid(pid, NULL, 0);
-		return;
+		return -1;
 	}
 	g_tts.player_pid = pid;
-	pthread_mutex_unlock(&g_tts.mtx);
-
-	const uint8_t *ptr = (const uint8_t *)pcm;
-	size_t rem = n_samples * sizeof(int16_t);
-	while (rem > 0) {
-		pthread_mutex_lock(&g_tts.mtx);
-		bool cancelled = (g_tts.cancel_gen != my_gen);
-		pthread_mutex_unlock(&g_tts.mtx);
-		if (cancelled) break;
-
-		size_t chunk = rem > 4096 ? 4096 : rem;
-		ssize_t nw = write(pfd[1], ptr, chunk);
-		if (nw <= 0) {
-			if (nw < 0 && errno == EINTR) continue;
-			break;
-		}
-		ptr += nw;
-		rem -= (size_t)nw;
-	}
-	close(pfd[1]);
-
-	int st = 0;
-	waitpid(pid, &st, 0);
-
-	pthread_mutex_lock(&g_tts.mtx);
-	if (g_tts.player_pid == pid) g_tts.player_pid = -1;
-	pthread_mutex_unlock(&g_tts.mtx);
+	g_pw_pipe_fd = pfd[1];
+	g_pw_rate = sample_rate;
+	return g_pw_pipe_fd;
 }
 
 /* ---------------------------------------------------------------------------
@@ -1198,9 +1219,15 @@ static void *tts_worker_fn(void *arg)
 	pthread_mutex_lock(&g_tts.mtx);
 	for (;;) {
 		while (g_tts.q_count == 0 && !prefetched_pcm) {
+			/* Close the persistent pw-cat pipe once the segment queue drains so
+			 * waitpid() drains the final audio buffer cleanly before clearing state.
+			 */
+			if (g_tts.player_pid > 1 || g_pw_pipe_fd >= 0) {
+				close_persistent_player_locked(false);
+			}
 			if (mic_muted) {
 				pthread_mutex_unlock(&g_tts.mtx);
-				usleep(180000);
+				usleep(120000);
 				write_tts_active_state(NULL, false);
 				set_mic_mute(false);
 				mic_muted = false;
@@ -1254,6 +1281,17 @@ static void *tts_worker_fn(void *arg)
 			tts_segment_t seg = g_tts.queue[g_tts.q_head];
 			g_tts.q_head = (g_tts.q_head + 1) % MAX_TTS_QUEUE;
 			g_tts.q_count--;
+
+			/* Speculative warmup packet ("__WARMUP__"): pre-load ONNX & eSpeak into RAM
+			 * on wake-word detection without emitting audio or marking busy_speaking!
+			 */
+			if (strcmp(seg.text, "__WARMUP__") == 0) {
+				pthread_mutex_unlock(&g_tts.mtx);
+				(void)tts_engine_ensure_loaded(seg.voice);
+				pthread_mutex_lock(&g_tts.mtx);
+				continue;
+			}
+
 			g_tts.busy_speaking = true;
 			pthread_mutex_unlock(&g_tts.mtx);
 
@@ -1263,84 +1301,49 @@ static void *tts_worker_fn(void *arg)
 		if (pcm && n_samples > 0) {
 			pthread_mutex_lock(&g_tts.mtx);
 			bool cancelled = (g_tts.cancel_gen != my_gen);
-			bool has_next = (!cancelled && g_tts.q_count > 0);
-			tts_segment_t next_seg;
-			if (has_next) {
-				next_seg = g_tts.queue[g_tts.q_head];
-				g_tts.q_head = (g_tts.q_head + 1) % MAX_TTS_QUEUE;
-				g_tts.q_count--;
-			}
+			int pfd_w = (!cancelled) ? ensure_persistent_player_locked(sample_rate) : -1;
 			pthread_mutex_unlock(&g_tts.mtx);
 
-			if (!cancelled) {
+			if (!cancelled && pfd_w >= 0) {
 				if (!mic_muted) {
 					set_mic_mute(true);
 					mic_muted = true;
 				}
-				if (!has_next) {
-					play_pcm_blocking(pcm, n_samples, sample_rate, my_gen);
-				} else {
-					/* Start pw-cat asynchronously and enlarge the Linux pipe capacity to 512 KB
-					 * so the entire segment PCM (~180 KB) writes without blocking on the default
-					 * 64 KB pipe buffer, allowing synthesize_segment_pcm(next_seg) to start at t=0ms!
-					 */
-					int pfd[2];
-					pid_t pid = -1;
-					if (pipe(pfd) == 0) {
-#ifdef F_SETPIPE_SZ
-						(void)fcntl(pfd[1], F_SETPIPE_SZ, 524288);
-#endif
-						char rate_arg[32];
-						snprintf(rate_arg, sizeof(rate_arg), "--rate=%d", sample_rate);
-						pid = fork();
-						if (pid == 0) {
-							close(pfd[1]);
-							dup2(pfd[0], STDIN_FILENO);
-							if (pfd[0] != STDIN_FILENO) close(pfd[0]);
-							int devnull = open("/dev/null", O_RDWR);
-							if (devnull >= 0) {
-								dup2(devnull, STDOUT_FILENO);
-								dup2(devnull, STDERR_FILENO);
-								if (devnull > 2) close(devnull);
-							}
-							execlp("pw-cat", "pw-cat", "-p", "--raw", rate_arg, "--channels=1", "--format=s16", "-", (char *)NULL);
-							_exit(127);
-						}
-						close(pfd[0]);
+				const uint8_t *ptr = (const uint8_t *)pcm;
+				size_t rem = n_samples * sizeof(int16_t);
+				while (rem > 0) {
+					pthread_mutex_lock(&g_tts.mtx);
+					bool now_canc = (g_tts.cancel_gen != my_gen || g_pw_pipe_fd != pfd_w);
+					pthread_mutex_unlock(&g_tts.mtx);
+					if (now_canc) break;
+
+					size_t chunk = rem > 32768 ? 32768 : rem;
+					ssize_t nw = write(pfd_w, ptr, chunk);
+					if (nw <= 0) {
+						if (nw < 0 && errno == EINTR) continue;
+						break;
 					}
-					if (pid > 0) {
-						pthread_mutex_lock(&g_tts.mtx);
-						g_tts.player_pid = pid;
-						pthread_mutex_unlock(&g_tts.mtx);
+					ptr += nw;
+					rem -= (size_t)nw;
+				}
 
-						const uint8_t *ptr = (const uint8_t *)pcm;
-						size_t rem = n_samples * sizeof(int16_t);
-						while (rem > 0) {
-							size_t chunk = rem > 32768 ? 32768 : rem;
-							ssize_t nw = write(pfd[1], ptr, chunk);
-							if (nw <= 0) {
-								if (nw < 0 && errno == EINTR) continue;
-								break;
-							}
-							ptr += nw;
-							rem -= (size_t)nw;
-						}
-						close(pfd[1]);
+				/* Immediately synthesize the next queued segment while PipeWire
+				 * plays the 1 MB kernel pipe buffer in the background!
+				 */
+				pthread_mutex_lock(&g_tts.mtx);
+				bool has_next = (g_tts.cancel_gen == my_gen && g_tts.q_count > 0);
+				tts_segment_t next_seg;
+				if (has_next) {
+					next_seg = g_tts.queue[g_tts.q_head];
+					g_tts.q_head = (g_tts.q_head + 1) % MAX_TTS_QUEUE;
+					g_tts.q_count--;
+				}
+				pthread_mutex_unlock(&g_tts.mtx);
 
-						/* Synthesize next segment immediately while pw-cat plays the 512 KB pipe buffer */
-						prefetched_pcm = synthesize_segment_pcm(next_seg.text, next_seg.voice,
-						                                        &prefetched_samples, &prefetched_rate);
-						prefetched_gen = my_gen;
-
-						int st = 0;
-						waitpid(pid, &st, 0);
-						pthread_mutex_lock(&g_tts.mtx);
-						if (g_tts.player_pid == pid) g_tts.player_pid = -1;
-						pthread_mutex_unlock(&g_tts.mtx);
-					} else {
-						if (pid < 0 && pfd[1] >= 0) close(pfd[1]);
-						play_pcm_blocking(pcm, n_samples, sample_rate, my_gen);
-					}
+				if (has_next && strcmp(next_seg.text, "__WARMUP__") != 0) {
+					prefetched_pcm = synthesize_segment_pcm(next_seg.text, next_seg.voice,
+					                                        &prefetched_samples, &prefetched_rate);
+					prefetched_gen = my_gen;
 				}
 			}
 		}
@@ -1358,7 +1361,9 @@ static void enqueue_segment_locked(const char *text, const char *voice)
 	snprintf(slot->voice, sizeof(slot->voice), "%s", voice);
 	g_tts.q_tail = (g_tts.q_tail + 1) % MAX_TTS_QUEUE;
 	g_tts.q_count++;
-	g_tts.busy_speaking = true;
+	if (strcmp(text, "__WARMUP__") != 0) {
+		g_tts.busy_speaking = true;
+	}
 
 	if (!g_tts.worker_running) {
 		pthread_t tid;
@@ -1378,23 +1383,22 @@ static void split_and_enqueue_locked(const char *clean, const char *voice, bool 
 		while (*p && isspace((unsigned char)*p)) p++;
 		if (!*p) break;
 
-		/* Prefer natural sentence/comma boundaries within 68..85 chars so the first
-		 * segment is never chopped mid-noun-phrase at 42 chars, while keeping subsequent
-		 * segments sized (~65 chars) so synthesis finishes during the current segment's playback.
+		/* Micro-First-Chunk Strategy:
+		 * For the very first segment (`first_seg == true`), cut at the earliest natural
+		 * sentence, clause, or comma boundary in 16..38 chars (or word boundary at <=36 chars).
+		 * On kokoro-pt-pt.onnx (4 P-cores), a 25-char opening clause synthesizes in ~210ms
+		 * and plays for ~1.4s through the persistent 1MB pw-cat pipe while Segment 2 (68 chars)
+		 * synthesizes in parallel with zero inter-clause gap!
 		 */
-		size_t max_len = first_seg ? 68 : 72;
+		size_t max_len = first_seg ? 38 : 72;
 		size_t rem = strlen(p);
 		if (rem <= max_len) {
 			enqueue_segment_locked(p, voice);
 			break;
 		}
 
-		/* 1. Strong sentence/clause punctuation (. ! ? ; :) within max_len + 16.
-		 * For the first segment, require at least 38 chars before cutting so its playback
-		 * duration (>= 2.2s) completely hides the ~1.6s synthesis latency of Segment 1.
-		 */
-		size_t scan_lim = max_len + 16;
-		size_t min_cut = first_seg ? 38 : 22;
+		size_t scan_lim = first_seg ? (max_len + 10) : (max_len + 16);
+		size_t min_cut = first_seg ? 14 : 22;
 		size_t cut = 0;
 		for (size_t i = min_cut; i < scan_lim && p[i]; i++) {
 			if (strchr(".!?;:", p[i]) && (p[i + 1] == ' ' || p[i + 1] == '\0')) {
@@ -1405,7 +1409,8 @@ static void split_and_enqueue_locked(const char *clean, const char *voice, bool 
 		/* 2. Comma boundary */
 		if (!cut) {
 			size_t clim = (rem < scan_lim) ? rem : scan_lim;
-			for (size_t i = clim; i > 20; i--) {
+			size_t min_comma = first_seg ? 14 : 20;
+			for (size_t i = min_comma; i < clim && p[i]; i++) {
 				if (p[i] == ',' && p[i + 1] == ' ') {
 					cut = i + 1;
 					break;
@@ -1414,7 +1419,8 @@ static void split_and_enqueue_locked(const char *clean, const char *voice, bool 
 		}
 		/* 3. Word boundary near max_len */
 		if (!cut) {
-			for (size_t i = max_len; i > 24; i--) {
+			size_t min_word = first_seg ? 16 : 24;
+			for (size_t i = max_len; i > min_word; i--) {
 				if (p[i] == ' ') {
 					cut = i;
 					break;
@@ -1447,6 +1453,10 @@ XY_IMPL(int, jarvis_xy_tts_interrupt, int, dummy)
 	g_tts.q_tail = 0;
 	g_tts.q_count = 0;
 	g_tts.busy_speaking = false;
+	if (g_pw_pipe_fd >= 0) {
+		close(g_pw_pipe_fd);
+		g_pw_pipe_fd = -1;
+	}
 	pid_t pid = g_tts.player_pid;
 	if (pid > 1) {
 		kill(pid, SIGKILL);
@@ -1460,7 +1470,6 @@ XY_IMPL(int, jarvis_xy_tts_interrupt, int, dummy)
 
 XY_IMPL(int, jarvis_xy_speak_clause, const char *, session_id, const char *, clause_text, int, is_final)
 {
-	(void)session_id;
 	if (!is_tts_enabled()) {
 		/* Ensure any loaded TTS resources are released if user disabled TTS */
 		jarvis_xy_tts_interrupt(0);
@@ -1469,6 +1478,18 @@ XY_IMPL(int, jarvis_xy_speak_clause, const char *, session_id, const char *, cla
 
 	char voice[64];
 	get_tts_voice(voice, sizeof(voice));
+
+	/* Speculative warmup on wake-word confirmation: pre-warm ONNX & eSpeak in the
+	 * background worker thread before the user even finishes speaking their command!
+	 */
+	if (session_id && strcmp(session_id, "warmup") == 0) {
+		pthread_mutex_lock(&g_tts.mtx);
+		if (g_tts.q_count == 0 && !g_tts.busy_speaking) {
+			enqueue_segment_locked("__WARMUP__", voice);
+		}
+		pthread_mutex_unlock(&g_tts.mtx);
+		return 0;
+	}
 
 	char clean[512];
 	clean_speech_text(clause_text, clean, sizeof(clean));
