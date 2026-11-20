@@ -981,13 +981,13 @@ trim_inplace(char *s)
  * clip never outputs "Go to workspace 1 Go to workspace 1".
  */
 static void
-collapse_repetitions(char *s)
+collapse_repetitions(char *s, size_t s_sz)
 {
 	char copy[4096];
 	char *words[256];
 	int n_words = 0;
 
-	if (!s || !*s)
+	if (!s || !*s || s_sz == 0)
 		return;
 	snprintf(copy, sizeof(copy), "%s", s);
 
@@ -1084,11 +1084,15 @@ collapse_repetitions(char *s)
 		}
 	}
 
+	size_t off = 0;
 	s[0] = '\0';
 	for (int i = 0; i < n_words; i++) {
-		if (i > 0)
-			strcat(s, " ");
-		strcat(s, words[i]);
+		int n = snprintf(s + off, s_sz - off, "%s%s", (i > 0) ? " " : "", words[i]);
+		if (n < 0 || (size_t)n >= s_sz - off) {
+			s[s_sz - 1] = '\0';
+			break;
+		}
+		off += (size_t)n;
 	}
 }
 
@@ -1273,7 +1277,7 @@ run_whisper_slice(struct whisper_context *ctx, int n_threads, const float *pcm, 
 	}
 	free(agc_pcm);
 	trim_inplace(out_text);
-	collapse_repetitions(out_text);
+	collapse_repetitions(out_text, out_sz);
 }
 
 /* Dedicated background worker thread for ctx_main so the 20ms PipeWire VAD loop
@@ -1726,6 +1730,8 @@ handle_stream(int srv, int cli, const char *mode, const char *lang,
 
 		pthread_mutex_lock(&g_audio.mtx);
 		int64_t avail_f = g_audio.total_frames;
+		if (avail_f - scan_f > RING_FRAMES - 4)
+			scan_f = avail_f - (RING_FRAMES - 4);
 
 		while (scan_f < avail_f) {
 			float db = g_audio.db[scan_f % RING_FRAMES];
@@ -2002,6 +2008,8 @@ handle_jarvis_wait(int srv, int cli, struct whisper_context *ctx_wake, int n_thr
 
 		pthread_mutex_lock(&g_audio.mtx);
 		int64_t avail_f = g_audio.total_frames;
+		if (avail_f - scan_f > RING_FRAMES - 4)
+			scan_f = avail_f - (RING_FRAMES - 4);
 
 		while (scan_f < avail_f) {
 			float db = g_audio.db[scan_f % RING_FRAMES];

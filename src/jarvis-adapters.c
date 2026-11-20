@@ -1,5 +1,4 @@
-#include "../include/ttypt/jarvis-types.h"
-#include <ttypt/xy.h>
+#include "../include/ttypt/jarvis.h"
 
 #if !defined(__wasm__) && !defined(_WIN32)
 #include <ctype.h>
@@ -117,6 +116,14 @@ int jarvis_desktop_execute_fallback(const jarvis_dsl_t *dsl, jarvis_adapter_resu
 		return 0;
 	}
 	if (strcmp(op, "run_background_command") == 0 && dsl->target.command[0]) {
+		if (jarvis_is_destructive_command(dsl->target.command) &&
+		    jarvis_xy_confirm(dsl->target.command) != 1) {
+			res->handled = true;
+			res->success = false;
+			snprintf(res->output, sizeof(res->output),
+			         "Blocked destructive command: %.200s", dsl->target.command);
+			return 0;
+		}
 		run_capture(dsl->target.command, res->output, sizeof(res->output));
 		res->handled = true;
 		res->success = true;

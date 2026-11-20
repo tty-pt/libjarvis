@@ -699,8 +699,29 @@ static bool tts_engine_ensure_loaded(const char *voice)
 			tts_engine_unload();
 			return false;
 		}
-		g_tts.ort_vtbl = (const void **)get_base()->GetApi(ORT_API_VERSION);
-		if (!g_tts.ort_vtbl) {
+		const OrtApiBase_t *base = get_base();
+		g_tts.ort_vtbl = (const void **)base->GetApi(ORT_API_VERSION);
+		if (!g_tts.ort_vtbl ||
+		    !g_tts.ort_vtbl[ORT_IDX_CreateEnv] ||
+		    !g_tts.ort_vtbl[ORT_IDX_CreateSession] ||
+		    !g_tts.ort_vtbl[ORT_IDX_Run] ||
+		    !g_tts.ort_vtbl[ORT_IDX_CreateSessionOptions] ||
+		    !g_tts.ort_vtbl[ORT_IDX_DisableCpuMemArena] ||
+		    !g_tts.ort_vtbl[ORT_IDX_SetGraphOptimizationLevel] ||
+		    !g_tts.ort_vtbl[ORT_IDX_SetIntraOpNumThreads] ||
+		    !g_tts.ort_vtbl[ORT_IDX_SetInterOpNumThreads] ||
+		    !g_tts.ort_vtbl[ORT_IDX_CreateTensorWithData] ||
+		    !g_tts.ort_vtbl[ORT_IDX_GetTensorMutableData] ||
+		    !g_tts.ort_vtbl[ORT_IDX_GetTensorShapeElementCount] ||
+		    !g_tts.ort_vtbl[ORT_IDX_GetTensorTypeAndShape] ||
+		    !g_tts.ort_vtbl[ORT_IDX_CreateCpuMemoryInfo] ||
+		    !g_tts.ort_vtbl[ORT_IDX_ReleaseEnv] ||
+		    !g_tts.ort_vtbl[ORT_IDX_ReleaseStatus] ||
+		    !g_tts.ort_vtbl[ORT_IDX_ReleaseMemoryInfo] ||
+		    !g_tts.ort_vtbl[ORT_IDX_ReleaseSession] ||
+		    !g_tts.ort_vtbl[ORT_IDX_ReleaseValue] ||
+		    !g_tts.ort_vtbl[ORT_IDX_ReleaseTensorTypeAndShape] ||
+		    !g_tts.ort_vtbl[ORT_IDX_ReleaseSessionOptions]) {
 			tts_engine_unload();
 			return false;
 		}
