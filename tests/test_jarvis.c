@@ -716,6 +716,12 @@ static void test_10_multilingual_portuguese_and_libmm_memory(jarvis_engine_t *en
 	assert(strcmp(pt6.last_dsl.op, "workspace_move_window") == 0);
 	assert(pt6.last_dsl.args.workspace == 1);
 
+	/* 4b. Classical Phonetic Projection + Viterbi DP Alignment on noisy pt-PT ASR transcripts */
+	assert_cmd_op(eng, "Podes abrir a calculadora, se faz favor?", "open_application", "gnome-calculator");
+	assert_cmd_op(eng, "o que épode ir a vinha coculdora, esfçibora", "open_application", "gnome-calculator");
+	assert_cmd_op(eng, "jarvas abre o navegador se faz favor", "open_application", "firefox");
+	assert_cmd_op(eng, "podes mudar para a área de trabalho três se faz favor", "workspace_switch", "\"workspace\":3");
+
 	/* Hallucination phrase from ontology (Portuguese & English) */
 	assert(jarvis_is_non_speech_hallucination("obrigado"));
 	assert(jarvis_is_non_speech_hallucination("Thank you for watching!"));

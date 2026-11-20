@@ -348,7 +348,12 @@ bool jarvis_ontology_is_interrogative(const jarvis_ontology_t *ont, const char *
 bool jarvis_ontology_clause_targets_other(const jarvis_ontology_t *ont, const char *clause);
 int  jarvis_ontology_extract_workspace_number(const jarvis_ontology_t *ont, const char *clause, int def_ws);
 const jarvis_verb_entry_t *jarvis_ontology_find_verb_phrase(const jarvis_ontology_t *ont, const char *phrase);
+const jarvis_verb_entry_t *jarvis_ontology_find_verb_phrase_fuzzy(const jarvis_ontology_t *ont, const char *phrase, double *out_sim);
 const jarvis_ontology_t *jarvis_ontology_get_active(void);
+
+void   jarvis_phonetic_encode(const char *clean_str, char *out_phon, size_t phon_sz, char *out_skel, size_t skel_sz);
+int    jarvis_damerau_levenshtein(const char *a, const char *b);
+double jarvis_token_similarity(const char *a_clean, const char *b_clean);
 
 /* Live entity index merging static ontology entities + dynamic host entities */
 typedef struct {
@@ -365,6 +370,12 @@ void jarvis_ontology_build_live_index(
 const jarvis_entity_entry_t *jarvis_live_index_find(
 	const jarvis_live_index_t *idx,
 	const char                *phrase
+);
+
+const jarvis_entity_entry_t *jarvis_live_index_find_fuzzy(
+	const jarvis_live_index_t *idx,
+	const char                *phrase,
+	double                    *out_sim
 );
 
 /* ---------------------------------------------------------------------------

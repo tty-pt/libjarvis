@@ -866,14 +866,75 @@ load_wav_f32(const char *path, float **out_pcm, int *out_samples)
 static int
 compute_audio_ctx(int n_samples, int is_wake, int is_partial)
 {
-	int frames = (n_samples / 320) + (is_wake ? 24 : (is_partial ? 32 : 36));
+	int frames = (n_samples / 320) + (is_wake ? 32 : (is_partial ? 48 : 64));
 	int aligned = ((frames + 31) / 32) * 32;
-	int min_ctx = is_wake ? 64 : 128;
+	int min_ctx = is_wake ? 256 : (is_partial ? 512 : 768);
 	if (aligned < min_ctx)
 		aligned = min_ctx;
 	if (aligned > 1500)
 		aligned = 1500;
 	return aligned;
+}
+
+/*
+ * Classical Digital Signal Processing (DSP) Front-End:
+ * 1. First-order 80 Hz IIR high-pass filter (fs = 16000 Hz, alpha = 0.9695)
+ *    removes DC offset and low-frequency rumble/plosive energy.
+ * 2. Active-speech RMS & peak estimation with Automatic Gain Control (AGC)
+ *    normalizes quiet speech toward target peak 0.707 (-3.0 dBFS) and target
+ *    active RMS 0.12 (-18.4 dBFS), capped at +18 dB (8.0x) gain so pure
+ *    ambient noise floor is never over-amplified.
+ */
+static float *
+normalize_pcm_agc(const float *pcm, int n_samples)
+{
+	if (!pcm || n_samples <= 0)
+		return NULL;
+	float *buf = malloc((size_t)n_samples * sizeof(float));
+	if (!buf)
+		return NULL;
+
+	const float alpha = 0.9695f;
+	float prev_x = pcm[0];
+	float prev_y = 0.0f;
+	float peak = 0.0f;
+	double sum_sq = 0.0;
+
+	for (int i = 0; i < n_samples; i++) {
+		float x = pcm[i];
+		float y = alpha * (prev_y + x - prev_x);
+		prev_x = x;
+		prev_y = y;
+		buf[i] = y;
+		float ay = fabsf(y);
+		if (ay > peak)
+			peak = ay;
+		sum_sq += (double)y * (double)y;
+	}
+
+	double rms = sqrt(sum_sq / (double)n_samples);
+	/* Only apply boost if signal contains genuine acoustic energy above silence floor */
+	if (peak > 0.008f && rms > 0.0015) {
+		float gain_peak = 0.707f / peak;
+		float gain_rms = (float)(0.11 / rms);
+		float gain = (gain_rms < gain_peak) ? gain_rms : gain_peak;
+		if (gain > 8.0f)
+			gain = 8.0f;
+		if (gain < 0.85f)
+			gain = 0.85f;
+		if (fabsf(gain - 1.0f) > 0.05f) {
+			for (int i = 0; i < n_samples; i++) {
+				float v = buf[i] * gain;
+				if (v > 0.98f)
+					v = 0.98f;
+				else if (v < -0.98f)
+					v = -0.98f;
+				buf[i] = v;
+			}
+		}
+	}
+
+	return buf;
 }
 
 static void
@@ -1043,8 +1104,8 @@ run_whisper_slice(struct whisper_context *ctx, int n_threads, const float *pcm, 
 	wparams.suppress_blank   = true;
 	wparams.suppress_nst     = true;
 	wparams.temperature      = 0.0f;
-	wparams.temperature_inc  = 0.0f;
-	wparams.greedy.best_of   = 1;
+	wparams.temperature_inc  = (is_wake || is_partial) ? 0.0f : 0.2f;
+	wparams.greedy.best_of   = (is_wake || is_partial) ? 1 : 3;
 	wparams.max_tokens       = max_tok;
 	wparams.audio_ctx        = compute_audio_ctx(n_samples, is_wake, is_partial);
 
@@ -1066,7 +1127,10 @@ run_whisper_slice(struct whisper_context *ctx, int n_threads, const float *pcm, 
 	if (prompt && *prompt && strcmp(prompt, "-") != 0)
 		wparams.initial_prompt = prompt;
 
-	if (whisper_full(ctx, wparams, pcm, n_samples) == 0) {
+	float *agc_pcm = normalize_pcm_agc(pcm, n_samples);
+	const float *eff_pcm = agc_pcm ? agc_pcm : pcm;
+
+	if (whisper_full(ctx, wparams, eff_pcm, n_samples) == 0) {
 		int n_seg = whisper_full_n_segments(ctx);
 		int valid_seg = 0;
 		float nsp_limit = is_wake ? 0.72f : 0.58f;
@@ -1179,6 +1243,7 @@ run_whisper_slice(struct whisper_context *ctx, int n_threads, const float *pcm, 
 			pthread_mutex_unlock(&g_audio.mtx);
 		}
 	}
+	free(agc_pcm);
 	trim_inplace(out_text);
 	collapse_repetitions(out_text);
 }
@@ -1837,8 +1902,8 @@ handle_jarvis_wait(int srv, int cli, struct whisper_context *ctx_wake, int n_thr
 	if (is_followup_window)
 		write_state_file(state_file, "jarvis-cmd", NULL, NULL);
 
-	if (cmd_silence_ms < 520)
-		cmd_silence_ms = 520;
+	if (cmd_silence_ms < 640)
+		cmd_silence_ms = 640;
 
 	while (running && !g_stop_req && !g_cancel_req) {
 		poll_control_socket(srv, cli, !wake_confirmed || waiting_post_wake);
@@ -2298,8 +2363,8 @@ handle_jarvis_wait(int srv, int cli, struct whisper_context *ctx_wake, int n_thr
 			 * 4. Hard cap at 350 frames (7.0s).
 			 */
 			if ((silence_frames * FRAME_MS) >= cmd_silence_ms ||
-			    (decoded_cmd_is_final && live_cmd[0] != '\0' && silence_frames >= 21) ||
-			    (voiced_frames >= 8 && trailing_soft_frames >= 38) ||
+			    (decoded_cmd_is_final && live_cmd[0] != '\0' && silence_frames >= 28) ||
+			    (voiced_frames >= 8 && trailing_soft_frames >= 42) ||
 			    cmd_len_f >= 350) {
 				if (voiced_frames < 8 && live_cmd[0] == '\0') {
 					if (now_ms() < post_wake_deadline_ms) {

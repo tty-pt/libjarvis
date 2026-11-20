@@ -194,7 +194,9 @@ static const char *match_folded_wake_span(
 			memcpy(raw_span, span_start, slen);
 			raw_span[slen] = '\0';
 			jarvis_clean_phrase(raw_span, clean_span, sizeof(clean_span));
-			if (strcmp(clean_span, wake_clean) == 0) {
+			if (strcmp(clean_span, wake_clean) == 0 ||
+			    (n_words == 1 && strlen(wake_clean) >= 5 &&
+			     jarvis_token_similarity(clean_span, wake_clean) >= 0.80)) {
 				return cur;
 			}
 		}

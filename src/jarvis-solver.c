@@ -296,6 +296,30 @@ static void join_words(char words[][JARVIS_ID_LEN], size_t start, size_t len, ch
 	}
 }
 
+static bool is_fuzzy_stopword(const jarvis_ontology_t *ont, const char *word)
+{
+	if (!ont || !word || !*word) return false;
+	if (jarvis_ontology_is_stopword(ont, word) ||
+	    jarvis_ontology_is_deictic_pronoun(ont, word) ||
+	    jarvis_ontology_is_polite_prefix(ont, word)) {
+		return true;
+	}
+	if (strlen(word) < 4) return false;
+	for (size_t i = 0; i < ont->stopword_count; i++) {
+		if (strlen(ont->stopwords[i]) >= 4 &&
+		    jarvis_token_similarity(word, ont->stopwords[i]) >= 0.78) {
+			return true;
+		}
+	}
+	for (size_t i = 0; i < ont->polite_prefix_count; i++) {
+		if (strlen(ont->polite_prefixes[i]) >= 4 &&
+		    jarvis_token_similarity(word, ont->polite_prefixes[i]) >= 0.76) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static void extract_constituents(
 	const jarvis_ontology_t   *ont,
 	const char                *clause,
@@ -317,9 +341,9 @@ static void extract_constituents(
 
 	bool consumed[JARVIS_MAX_CLAUSE_WORDS] = {false};
 
-	/* Skip leading polite stopwords configured in ontology */
+	/* Skip leading polite prefixes / stopwords configured in ontology */
 	size_t v_start = 0;
-	while (v_start < n && jarvis_ontology_is_stopword(ont, words[v_start])) {
+	while (v_start < n && is_fuzzy_stopword(ont, words[v_start])) {
 		bool found_lead_vp = false;
 		size_t max_p = (n - v_start < 4) ? (n - v_start) : 4;
 		for (size_t pl = max_p; pl >= 1; pl--) {
@@ -388,7 +412,7 @@ static void extract_constituents(
 			}
 
 			for (size_t t = 0; t < ee->tag_count; t++) {
-				add_entity_match(out_p, ee->tags[t].type, ee->tags[t].id);
+				add_entity_match(out_p, ee->tags[t].type, ee->tags[0].type[0] ? ee->tags[t].id : "");
 			}
 			for (size_t k = i; k < i + L; k++) consumed[k] = true;
 		}
@@ -418,6 +442,104 @@ static void extract_constituents(
 				}
 				for (size_t k = i; k < i + L; k++) consumed[k] = true;
 			}
+		}
+	}
+
+	/* 3b. Dynamic Programming (Viterbi / Wagner-Fischer) Fuzzy Lattice Alignment over unconsumed spans:
+	 *     When ASR noise distorts an entity or verb phrase (e.g. "coculdora" -> "calculadora"),
+	 *     find the globally optimal non-overlapping fuzzy span assignment across unconsumed tokens.
+	 */
+	bool is_open_query_verb = (get_verb_weight(out_p, "INPUT_TYPE") > 0.0 ||
+	                           get_verb_weight(out_p, "SEARCH_WEB") > 0.0 ||
+	                           get_verb_weight(out_p, "PLAY_STREAM") > 0.0 ||
+	                           get_verb_weight(out_p, "AGENT_ASK") > 0.0);
+	if (!is_open_query_verb && out_p->entity_count == 0 && n <= JARVIS_MAX_CLAUSE_WORDS) {
+		double dp[JARVIS_MAX_CLAUSE_WORDS + 1];
+		int    back_len[JARVIS_MAX_CLAUSE_WORDS + 1];
+		int    back_kind[JARVIS_MAX_CLAUSE_WORDS + 1]; /* 0=none, 1=entity, 2=verb */
+		const jarvis_entity_entry_t *back_ee[JARVIS_MAX_CLAUSE_WORDS + 1];
+		const jarvis_verb_entry_t   *back_ve[JARVIS_MAX_CLAUSE_WORDS + 1];
+		double                       back_sim[JARVIS_MAX_CLAUSE_WORDS + 1];
+
+		dp[0] = 0.0;
+		for (size_t i = 1; i <= n; i++) {
+			dp[i]        = dp[i - 1];
+			back_len[i]  = 1;
+			back_kind[i] = 0;
+			back_ee[i]   = NULL;
+			back_ve[i]   = NULL;
+			back_sim[i]  = 0.0;
+
+			size_t max_fl = (i < 3) ? i : 3;
+			for (size_t L = 1; L <= max_fl; L++) {
+				size_t st = i - L;
+				bool any_c = false;
+				for (size_t k = st; k < i; k++) {
+					if (consumed[k] || is_fuzzy_stopword(ont, words[k])) {
+						any_c = true;
+						break;
+					}
+				}
+				if (any_c) continue;
+
+				char span[128];
+				join_words(words, st, L, span, sizeof(span));
+				if (strlen(span) < 5) continue;
+
+				double esim = 0.0;
+				const jarvis_entity_entry_t *fee = jarvis_live_index_find_fuzzy(live_idx, span, &esim);
+				if (fee && esim >= 0.75) {
+					double cand = dp[st] + esim * (double)L;
+					if (cand > dp[i] + 1e-6) {
+						dp[i]        = cand;
+						back_len[i]  = (int)L;
+						back_kind[i] = 1;
+						back_ee[i]   = fee;
+						back_ve[i]   = NULL;
+						back_sim[i]  = esim;
+					}
+				}
+
+				if (out_p->verb_count == 0) {
+					double vsim = 0.0;
+					const jarvis_verb_entry_t *fve = jarvis_ontology_find_verb_phrase_fuzzy(ont, span, &vsim);
+					if (fve && vsim >= 0.78) {
+						double cand = dp[st] + (vsim * 0.95) * (double)L;
+						if (cand > dp[i] + 1e-6) {
+							dp[i]        = cand;
+							back_len[i]  = (int)L;
+							back_kind[i] = 2;
+							back_ee[i]   = NULL;
+							back_ve[i]   = fve;
+							back_sim[i]  = vsim;
+						}
+					}
+				}
+			}
+		}
+
+		/* Backtrack optimal Viterbi path and commit fuzzy constituents */
+		for (size_t cur = n; cur > 0; ) {
+			int L = back_len[cur];
+			if (L <= 0) L = 1;
+			size_t st = cur - (size_t)L;
+			if (back_kind[cur] == 1 && back_ee[cur]) {
+				const jarvis_entity_entry_t *ee = back_ee[cur];
+				for (size_t t = 0; t < ee->tag_count; t++) {
+					add_entity_match(out_p, ee->tags[t].type, ee->tags[t].id);
+				}
+				for (size_t k = st; k < cur; k++) consumed[k] = true;
+			} else if (back_kind[cur] == 2 && back_ve[cur]) {
+				const jarvis_verb_entry_t *ve = back_ve[cur];
+				for (size_t t = 0; t < ve->tag_count; t++) {
+					set_verb_max(out_p, ve->tags[t].concept, ve->tags[t].weight * back_sim[cur]);
+				}
+				if (!out_p->lead_verb_span[0] && st == v_start) {
+					join_words(words, st, (size_t)L, out_p->lead_verb_span, sizeof(out_p->lead_verb_span));
+				}
+				for (size_t k = st; k < cur; k++) consumed[k] = true;
+			}
+			cur = st;
 		}
 	}
 
@@ -478,8 +600,7 @@ static void extract_constituents(
 
 	for (size_t i = 0; i < n && out_p->residual_count < JARVIS_MAX_RESIDUAL_WORDS; i++) {
 		if (!consumed[i] &&
-		    !jarvis_ontology_is_stopword(ont, words[i]) &&
-		    !jarvis_ontology_is_deictic_pronoun(ont, words[i])) {
+		    !is_fuzzy_stopword(ont, words[i])) {
 			char *slot = out_p->residual[out_p->residual_count++];
 			snprintf(slot, sizeof(out_p->residual[0]), "%.*s",
 			         (int)(sizeof(out_p->residual[0]) - 1), words[i]);
@@ -1130,9 +1251,9 @@ bool jarvis_solve_clause(
 		return false;
 	}
 
-	/* Extract raw words without polite prefixes */
+	/* Extract normalized words without polite prefixes */
 	char raw_clean[512];
-	jarvis_clean_phrase(raw_clause, raw_clean, sizeof(raw_clean));
+	jarvis_clean_phrase(norm_clause, raw_clean, sizeof(raw_clean));
 	char *raw_words[64];
 	size_t n_raw = 0;
 	char *save = NULL;
@@ -1445,7 +1566,7 @@ bool jarvis_solve_clause(
 		if (score < 0.0) score = 0.0;
 
 		/* Disambiguation rules */
-		if (strcmp(cid, "app.launch") == 0 && get_verb_weight(&p, "OPEN_LAUNCH") > 0.0 && get_verb_weight(&p, "FOCUS_NAV") <= 0.0) {
+		if (strcmp(cid, "app.launch") == 0 && (get_verb_weight(&p, "OPEN_LAUNCH") > 0.0 || get_verb_weight(&p, "FOCUS_NAV") > 0.0)) {
 			score = 0.99;
 		}
 		if (has_entity_type(&p, "ui.container_kind") && entity_has_id(&p, "ui.container_kind", "terminal") &&

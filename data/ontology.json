@@ -225,7 +225,13 @@
         "proximo",
         "seguinte",
         "anterior",
-        "volta para"
+        "volta para",
+        "ir",
+        "ir a",
+        "ir ao",
+        "vai",
+        "vai a",
+        "vai ao"
       ]
     },
     "PRESENT": {
@@ -2470,7 +2476,9 @@
       "aqui",
       "agora mesmo",
       "para mim",
-      "por favor"
+      "por favor",
+      "se faz favor",
+      "faz favor"
     ],
     "submit": [
       "and press enter",
@@ -3022,6 +3030,8 @@
     "let us",
     "let's",
     "por favor",
+    "se faz favor",
+    "faz favor",
     "podes",
     "pode",
     "poderia",
@@ -4483,7 +4493,7 @@
   "lang": "pt",
   "lang_name": "European Portuguese (pt-PT)",
   "whisper_wake_prompt": "Jarbas, abrir terminal. Jarbas, mudar para a outra janela. Jarbas, tocar música. Jarbas, pesquisar na web.",
-  "whisper_cmd_prompt": "abrir terminal, focar a outra janela, focar navegador, fechar janela, espaço 1, espaço 2, área de trabalho 1, pesquisar no google, abrir youtube, escrever olá, premir enter, deslocar para baixo, aumentar volume, diminuir volume, silenciar, tocar música, pausar, faixa seguinte, estado do sistema, listar ficheiros, git status, o que está no meu terminal, parar.",
+  "whisper_cmd_prompt": "Jarbas, calculadora, terminal, navegador, Firefox, janela, área de trabalho, espaço, volume, música, ficheiros, diretório, pesquisar.",
   "ui_strings": {
     "listening": "A ouvir...",
     "say_command": "Diga o seu comando agora.",

@@ -1247,6 +1247,264 @@ const jarvis_verb_entry_t *jarvis_ontology_find_verb_phrase(const jarvis_ontolog
 	return NULL;
 }
 
+void jarvis_phonetic_encode(
+	const char *clean_str,
+	char       *out_phon,
+	size_t      phon_sz,
+	char       *out_skel,
+	size_t      skel_sz
+)
+{
+	if (out_phon && phon_sz > 0) out_phon[0] = '\0';
+	if (out_skel && skel_sz > 0) out_skel[0] = '\0';
+	if (!clean_str || !*clean_str) return;
+
+	char phon[256];
+	size_t pw = 0;
+
+	for (size_t i = 0; clean_str[i] && pw + 2 < sizeof(phon); ) {
+		unsigned char c = (unsigned char)clean_str[i];
+		if (c == ' ' || c == '\t' || c == '-' || c == '_') {
+			i++;
+			continue;
+		}
+		if (c >= 0x80) {
+			phon[pw++] = (char)c;
+			i++;
+			continue;
+		}
+		char c0 = (char)tolower(c);
+		char c1 = clean_str[i + 1] ? (char)tolower((unsigned char)clean_str[i + 1]) : '\0';
+		char c2 = (c1 && clean_str[i + 2]) ? (char)tolower((unsigned char)clean_str[i + 2]) : '\0';
+
+		char emit = '\0';
+		size_t step = 1;
+
+		if (c0 == 'q' && c1 == 'u') {
+			emit = 'k';
+			step = 2;
+		} else if (c0 == 'g' && c1 == 'u' && (c2 == 'e' || c2 == 'i' || c2 == 'y')) {
+			emit = 'g';
+			step = 2;
+		} else if ((c0 == 'c' || c0 == 's') && c1 == 'h') {
+			emit = 'x';
+			step = 2;
+		} else if (c0 == 'n' && c1 == 'h') {
+			emit = 'n';
+			step = 2;
+		} else if (c0 == 'l' && c1 == 'h') {
+			emit = 'l';
+			step = 2;
+		} else if (c0 == 'p' && c1 == 'h') {
+			emit = 'f';
+			step = 2;
+		} else if (c0 == 'c' && c1 == 'k') {
+			emit = 'k';
+			step = 2;
+		} else if (c0 == 's' && c1 == 's') {
+			emit = 's';
+			step = 2;
+		} else if (c0 == 's' && c1 == 'c' && (c2 == 'e' || c2 == 'i' || c2 == 'y')) {
+			emit = 's';
+			step = 2;
+		} else if (c0 == 'r' && c1 == 'r') {
+			emit = 'r';
+			step = 2;
+		} else if (c0 == 'h') {
+			emit = '\0';
+			step = 1;
+		} else if (c0 == 'c') {
+			emit = (c1 == 'e' || c1 == 'i' || c1 == 'y') ? 's' : 'k';
+		} else if (c0 == 'q') {
+			emit = 'k';
+		} else if (c0 == 'z') {
+			emit = 's';
+		} else if (c0 == 'x' || c0 == 'j') {
+			emit = 'x';
+		} else if (c0 == 'g') {
+			emit = (c1 == 'e' || c1 == 'i' || c1 == 'y') ? 'x' : 'g';
+		} else if (c0 == 'v' || c0 == 'b') {
+			emit = 'v';
+		} else if (c0 == 'o' || c0 == 'u') {
+			emit = 'u';
+		} else if (c0 == 'e' || c0 == 'i' || c0 == 'y') {
+			emit = 'i';
+		} else if (c0 == 'a') {
+			emit = 'a';
+		} else if (c0 == 'm' || c0 == 'n') {
+			bool next_is_vowel = (c1 == 'a' || c1 == 'e' || c1 == 'i' || c1 == 'o' || c1 == 'u' || c1 == 'y' || c1 == 'h');
+			emit = next_is_vowel ? c0 : 'm';
+		} else {
+			emit = c0;
+		}
+
+		if (emit != '\0') {
+			if (pw == 0 || phon[pw - 1] != emit) {
+				phon[pw++] = emit;
+			}
+		}
+		i += step;
+	}
+	phon[pw] = '\0';
+
+	if (out_phon && phon_sz > 0) {
+		snprintf(out_phon, phon_sz, "%s", phon);
+	}
+
+	if (out_skel && skel_sz > 0) {
+		size_t sw = 0;
+		for (size_t i = 0; i < pw && sw + 1 < skel_sz; i++) {
+			char pc = phon[i];
+			if (pc == 'a' || pc == 'i' || pc == 'u') continue;
+			out_skel[sw++] = pc;
+		}
+		out_skel[sw] = '\0';
+	}
+}
+
+int jarvis_damerau_levenshtein(const char *a, const char *b)
+{
+	if (!a || !b) return 999;
+	size_t la = strlen(a);
+	size_t lb = strlen(b);
+	if (la == 0) return (int)lb;
+	if (lb == 0) return (int)la;
+	if (la > 96) la = 96;
+	if (lb > 96) lb = 96;
+
+	int prev2[98], prev1[98], cur[98];
+	for (size_t j = 0; j <= lb; j++) {
+		prev1[j] = (int)j;
+		prev2[j] = (int)j;
+	}
+
+	for (size_t i = 1; i <= la; i++) {
+		cur[0] = (int)i;
+		for (size_t j = 1; j <= lb; j++) {
+			int cost = (a[i - 1] == b[j - 1]) ? 0 : 1;
+			int del  = prev1[j] + 1;
+			int ins  = cur[j - 1] + 1;
+			int sub  = prev1[j - 1] + cost;
+			int best = del < ins ? del : ins;
+			if (sub < best) best = sub;
+
+			if (i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1]) {
+				int tr = prev2[j - 2] + 1;
+				if (tr < best) best = tr;
+			}
+			cur[j] = best;
+		}
+		memcpy(prev2, prev1, (lb + 1) * sizeof(int));
+		memcpy(prev1, cur, (lb + 1) * sizeof(int));
+	}
+	return prev1[lb];
+}
+
+double jarvis_token_similarity(const char *a_clean, const char *b_clean)
+{
+	if (!a_clean || !b_clean || !*a_clean || !*b_clean) return 0.0;
+	if (strcmp(a_clean, b_clean) == 0) return 1.0;
+
+	/* Reject cross-script comparisons (e.g. Latin vs Cyrillic/CJK) */
+	bool a_hi = ((unsigned char)a_clean[0] >= 0x80);
+	bool b_hi = ((unsigned char)b_clean[0] >= 0x80);
+	if (a_hi != b_hi) return 0.0;
+
+	/* Never fuzzy-match differing digits */
+	for (const char *p = a_clean; *p; p++) {
+		if (isdigit((unsigned char)*p)) return 0.0;
+	}
+	for (const char *p = b_clean; *p; p++) {
+		if (isdigit((unsigned char)*p)) return 0.0;
+	}
+
+	char a_ns[128], b_ns[128];
+	size_t na = 0, nb = 0;
+	for (size_t i = 0; a_clean[i] && na + 1 < sizeof(a_ns); i++) {
+		if (a_clean[i] != ' ') a_ns[na++] = a_clean[i];
+	}
+	a_ns[na] = '\0';
+	for (size_t i = 0; b_clean[i] && nb + 1 < sizeof(b_ns); i++) {
+		if (b_clean[i] != ' ') b_ns[nb++] = b_clean[i];
+	}
+	b_ns[nb] = '\0';
+
+	if (na == 0 || nb == 0) return 0.0;
+	if (strcmp(a_ns, b_ns) == 0) return 0.98;
+
+	/* Short words (<= 3 chars) require exact match */
+	if (na < 4 || nb < 4) return 0.0;
+	int len_diff = (int)na - (int)nb;
+	if (len_diff < 0) len_diff = -len_diff;
+	if (len_diff > 4) return 0.0;
+
+	size_t max_o = na > nb ? na : nb;
+	int dl_o = jarvis_damerau_levenshtein(a_ns, b_ns);
+	double sim_o = 1.0 - ((double)dl_o / (double)max_o);
+
+	if (a_hi || b_hi) {
+		return sim_o > 0.0 ? sim_o : 0.0;
+	}
+
+	char a_phon[128], a_skel[128];
+	char b_phon[128], b_skel[128];
+	jarvis_phonetic_encode(a_ns, a_phon, sizeof(a_phon), a_skel, sizeof(a_skel));
+	jarvis_phonetic_encode(b_ns, b_phon, sizeof(b_phon), b_skel, sizeof(b_skel));
+
+	double sim_p = 0.0;
+	size_t lpa = strlen(a_phon), lpb = strlen(b_phon);
+	if (lpa >= 3 && lpb >= 3) {
+		size_t max_p = lpa > lpb ? lpa : lpb;
+		int dl_p = jarvis_damerau_levenshtein(a_phon, b_phon);
+		sim_p = 1.0 - ((double)dl_p / (double)max_p);
+	}
+
+	double sim_s = 0.0;
+	size_t lsa = strlen(a_skel), lsb = strlen(b_skel);
+	if (lsa >= 4 && lsb >= 4 && len_diff <= 3 && a_skel[0] == b_skel[0]) {
+		size_t max_s = lsa > lsb ? lsa : lsb;
+		int dl_s = jarvis_damerau_levenshtein(a_skel, b_skel);
+		sim_s = 1.0 - ((double)dl_s / (double)max_s);
+	}
+
+	double best = sim_o;
+	if (0.97 * sim_p > best) best = 0.97 * sim_p;
+	if (0.94 * sim_s > best) best = 0.94 * sim_s;
+	return best > 0.0 ? best : 0.0;
+}
+
+const jarvis_verb_entry_t *jarvis_ontology_find_verb_phrase_fuzzy(
+	const jarvis_ontology_t *ont,
+	const char              *phrase,
+	double                  *out_sim
+)
+{
+	if (out_sim) *out_sim = 0.0;
+	if (!ont || !phrase || !*phrase) return NULL;
+	const jarvis_verb_entry_t *exact = jarvis_ontology_find_verb_phrase(ont, phrase);
+	if (exact) {
+		if (out_sim) *out_sim = 1.0;
+		return exact;
+	}
+	if (strlen(phrase) < 5) return NULL;
+
+	const jarvis_verb_entry_t *best = NULL;
+	double best_sim = 0.78;
+	bool phrase_has_space = (strchr(phrase, ' ') != NULL);
+	for (size_t i = 0; i < ont->verb_phrase_count; i++) {
+		const char *vp = ont->verb_phrases[i].phrase;
+		if (strlen(vp) < 5) continue;
+		if ((strchr(vp, ' ') != NULL) != phrase_has_space) continue;
+		double sim = jarvis_token_similarity(phrase, vp);
+		if (sim > best_sim) {
+			best_sim = sim;
+			best = &ont->verb_phrases[i];
+		}
+	}
+	if (best && out_sim) *out_sim = best_sim;
+	return best;
+}
+
 static void live_index_add(jarvis_live_index_t *idx, const char *clean_p, const char *etype, const char *eid)
 {
 	if (!clean_p || !*clean_p) return;
@@ -1410,6 +1668,58 @@ const jarvis_entity_entry_t *jarvis_live_index_find(
 	return NULL;
 }
 
+const jarvis_entity_entry_t *jarvis_live_index_find_fuzzy(
+	const jarvis_live_index_t *idx,
+	const char                *phrase,
+	double                    *out_sim
+)
+{
+	if (out_sim) *out_sim = 0.0;
+	if (!idx || !phrase || !*phrase) return NULL;
+	const jarvis_entity_entry_t *exact = jarvis_live_index_find(idx, phrase);
+	if (exact) {
+		if (out_sim) *out_sim = 1.0;
+		return exact;
+	}
+	if (strlen(phrase) < 5) return NULL;
+
+	const jarvis_entity_entry_t *best = NULL;
+	double best_sim = 0.75;
+	bool phrase_has_space = (strchr(phrase, ' ') != NULL);
+	for (size_t i = 0; i < idx->count; i++) {
+		const char *ep = idx->entries[i].phrase;
+		if (strlen(ep) < 5) continue;
+		if ((strchr(ep, ' ') != NULL) != phrase_has_space) continue;
+		double sim = jarvis_token_similarity(phrase, ep);
+		if (sim > best_sim) {
+			best_sim = sim;
+			best = &idx->entries[i];
+		}
+	}
+	if (best && out_sim) *out_sim = best_sim;
+	return best;
+}
+
+static bool is_open_arg_verb_token(const jarvis_ontology_t *ont, const char *w_clean)
+{
+	if (!ont || !w_clean || !*w_clean) return false;
+	if (jarvis_ontology_is_dictation_verb(ont, w_clean)) return true;
+	const jarvis_verb_entry_t *ve = jarvis_ontology_find_verb_phrase(ont, w_clean);
+	if (!ve) return false;
+	for (size_t t = 0; t < ve->tag_count; t++) {
+		const char *c = ve->tags[t].concept;
+		if (strcmp(c, "INPUT_TYPE") == 0 ||
+		    strcmp(c, "TYPE_WRITE") == 0 ||
+		    strcmp(c, "TYPE_SUBMIT") == 0 ||
+		    strcmp(c, "SEARCH_WEB") == 0 ||
+		    strcmp(c, "PLAY_STREAM") == 0 ||
+		    strcmp(c, "AGENT_ASK") == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
 void jarvis_ontology_normalize_asr(
 	const jarvis_ontology_t *ont,
 	const jarvis_world_t    *world,
@@ -1458,22 +1768,23 @@ void jarvis_ontology_normalize_asr(
 	if (!live_idx) return;
 	jarvis_ontology_build_live_index(ont, world, live_idx);
 
-	/* 2. Fold two-word compound terms from ontology asr_corrections or split vocab words */
+	/* 2. Tokenize and fold two-word compound terms from ontology asr_corrections or split vocab words */
 	char tok_buf[512];
 	snprintf(tok_buf, sizeof(tok_buf), "%s", work);
-	char *tokens[64];
-	size_t n_tok = 0;
+	char *raw_tokens[64];
+	size_t n_raw = 0;
 	char *save = NULL;
-	for (char *t = strtok_r(tok_buf, " \t\r\n", &save); t && n_tok < 64; t = strtok_r(NULL, " \t\r\n", &save)) {
-		tokens[n_tok++] = t;
+	for (char *t = strtok_r(tok_buf, " \t\r\n", &save); t && n_raw < 64; t = strtok_r(NULL, " \t\r\n", &save)) {
+		raw_tokens[n_raw++] = t;
 	}
 
-	size_t pos = 0;
-	size_t i = 0;
-	while (i < n_tok) {
-		if (i + 1 < n_tok) {
+	char folded_toks[64][JARVIS_ID_LEN];
+	char clean_toks[64][JARVIS_ID_LEN];
+	size_t n_tok = 0;
+	for (size_t i = 0; i < n_raw && n_tok < 64; ) {
+		if (i + 1 < n_raw) {
 			char pair_raw[128], pair_clean[128], joined[128];
-			snprintf(pair_raw, sizeof(pair_raw), "%s %s", tokens[i], tokens[i + 1]);
+			snprintf(pair_raw, sizeof(pair_raw), "%s %s", raw_tokens[i], raw_tokens[i + 1]);
 			jarvis_clean_phrase(pair_raw, pair_clean, sizeof(pair_clean));
 
 			if (ont) {
@@ -1485,7 +1796,9 @@ void jarvis_ontology_normalize_asr(
 					}
 				}
 				if (fixed) {
-					pos += (size_t)snprintf(out + pos, pos < out_sz ? out_sz - pos : 0, "%s%s", pos ? " " : "", fixed);
+					snprintf(folded_toks[n_tok], sizeof(folded_toks[0]), "%s", fixed);
+					jarvis_clean_phrase(fixed, clean_toks[n_tok], sizeof(clean_toks[0]));
+					n_tok++;
 					i += 2;
 					continue;
 				}
@@ -1500,13 +1813,179 @@ void jarvis_ontology_normalize_asr(
 			if (ont && jarvis_ontology_is_vocab_word(ont, joined) &&
 			    !jarvis_ontology_find_verb_phrase(ont, pair_clean) &&
 			    !jarvis_live_index_find(live_idx, pair_clean)) {
-				pos += (size_t)snprintf(out + pos, pos < out_sz ? out_sz - pos : 0, "%s%s", pos ? " " : "", joined);
+				snprintf(folded_toks[n_tok], sizeof(folded_toks[0]), "%s", joined);
+				snprintf(clean_toks[n_tok], sizeof(clean_toks[0]), "%s", joined);
+				n_tok++;
 				i += 2;
 				continue;
 			}
 		}
-		pos += (size_t)snprintf(out + pos, pos < out_sz ? out_sz - pos : 0, "%s%s", pos ? " " : "", tokens[i]);
+		snprintf(folded_toks[n_tok], sizeof(folded_toks[0]), "%s", raw_tokens[i]);
+		jarvis_clean_phrase(raw_tokens[i], clean_toks[n_tok], sizeof(clean_toks[0]));
+		n_tok++;
 		i++;
+	}
+
+	/* 3. Strip leading Whisper prompt-echo fragments ("o que e" / "o que") when immediately
+	 *    followed by a polite modal or command verb (e.g. "o que épode ir ...").
+	 */
+	size_t start_idx = 0;
+	if (ont && n_tok >= 3 &&
+	    strcmp(clean_toks[0], "o") == 0 && strcmp(clean_toks[1], "que") == 0) {
+		size_t check_idx = 2;
+		if (strcmp(clean_toks[2], "e") == 0 && n_tok >= 4) {
+			check_idx = 3;
+		}
+		const char *nxt = clean_toks[check_idx];
+		bool followed_by_modal_or_verb =
+			jarvis_ontology_is_polite_prefix(ont, nxt) ||
+			jarvis_ontology_is_verb_head(ont, nxt) ||
+			jarvis_token_similarity(nxt, "podes") >= 0.75 ||
+			jarvis_token_similarity(nxt, "pode") >= 0.75;
+		if (followed_by_modal_or_verb) {
+			start_idx = check_idx;
+		}
+	}
+
+	/* Snap elided leading modal token (e.g. "épode" -> "podes") */
+	if (ont && start_idx < n_tok && !jarvis_ontology_is_vocab_word(ont, clean_toks[start_idx])) {
+		for (size_t pi = 0; pi < ont->polite_prefix_count; pi++) {
+			const char *pp = ont->polite_prefixes[pi];
+			if (!strchr(pp, ' ') && strlen(pp) >= 4 &&
+			    jarvis_token_similarity(clean_toks[start_idx], pp) >= 0.76) {
+				snprintf(folded_toks[start_idx], sizeof(folded_toks[0]), "%s", pp);
+				snprintf(clean_toks[start_idx], sizeof(clean_toks[0]), "%s", pp);
+				break;
+			}
+		}
+	}
+
+	/* 4. Strip trailing phonetically-distorted polite suffixes (e.g. "esfçibora" -> "se faz favor")
+	 *    when preceded by at least one content word.
+	 */
+	if (ont && n_tok > start_idx + 1) {
+		const char *last_c = clean_toks[n_tok - 1];
+		if (strlen(last_c) >= 6 &&
+		    !jarvis_ontology_is_vocab_word(ont, last_c) &&
+		    !jarvis_live_index_find(live_idx, last_c)) {
+			bool is_polite_tail = false;
+			for (size_t pi = 0; pi < ont->polite_prefix_count && !is_polite_tail; pi++) {
+				if (jarvis_token_similarity(last_c, ont->polite_prefixes[pi]) >= 0.74) {
+					is_polite_tail = true;
+				}
+			}
+			for (size_t li = 0; li < ont->loc_any_count && !is_polite_tail; li++) {
+				char lc[JARVIS_WORD_LEN];
+				jarvis_clean_phrase(ont->loc_any[li], lc, sizeof(lc));
+				if (jarvis_token_similarity(last_c, lc) >= 0.74) {
+					is_polite_tail = true;
+				}
+			}
+			if (is_polite_tail) {
+				n_tok--;
+				if (n_tok > start_idx) {
+					size_t prev_len = strlen(folded_toks[n_tok - 1]);
+					while (prev_len > 0 && strchr(",.!?;:", folded_toks[n_tok - 1][prev_len - 1])) {
+						folded_toks[n_tok - 1][--prev_len] = '\0';
+					}
+				}
+			}
+		}
+	}
+
+	/* 5. Phonetic Lexicon Snapping for out-of-vocabulary tokens (e.g. "coculdora" -> "calculadora")
+	 *    unless the clause is an open-argument dictation, search, or media query.
+	 */
+	bool in_open_arg = false;
+	if (ont) {
+		for (size_t i = start_idx; i < n_tok; i++) {
+			if (is_open_arg_verb_token(ont, clean_toks[i])) {
+				in_open_arg = true;
+				break;
+			}
+		}
+	}
+
+	if (ont && !in_open_arg) {
+		for (size_t i = start_idx; i < n_tok; i++) {
+			const char *ct = clean_toks[i];
+			size_t ct_len = strlen(ct);
+			if (ct_len < 5) continue;
+			if (jarvis_ontology_is_vocab_word(ont, ct) ||
+			    jarvis_ontology_is_stopword(ont, ct) ||
+			    jarvis_live_index_find(live_idx, ct)) {
+				continue;
+			}
+			/* Skip contractions, URLs, or path-like tokens */
+			if (strchr(folded_toks[i], '\'') || strchr(folded_toks[i], '/') || strchr(folded_toks[i], '.')) {
+				continue;
+			}
+
+			const char *best_word = NULL;
+			double best_sim = (ct_len >= 7) ? 0.74 : 0.78;
+
+			/* If this token is immediately followed by another content word (i + 1 < n_tok),
+			 * check stopwords first (e.g. "a vinha coculdora" -> "a minha calculadora") so
+			 * possessive determiners before a noun do not get snapped to an unrelated noun ("linha").
+			 */
+			if (i + 1 < n_tok) {
+				for (size_t si = 0; si < ont->stopword_count; si++) {
+					const char *sw = ont->stopwords[si];
+					if (strlen(sw) < 5) continue;
+					double sim = jarvis_token_similarity(ct, sw);
+					if (sim > best_sim) {
+						best_sim = sim;
+						best_word = sw;
+					}
+				}
+			}
+
+			/* Check single-word live entities */
+			for (size_t ei = 0; ei < live_idx->count; ei++) {
+				const char *ep = live_idx->entries[ei].phrase;
+				if (strchr(ep, ' ') || strlen(ep) < 5) continue;
+				double sim = jarvis_token_similarity(ct, ep);
+				if (sim > best_sim) {
+					best_sim = sim;
+					best_word = ep;
+				}
+			}
+			/* Check ontology vocabulary words of length >= 7 */
+			if (ct_len >= 7) {
+				for (size_t vi = 0; vi < ont->vocab_word_count; vi++) {
+					const char *vw = ont->vocab_words[vi];
+					if (strlen(vw) < 7) continue;
+					double sim = jarvis_token_similarity(ct, vw);
+					if (sim > best_sim) {
+						best_sim = sim;
+						best_word = vw;
+					}
+				}
+			}
+			if (!best_word) {
+				for (size_t si = 0; si < ont->stopword_count; si++) {
+					const char *sw = ont->stopwords[si];
+					if (strlen(sw) < 5) continue;
+					double sim = jarvis_token_similarity(ct, sw);
+					if (sim > best_sim) {
+						best_sim = sim;
+						best_word = sw;
+					}
+				}
+			}
+
+			if (best_word) {
+				snprintf(folded_toks[i], sizeof(folded_toks[0]), "%s", best_word);
+				snprintf(clean_toks[i], sizeof(clean_toks[0]), "%s", best_word);
+			}
+		}
+	}
+
+	size_t pos = 0;
+	for (size_t i = start_idx; i < n_tok; i++) {
+		pos += (size_t)snprintf(out + pos, pos < out_sz ? out_sz - pos : 0,
+		                        "%s%s", (i > start_idx) ? " " : "", folded_toks[i]);
 	}
 	free(live_idx);
 }
+

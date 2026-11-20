@@ -1169,12 +1169,44 @@ static bool requires_agent_reasoning(const jarvis_engine_t *eng, const char *utt
 	size_t len = strlen(utterance);
 	while (len > 0 && isspace((unsigned char)utterance[len - 1])) len--;
 	if (len == 0) return false;
-	if (utterance[len - 1] == '?') return true;
-
 	char clean[512];
 	jarvis_clean_phrase(utterance, clean, sizeof(clean));
 
 	const jarvis_ontology_t *ont = eng->ont ? eng->ont : jarvis_ontology_get_active();
+
+	/* If ASR normalization strips a leading Whisper prompt-echo ("o que épode ...")
+	 * and the normalized utterance deterministically solves as a high-confidence Tier-0
+	 * command without starting with an interrogative, do not force ReAct agent reasoning.
+	 */
+	if (ont && strncmp(clean, "o que ", 6) == 0) {
+		jarvis_ir_t norm_ir;
+		if (jarvis_solve_clause(ont, utterance, "any", NULL, &norm_ir) && norm_ir.score >= 0.90) {
+			return false;
+		}
+	}
+
+	if (utterance[len - 1] == '?') {
+		/* A trailing '?' on a polite modal request ("Podes abrir a calculadora, se faz favor?",
+		 * "Can you open the terminal?") is a polite imperative, not an open question, provided
+		 * it does not start with an interrogative word ("what", "where", "qual", "como", etc.)
+		 * and solves deterministically at high confidence (>= 0.90).
+		 */
+		bool is_interrog = false;
+		if (ont) {
+			char first_w[64] = {0};
+			sscanf(clean, "%63s", first_w);
+			if (first_w[0] && jarvis_ontology_is_interrogative(ont, first_w)) {
+				is_interrog = true;
+			}
+			if (!is_interrog) {
+				jarvis_ir_t q_ir;
+				if (jarvis_solve_clause(ont, utterance, "any", NULL, &q_ir) && q_ir.score >= 0.90) {
+					return false;
+				}
+			}
+		}
+		return true;
+	}
 
 	/* Never force agent reasoning on explicit dictation, coding-agent delegation, or TTS toggle */
 	if (ont) {
