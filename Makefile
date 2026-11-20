@@ -9,7 +9,7 @@ LDFLAGS-libjarvis-Linux := -Wl,-rpath,${CURDIR}/lib -Wl,-rpath,${HOME}/.local/li
 LDFLAGS-jarvis-Linux := $(LDFLAGS-libjarvis-Linux)
 CFLAGS-BIN-Windows :=
 
-CFLAGS := -g -O2 -Iinclude -I../libmm/include -I../libxylem/include -I../libstele/include -I../libcorm/include -Isrc -Isrc/audio -Isrc/vad -Isrc/whisper -Isrc/server -Isrc/tts -Isrc/voice
+CFLAGS := -g -O2 -Iinclude -I../libmm/include -I../libxylem/include -I../libstele/include -I../libcorm/include
 LDFLAGS := -L../libmm/lib -L../libxylem/lib -L../libstele/lib -L../libcorm/lib
 
 WASM_SRCS := npm/wasm/jarvis_wasm.c
@@ -20,7 +20,6 @@ include ../mk/include.mk
 WM_MODS := mods/sway/mod_sway.so mods/hyprland/mod_hyprland.so mods/tts/mod_tts.so
 WHISPER_LIB := $(HOME)/.local/lib/libwhisper.so.1
 GGML_LIB := $(HOME)/.local/lib/libggml.so.0
-JARVISD_OBJS := src/jarvisd_main.o src/audio/audio.o src/vad/vad.o src/whisper/whisper_mod.o src/server/server.o src/tts/tts.o src/voice/voice.o
 JARVISD_BIN := $(if $(wildcard $(WHISPER_LIB)),bin/jarvisd,)
 
 all: $(WM_MODS) $(JARVISD_BIN)

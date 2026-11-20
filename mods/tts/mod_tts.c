@@ -532,12 +532,56 @@ static int16_t lookup_vocab_id(const cp_id_t *table, uint32_t cp)
 	return -1;
 }
 
+static void normalize_espeak_voice(const char *in_voice, char *out_voice, size_t out_sz)
+{
+	if (!in_voice || !*in_voice) {
+		snprintf(out_voice, out_sz, "pt");
+		return;
+	}
+	char tmp[32];
+	size_t i = 0;
+	for (; in_voice[i] && i + 1 < sizeof(tmp); i++) {
+		char c = (char)tolower((unsigned char)in_voice[i]);
+		tmp[i] = (c == '_') ? '-' : c;
+	}
+	tmp[i] = '\0';
+
+	/* In espeak-ng, European Portuguese is "pt" (not "pt-pt") and French is "fr" (not "fr-fr"). */
+	if (strcmp(tmp, "pt-pt") == 0) {
+		snprintf(out_voice, out_sz, "pt");
+	} else if (strcmp(tmp, "fr-fr") == 0) {
+		snprintf(out_voice, out_sz, "fr");
+	} else {
+		snprintf(out_voice, out_sz, "%s", tmp);
+	}
+}
+
+static bool select_espeak_voice(const char *espeak_voice)
+{
+	if (!g_tts.espeak_SetVoice) return false;
+	char norm[32];
+	normalize_espeak_voice(espeak_voice, norm, sizeof(norm));
+	if (g_tts.espeak_SetVoice(norm) == 0) return true;
+
+	/* Fallback 1: strip region suffix (e.g. "pt-pt" -> "pt", "es-es" -> "es") */
+	char *dash = strchr(norm, '-');
+	if (dash) {
+		*dash = '\0';
+		if (norm[0] && g_tts.espeak_SetVoice(norm) == 0) return true;
+	}
+
+	/* Fallback 2: European Portuguese ("pt") or English ("en") so translator is never NULL */
+	if (g_tts.espeak_SetVoice("pt") == 0) return true;
+	if (g_tts.espeak_SetVoice("en") == 0) return true;
+	return false;
+}
+
 static void phonemize_to_ipa(const char *text, const char *espeak_voice, char *out_ipa, size_t out_sz)
 {
 	out_ipa[0] = '\0';
 	if (!g_tts.espeak_TextToPhonemesTerm || !text || !*text) return;
 
-	g_tts.espeak_SetVoice(espeak_voice);
+	if (!select_espeak_voice(espeak_voice)) return;
 	const void *ptr = (const void *)text;
 	size_t pos = 0;
 
@@ -558,9 +602,19 @@ static void phonemize_to_ipa(const char *text, const char *espeak_voice, char *o
 				out_ipa[pos++] = *c;
 			}
 			unsigned int punct_code = ((unsigned int)term >> 12) & 0x0FU;
+			bool has_more = (ptr && *(const char *)ptr);
 			char punct = 0;
 			switch (punct_code) {
-			case 0: punct = '.'; break;
+			case 0:
+				/* Only append '.' if the input clause actually contained a period or another sub-clause follows */
+				if (has_more) {
+					punct = '.';
+				} else {
+					size_t tl = strlen(text);
+					while (tl > 0 && isspace((unsigned char)text[tl - 1])) tl--;
+					if (tl > 0 && text[tl - 1] == '.') punct = '.';
+				}
+				break;
 			case 1: punct = ','; break;
 			case 2: punct = '?'; break;
 			case 3: punct = '!'; break;
@@ -576,6 +630,58 @@ static void phonemize_to_ipa(const char *text, const char *espeak_voice, char *o
 		}
 	}
 	out_ipa[pos] = '\0';
+}
+
+/* Clean up espeak-ng European Portuguese ("pt") IPA quirks before feeding Kokoro-82M:
+ * 1. Replace English retroflex/approximant ɹ (U+0279, C9 B9) emitted in consonant clusters
+ *    (cr, pr, tr, br, dr, fr, gr) with the Portuguese alveolar tap ɾ (U+027E, C9 BE).
+ * 2. Strip espeak-ng's artificial epenthetic schwa ə (U+0259, C9 99) immediately after ɾ
+ *    (e.g. ʒˈaɾəbɐʃ -> ʒˈaɾbɐʃ, kˌumpuɾətɐm -> kˌumpuɾtɐm, pˌɐɾətˈik -> pˌɐɾtˈik).
+ * 3. Replace English-like diphthong nasal eɪŋ (65 C9 AA C5 8B) with Portuguese nasal ẽŋ (65 CC 83 C5 8B).
+ * 4. Normalize word-final European Portuguese ʃ (U+0283, CA 83) before whitespace/punctuation/EOS
+ *    to 's' so Kokoro's pm_alex voice does not over-palatalize final -s into English "-sh" ("Jarbash").
+ */
+static void postprocess_kokoro_pt_ipa(char *ipa, size_t max_sz)
+{
+	if (!ipa || !ipa[0]) return;
+	char out[1024];
+	size_t oi = 0;
+	const unsigned char *s = (const unsigned char *)ipa;
+	while (*s && oi + 8 < sizeof(out) && oi + 8 < max_sz) {
+		if (s[0] == 0xC9 && s[1] == 0xB9) {
+			out[oi++] = (char)0xC9;
+			out[oi++] = (char)0xBE;
+			s += 2;
+			continue;
+		}
+		if (s[0] == 0xC9 && s[1] == 0xBE && s[2] == 0xC9 && s[3] == 0x99) {
+			out[oi++] = (char)0xC9;
+			out[oi++] = (char)0xBE;
+			s += 4;
+			continue;
+		}
+		if (s[0] == 'e' && s[1] == 0xC9 && s[2] == 0xAA && s[3] == 0xC5 && s[4] == 0x8B) {
+			out[oi++] = 'e';
+			out[oi++] = (char)0xCC;
+			out[oi++] = (char)0x83;
+			out[oi++] = (char)0xC5;
+			out[oi++] = (char)0x8B;
+			s += 5;
+			continue;
+		}
+		if (s[0] == 0xCA && s[1] == 0x83) {
+			unsigned char nxt = s[2];
+			if (nxt == '\0' || nxt == ' ' || nxt == ',' || nxt == '.' ||
+			    nxt == '!' || nxt == '?' || nxt == ';' || nxt == ':') {
+				out[oi++] = 's';
+				s += 2;
+				continue;
+			}
+		}
+		out[oi++] = (char)*s++;
+	}
+	out[oi] = '\0';
+	snprintf(ipa, max_sz, "%s", out);
 }
 
 /* ---------------------------------------------------------------------------
@@ -670,7 +776,8 @@ static bool tts_engine_ensure_loaded(const char *voice)
 			tts_engine_unload();
 			return false;
 		}
-		if (g_tts.espeak_Init(0x02 /* AUDIO_OUTPUT_SYNCHRONOUS */, 0, NULL, 0) <= 0) {
+		if (g_tts.espeak_Init(0x02 /* AUDIO_OUTPUT_SYNCHRONOUS */, 0, NULL, 0) <= 0 ||
+		    !select_espeak_voice("pt")) {
 			tts_engine_unload();
 			return false;
 		}
@@ -728,7 +835,17 @@ static bool tts_engine_ensure_loaded(const char *voice)
 
 		ort_CreateEnv_fn create_env = (ort_CreateEnv_fn)g_tts.ort_vtbl[ORT_IDX_CreateEnv];
 		ort_CreateCpuMemoryInfo_fn create_mi = (ort_CreateCpuMemoryInfo_fn)g_tts.ort_vtbl[ORT_IDX_CreateCpuMemoryInfo];
+		int saved_err2 = dup(STDERR_FILENO);
+		int devnull2 = open("/dev/null", O_WRONLY);
+		if (devnull2 >= 0) {
+			dup2(devnull2, STDERR_FILENO);
+			close(devnull2);
+		}
 		void *st = create_env(3 /* ORT_LOGGING_LEVEL_ERROR */, "mod_tts", &g_tts.ort_env);
+		if (saved_err2 >= 0) {
+			dup2(saved_err2, STDERR_FILENO);
+			close(saved_err2);
+		}
 		if (st) { ort_release_status(st); tts_engine_unload(); return false; }
 		st = create_mi(1 /* OrtArenaAllocator */, 0 /* OrtMemTypeDefault */, &g_tts.ort_mem_info);
 		if (st) { ort_release_status(st); tts_engine_unload(); return false; }
@@ -743,7 +860,6 @@ static bool tts_engine_ensure_loaded(const char *voice)
 		}
 		void *so = NULL;
 		ort_CreateSessionOptions_fn create_so = (ort_CreateSessionOptions_fn)g_tts.ort_vtbl[ORT_IDX_CreateSessionOptions];
-		ort_DisableCpuMemArena_fn disable_arena = (ort_DisableCpuMemArena_fn)g_tts.ort_vtbl[ORT_IDX_DisableCpuMemArena];
 		ort_SetGraphOptLevel_fn set_opt = (ort_SetGraphOptLevel_fn)g_tts.ort_vtbl[ORT_IDX_SetGraphOptimizationLevel];
 		ort_SetIntraThreads_fn set_intra = (ort_SetIntraThreads_fn)g_tts.ort_vtbl[ORT_IDX_SetIntraOpNumThreads];
 		ort_SetInterThreads_fn set_inter = (ort_SetInterThreads_fn)g_tts.ort_vtbl[ORT_IDX_SetInterOpNumThreads];
@@ -752,9 +868,8 @@ static bool tts_engine_ensure_loaded(const char *voice)
 
 		void *st = create_so(&so);
 		if (st) { ort_release_status(st); return false; }
-		ort_release_status(disable_arena(so));
 		ort_release_status(set_opt(so, 99 /* ORT_ENABLE_ALL */));
-		ort_release_status(set_intra(so, 4));
+		ort_release_status(set_intra(so, 6));
 		ort_release_status(set_inter(so, 1));
 
 		st = create_sess(g_tts.ort_env, model_path, so, &g_tts.ort_sess);
@@ -791,13 +906,15 @@ static bool tts_engine_ensure_loaded(const char *voice)
 
 static void resolve_espeak_lang(const char *voice, bool is_piper, char *out_lang, size_t out_sz)
 {
+	char raw_lang[32] = {0};
 	/* 1. Explicit override via JARVIS_TTS_LANG or ~/.jarvisrc tts_lang */
 	const char *env_l = getenv("JARVIS_TTS_LANG");
 	if (env_l && *env_l) {
-		snprintf(out_lang, out_sz, "%s", env_l);
+		normalize_espeak_voice(env_l, out_lang, out_sz);
 		return;
 	}
-	if (rc_lookup("tts_lang", out_lang, out_sz) && out_lang[0]) {
+	if (rc_lookup("tts_lang", raw_lang, sizeof(raw_lang)) && raw_lang[0]) {
+		normalize_espeak_voice(raw_lang, out_lang, out_sz);
 		return;
 	}
 
@@ -809,9 +926,9 @@ static void resolve_espeak_lang(const char *voice, bool is_piper, char *out_lang
 			return;
 		}
 		if (strncmp(p, "pt_BR", 5) == 0) { snprintf(out_lang, out_sz, "pt-br"); return; }
-		if (strncmp(p, "pt_", 3) == 0)   { snprintf(out_lang, out_sz, "pt-pt"); return; }
+		if (strncmp(p, "pt_", 3) == 0)   { snprintf(out_lang, out_sz, "pt"); return; }
 		if (strncmp(p, "es_", 3) == 0)   { snprintf(out_lang, out_sz, "es"); return; }
-		if (strncmp(p, "fr_", 3) == 0)   { snprintf(out_lang, out_sz, "fr-fr"); return; }
+		if (strncmp(p, "fr_", 3) == 0)   { snprintf(out_lang, out_sz, "fr"); return; }
 		if (strncmp(p, "de_", 3) == 0)   { snprintf(out_lang, out_sz, "de"); return; }
 		if (strncmp(p, "it_", 3) == 0)   { snprintf(out_lang, out_sz, "it"); return; }
 		if (strncmp(p, "ru_", 3) == 0)   { snprintf(out_lang, out_sz, "ru"); return; }
@@ -820,20 +937,20 @@ static void resolve_espeak_lang(const char *voice, bool is_piper, char *out_lang
 	}
 
 	/* Kokoro-82M standard 1-character language code prefix:
-	 * 'a' = American English, 'b' = British English, 'p' = European Portuguese (pt-pt),
-	 * 'e' = Spanish, 'f' = French, 'i' = Italian, 'h' = Hindi, 'j' = Japanese, 'z' = Mandarin
+	 * 'a' = American English, 'b' = British English, 'p' = European Portuguese (pt),
+	 * 'e' = Spanish, 'f' = French (fr), 'i' = Italian, 'h' = Hindi, 'j' = Japanese, 'z' = Mandarin
 	 */
 	switch (voice && voice[0] ? tolower((unsigned char)voice[0]) : 'p') {
 	case 'a': snprintf(out_lang, out_sz, "en-us"); break;
 	case 'b': snprintf(out_lang, out_sz, "en-gb-x-rp"); break;
-	case 'p': snprintf(out_lang, out_sz, "pt-pt"); break;
+	case 'p': snprintf(out_lang, out_sz, "pt"); break;
 	case 'e': snprintf(out_lang, out_sz, "es"); break;
-	case 'f': snprintf(out_lang, out_sz, "fr-fr"); break;
+	case 'f': snprintf(out_lang, out_sz, "fr"); break;
 	case 'i': snprintf(out_lang, out_sz, "it"); break;
 	case 'h': snprintf(out_lang, out_sz, "hi"); break;
 	case 'j': snprintf(out_lang, out_sz, "ja"); break;
 	case 'z': snprintf(out_lang, out_sz, "cmn"); break;
-	default:  snprintf(out_lang, out_sz, "pt-pt"); break;
+	default:  snprintf(out_lang, out_sz, "pt"); break;
 	}
 }
 
@@ -850,6 +967,9 @@ static int16_t *synthesize_segment_pcm(const char *seg_text, const char *voice, 
 	char ipa[1024];
 	phonemize_to_ipa(seg_text, espeak_lang, ipa, sizeof(ipa));
 	if (!ipa[0]) return NULL;
+	if (!g_tts.is_piper && strncmp(espeak_lang, "pt", 2) == 0) {
+		postprocess_kokoro_pt_ipa(ipa, sizeof(ipa));
+	}
 
 	ort_CreateTensorWithData_fn create_tensor = (ort_CreateTensorWithData_fn)g_tts.ort_vtbl[ORT_IDX_CreateTensorWithData];
 	ort_Run_fn ort_run = (ort_Run_fn)g_tts.ort_vtbl[ORT_IDX_Run];
@@ -877,9 +997,13 @@ static int16_t *synthesize_segment_pcm(const char *seg_text, const char *voice, 
 		tokens[1 + n_inner] = 0;
 		size_t seq_len = n_inner + 2;
 
-		size_t style_row = (n_inner <= KOKORO_STYLE_ROWS) ? (n_inner - 1) : (KOKORO_STYLE_ROWS - 1);
+		/* Clamp style_row to >= 64 so short initial segments never select the
+		 * ultra-short creaky/groggy style vectors at rows 0..45 of voices-v1.0.bin.
+		 */
+		size_t eff_inner = (n_inner < 65) ? 65 : n_inner;
+		size_t style_row = (eff_inner <= KOKORO_STYLE_ROWS) ? (eff_inner - 1) : (KOKORO_STYLE_ROWS - 1);
 		float *style_vec = g_tts.kokoro_style + (style_row * KOKORO_STYLE_DIM);
-		float speed_val = 1.12f;
+		float speed_val = 1.06f;
 
 		int64_t tok_shape[2] = { 1, (int64_t)seq_len };
 		int64_t style_shape[2] = { 1, KOKORO_STYLE_DIM };
@@ -960,12 +1084,14 @@ static int16_t *synthesize_segment_pcm(const char *seg_text, const char *voice, 
 
 	int16_t *pcm16 = NULL;
 	if (f_pcm && n_floats > 0) {
-		/* Trim leading/trailing near-zero silence (> 0.008f) */
+		/* Trim leading/trailing near-zero silence (> 0.004f) with 45ms lead-in cushion
+		 * so PipeWire stream startup never clips initial consonants/vowels. */
 		size_t start = 0, end = n_floats;
-		while (start < end && fabsf(f_pcm[start]) < 0.008f) start++;
-		while (end > start && fabsf(f_pcm[end - 1]) < 0.008f) end--;
-		if (start > 480) start -= 480;
+		while (start < end && fabsf(f_pcm[start]) < 0.004f) start++;
+		while (end > start && fabsf(f_pcm[end - 1]) < 0.004f) end--;
+		start = (start > 1080) ? (start - 1080) : 0;
 		if (end + 1200 < n_floats) end += 1200;
+		else end = n_floats;
 		size_t len = (end > start) ? (end - start) : 0;
 		if (len > 0) {
 			pcm16 = (int16_t *)malloc(len * sizeof(int16_t));
@@ -1080,6 +1206,8 @@ static void *tts_worker_fn(void *arg)
 				mic_muted = false;
 				pthread_mutex_lock(&g_tts.mtx);
 				if (g_tts.q_count > 0) break;
+			} else if (g_tts.busy_speaking) {
+				write_tts_active_state(NULL, false);
 			}
 			g_tts.busy_speaking = false;
 			pthread_cond_broadcast(&g_tts.done_cond);
@@ -1152,12 +1280,16 @@ static void *tts_worker_fn(void *arg)
 				if (!has_next) {
 					play_pcm_blocking(pcm, n_samples, sample_rate, my_gen);
 				} else {
-					/* Start pw-cat asynchronously and write current PCM into pipe
-					 * while synthesizing next_seg in parallel for zero inter-clause gap!
+					/* Start pw-cat asynchronously and enlarge the Linux pipe capacity to 512 KB
+					 * so the entire segment PCM (~180 KB) writes without blocking on the default
+					 * 64 KB pipe buffer, allowing synthesize_segment_pcm(next_seg) to start at t=0ms!
 					 */
 					int pfd[2];
 					pid_t pid = -1;
 					if (pipe(pfd) == 0) {
+#ifdef F_SETPIPE_SZ
+						(void)fcntl(pfd[1], F_SETPIPE_SZ, 524288);
+#endif
 						char rate_arg[32];
 						snprintf(rate_arg, sizeof(rate_arg), "--rate=%d", sample_rate);
 						pid = fork();
@@ -1184,7 +1316,7 @@ static void *tts_worker_fn(void *arg)
 						const uint8_t *ptr = (const uint8_t *)pcm;
 						size_t rem = n_samples * sizeof(int16_t);
 						while (rem > 0) {
-							size_t chunk = rem > 8192 ? 8192 : rem;
+							size_t chunk = rem > 32768 ? 32768 : rem;
 							ssize_t nw = write(pfd[1], ptr, chunk);
 							if (nw <= 0) {
 								if (nw < 0 && errno == EINTR) continue;
@@ -1195,7 +1327,7 @@ static void *tts_worker_fn(void *arg)
 						}
 						close(pfd[1]);
 
-						/* Synthesize next segment while pw-cat plays the pipe buffer */
+						/* Synthesize next segment immediately while pw-cat plays the 512 KB pipe buffer */
 						prefetched_pcm = synthesize_segment_pcm(next_seg.text, next_seg.voice,
 						                                        &prefetched_samples, &prefetched_rate);
 						prefetched_gen = my_gen;
@@ -1246,31 +1378,43 @@ static void split_and_enqueue_locked(const char *clean, const char *voice, bool 
 		while (*p && isspace((unsigned char)*p)) p++;
 		if (!*p) break;
 
-		size_t max_len = first_seg ? 42 : 95;
+		/* Prefer natural sentence/comma boundaries within 68..85 chars so the first
+		 * segment is never chopped mid-noun-phrase at 42 chars, while keeping subsequent
+		 * segments sized (~65 chars) so synthesis finishes during the current segment's playback.
+		 */
+		size_t max_len = first_seg ? 68 : 72;
 		size_t rem = strlen(p);
 		if (rem <= max_len) {
 			enqueue_segment_locked(p, voice);
 			break;
 		}
 
-		/* Look for punctuation boundary (. ! ? ; : ,) within max_len */
+		/* 1. Strong sentence/clause punctuation (. ! ? ; :) within max_len + 16.
+		 * For the first segment, require at least 38 chars before cutting so its playback
+		 * duration (>= 2.2s) completely hides the ~1.6s synthesis latency of Segment 1.
+		 */
+		size_t scan_lim = max_len + 16;
+		size_t min_cut = first_seg ? 38 : 22;
 		size_t cut = 0;
-		for (size_t i = 16; i < max_len && p[i]; i++) {
+		for (size_t i = min_cut; i < scan_lim && p[i]; i++) {
 			if (strchr(".!?;:", p[i]) && (p[i + 1] == ' ' || p[i + 1] == '\0')) {
 				cut = i + 1;
 				break;
 			}
 		}
+		/* 2. Comma boundary */
 		if (!cut) {
-			for (size_t i = max_len; i > 16; i--) {
+			size_t clim = (rem < scan_lim) ? rem : scan_lim;
+			for (size_t i = clim; i > 20; i--) {
 				if (p[i] == ',' && p[i + 1] == ' ') {
 					cut = i + 1;
 					break;
 				}
 			}
 		}
+		/* 3. Word boundary near max_len */
 		if (!cut) {
-			for (size_t i = max_len; i > 16; i--) {
+			for (size_t i = max_len; i > 24; i--) {
 				if (p[i] == ' ') {
 					cut = i;
 					break;

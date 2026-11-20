@@ -83,7 +83,16 @@ bool jarvis_extract_streaming_answer_prefix(
 					else if (hc >= 'a' && hc <= 'f') cp |= (unsigned int)(hc - 'a' + 10);
 					else if (hc >= 'A' && hc <= 'F') cp |= (unsigned int)(hc - 'A' + 10);
 				}
-				if (cp < 0x80) out_answer[w++] = (char)cp;
+				if (cp < 0x80) {
+					out_answer[w++] = (char)cp;
+				} else if (cp < 0x800 && w + 2 < out_sz) {
+					out_answer[w++] = (char)(0xC0U | (cp >> 6));
+					out_answer[w++] = (char)(0x80U | (cp & 0x3FU));
+				} else if (w + 3 < out_sz) {
+					out_answer[w++] = (char)(0xE0U | (cp >> 12));
+					out_answer[w++] = (char)(0x80U | ((cp >> 6) & 0x3FU));
+					out_answer[w++] = (char)(0x80U | (cp & 0x3FU));
+				}
 				p += 6;
 			} else {
 				out_answer[w++] = nxt;

@@ -129,7 +129,8 @@ static const char *match_folded_wake_span(
 	const jarvis_ontology_t *ont,
 	const char              *transcript,
 	const char              *wake_clean,
-	bool                     allow_anywhere
+	bool                     allow_anywhere,
+	bool                     allow_fuzzy
 )
 {
 	if (!transcript || !wake_clean || !*wake_clean) return NULL;
@@ -195,8 +196,9 @@ static const char *match_folded_wake_span(
 			raw_span[slen] = '\0';
 			jarvis_clean_phrase(raw_span, clean_span, sizeof(clean_span));
 			if (strcmp(clean_span, wake_clean) == 0 ||
-			    (n_words == 1 && strlen(wake_clean) >= 5 &&
-			     jarvis_token_similarity(clean_span, wake_clean) >= 0.80)) {
+			    (allow_fuzzy && n_words == 1 && strlen(wake_clean) >= 5 && strlen(clean_span) >= 5 &&
+			     clean_span[0] == wake_clean[0] &&
+			     jarvis_token_similarity(clean_span, wake_clean) >= 0.85)) {
 				return cur;
 			}
 		}
@@ -228,14 +230,17 @@ int jarvis_voice_match_wake(
 	}
 	if (!ww_clean[0]) return 0;
 
-	const char *matched_end = match_folded_wake_span(ont, text, ww_clean, allow_anywhere);
+	const char *matched_end = match_folded_wake_span(ont, text, ww_clean, allow_anywhere, true);
 
 	if (!matched_end && ont) {
 		for (size_t i = 0; i < ont->wake_variant_count; i++) {
 			char var_clean[JARVIS_ID_LEN];
 			jarvis_clean_phrase(ont->wake_variants[i], var_clean, sizeof(var_clean));
 			if (!var_clean[0]) continue;
-			matched_end = match_folded_wake_span(ont, text, var_clean, allow_anywhere);
+			/* Secondary variants require exact match (no fuzzy similarity chaining)
+			 * and only match anywhere if they start with "jar". */
+			bool var_anywhere = allow_anywhere && (strncmp(var_clean, "jar", 3) == 0);
+			matched_end = match_folded_wake_span(ont, text, var_clean, var_anywhere, false);
 			if (matched_end) break;
 		}
 	}

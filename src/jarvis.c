@@ -36,13 +36,15 @@ static void print_usage(const char *prog)
 		"  llm-mode [auto|cloud|embedding|off]       Get or set persistent inference mode\n"
 		"  clear-learned                             Clear context, session, and embedding caches\n\n"
 		"Options:\n"
+		"  -p, --port <port>                         Override jarvisd TCP port (default from ~/.jarvisrc)\n"
+		"  -c, --cmd <raw_cmd>                       Send raw control command to jarvisd socket\n"
 		"  --wm <dwm|sway|hyprland>                  Window manager / environment (default from ~/.jarvisrc)\n"
 		"  --inference <auto|llm|embedding|none>     Inference backend (default from ~/.jarvisrc)\n"
 		"  --surface <any|terminal|browser|site|nd>  Active surface context (default: any)\n"
 		"  --mod <path>                              Load additional libxylem (.so) adapter module\n"
 		"  --dry-run                                 Compile utterance to IR/DSL without executing\n"
 		"  --json                                    Emit JSON output\n"
-		"  --quiet                                   Suppress desktop notifications / earcons\n",
+		"  -q, --quiet                               Suppress desktop notifications / earcons\n",
 		prog
 	);
 }
@@ -177,10 +179,12 @@ static void notify_status_bar(void)
 	fclose(fp);
 }
 
+static int g_cli_port_override = 0;
+
 static bool daemon_cmd(const char *cmd, char *out_resp, size_t resp_sz)
 {
 	if (out_resp && resp_sz > 0) out_resp[0] = '\0';
-	int port = jarvis_rc_get_int("port", 8179);
+	int port = (g_cli_port_override > 0) ? g_cli_port_override : jarvis_rc_get_int("port", 8179);
 	int s = socket(AF_INET, SOCK_STREAM, 0);
 	if (s < 0) return false;
 
@@ -572,41 +576,63 @@ int main(int argc, char **argv)
 		cfg.embed_cache_path = emb_path;
 	}
 
+	bool end_of_opts = false;
+	const char *raw_daemon_cmd = NULL;
+
 	for (int i = 1; i < argc; i++) {
-		if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-			print_usage(argv[0]);
-			return 0;
+		if (!end_of_opts) {
+			if (strcmp(argv[i], "--") == 0) {
+				end_of_opts = true;
+				continue;
+			}
+			if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+				print_usage(argv[0]);
+				return 0;
+			}
+			if ((strcmp(argv[i], "--port") == 0 || strcmp(argv[i], "-p") == 0) && i + 1 < argc) {
+				g_cli_port_override = atoi(argv[++i]);
+				continue;
+			}
+			if ((strcmp(argv[i], "--cmd") == 0 || strcmp(argv[i], "-c") == 0) && i + 1 < argc) {
+				raw_daemon_cmd = argv[++i];
+				continue;
+			}
+			if (strcmp(argv[i], "--wm") == 0 && i + 1 < argc) {
+				cfg.wm = argv[++i];
+				continue;
+			}
+			if (strcmp(argv[i], "--inference") == 0 && i + 1 < argc) {
+				cfg.infer_mode = parse_infer_mode(argv[++i]);
+				cli_infer_set = true;
+				continue;
+			}
+			if (strcmp(argv[i], "--surface") == 0 && i + 1 < argc) {
+				surface = argv[++i];
+				continue;
+			}
+			if (strcmp(argv[i], "--mod") == 0 && i + 1 < argc) {
+				load_xy_mod(argv[++i]);
+				continue;
+			}
+			if (strcmp(argv[i], "--dry-run") == 0) {
+				cfg.dry_run = true;
+				continue;
+			}
+			if (strcmp(argv[i], "--json") == 0) {
+				as_json = true;
+				continue;
+			}
+			if (strcmp(argv[i], "--quiet") == 0 || strcmp(argv[i], "-q") == 0) {
+				quiet = true;
+				continue;
+			}
+			if (u_pos == 0 && !subcmd && argv[i][0] == '-' && argv[i][1] != '\0') {
+				fprintf(stderr, "Unknown option: %s\n", argv[i]);
+				print_usage(argv[0]);
+				return 1;
+			}
 		}
-		if (strcmp(argv[i], "--wm") == 0 && i + 1 < argc) {
-			cfg.wm = argv[++i];
-			continue;
-		}
-		if (strcmp(argv[i], "--inference") == 0 && i + 1 < argc) {
-			cfg.infer_mode = parse_infer_mode(argv[++i]);
-			cli_infer_set = true;
-			continue;
-		}
-		if (strcmp(argv[i], "--surface") == 0 && i + 1 < argc) {
-			surface = argv[++i];
-			continue;
-		}
-		if (strcmp(argv[i], "--mod") == 0 && i + 1 < argc) {
-			load_xy_mod(argv[++i]);
-			continue;
-		}
-		if (strcmp(argv[i], "--dry-run") == 0) {
-			cfg.dry_run = true;
-			continue;
-		}
-		if (strcmp(argv[i], "--json") == 0) {
-			as_json = true;
-			continue;
-		}
-		if (strcmp(argv[i], "--quiet") == 0) {
-			quiet = true;
-			continue;
-		}
-		if (u_pos == 0 && !subcmd) {
+		if (u_pos == 0 && !subcmd && !end_of_opts) {
 			if (strcmp(argv[i], "dmenu") == 0 || strcmp(argv[i], "omni") == 0 ||
 			    strcmp(argv[i], "warmup") == 0 || strcmp(argv[i], "clear-learned") == 0 ||
 			    strcmp(argv[i], "tts-interrupt") == 0 || strcmp(argv[i], "interrupt") == 0 ||
@@ -649,6 +675,16 @@ int main(int argc, char **argv)
 		u_pos += (size_t)snprintf(utterance + u_pos,
 		                          u_pos < sizeof(utterance) ? sizeof(utterance) - u_pos : 0,
 		                          "%s%s", u_pos ? " " : "", argv[i]);
+	}
+
+	if (raw_daemon_cmd) {
+		char resp[4096];
+		if (!daemon_cmd(raw_daemon_cmd, resp, sizeof(resp))) {
+			if (!quiet) fprintf(stderr, "Failed to contact jarvisd\n");
+			return 1;
+		}
+		if (resp[0]) printf("%s\n", resp);
+		return 0;
 	}
 
 	if (!cli_infer_set) {
