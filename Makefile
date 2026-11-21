@@ -103,6 +103,11 @@ install-extra: ${DESTDIR}${PREFIX}/lib/pkgconfig/jarvis.pc ${DESTDIR}${PREFIX}/l
 	@if [ -f bin/jarvis ]; then \
 		install -m 755 bin/jarvis $(HOME)/.local/bin/jarvis; \
 	fi
+	@if [ -f scripts/edge-tts-pcm ]; then \
+		install -d ${DESTDIR}${PREFIX}/bin; \
+		install -m 755 scripts/edge-tts-pcm ${DESTDIR}${PREFIX}/bin/edge-tts-pcm; \
+		install -m 755 scripts/edge-tts-pcm $(HOME)/.local/bin/edge-tts-pcm; \
+	fi
 	@if [ -f bin/jarvisd ]; then \
 		install -d ${DESTDIR}${PREFIX}/bin; \
 		install -m 755 bin/jarvisd ${DESTDIR}${PREFIX}/bin/jarvisd; \

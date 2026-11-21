@@ -2754,6 +2754,8 @@ handle_jarvis_wait(int srv, int cli, struct whisper_context *ctx_wake, int n_thr
 			snprintf(reply, sizeof(reply), "CMD|%s\n", live_cmd);
 			write_all(cli, reply, strlen(reply));
 		}
+		notify_osd_async(jarvis_ontology_get_ui_string(get_daemon_ont(), "command_title", "\xef\x95\x84  Jarvis Command"),
+		                 live_cmd, 6000);
 		return 0;
 	} else {
 		write_state_file(state_file, "jarvis", NULL, NULL);
@@ -2918,7 +2920,24 @@ init_jarvis_xylem_runtime(void)
 	jcfg.memory_path = mem_path;
 	jcfg.embed_cache_path = emb_path;
 	jcfg.auren_url = auren_url;
-	jcfg.infer_mode = JARVIS_INFER_NONE;
+	char mode[64];
+	jarvis_rc_get("infer_mode", "auto", mode, sizeof(mode));
+	jcfg.llm_model = "fast";
+	if (strcmp(mode, "off") == 0 || strcmp(mode, "none") == 0)
+		jcfg.infer_mode = JARVIS_INFER_NONE;
+	else if (strcmp(mode, "embedding") == 0)
+		jcfg.infer_mode = JARVIS_INFER_EMBEDDING;
+	else if (strcmp(mode, "smart") == 0) {
+		jcfg.infer_mode = JARVIS_INFER_LLM;
+		jcfg.llm_model = "smart";
+	} else if (strcmp(mode, "kilo") == 0) {
+		jcfg.infer_mode = JARVIS_INFER_LLM;
+		jcfg.llm_model = "kilo-auto/free";
+	} else if (strcmp(mode, "cloud") == 0 || strcmp(mode, "remote") == 0 ||
+	           strcmp(mode, "llm") == 0 || strcmp(mode, "fast") == 0)
+		jcfg.infer_mode = JARVIS_INFER_LLM;
+	else
+		jcfg.infer_mode = JARVIS_INFER_AUTO;
 
 	g_jarvis_eng = jarvis_engine_create(&jcfg);
 }

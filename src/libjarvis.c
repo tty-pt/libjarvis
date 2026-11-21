@@ -202,9 +202,40 @@ bool jarvis_pop_ready_tts_clause(
 	size_t len = strlen(unspoken);
 	if (len == 0) return false;
 
-	/* 1. For the very first clause (TTFA boost), split at a natural preposition/conjunction boundary around 18-38 chars */
+	/* 1. Strong sentence/clause punctuation (. ! ? ; : \n) followed by whitespace (immediate natural prosody) */
+	size_t max_sent = is_first_clause ? 54 : 160;
+	for (size_t i = 3; i <= max_sent && i + 1 < len; i++) {
+		char c = unspoken[i];
+		if ((c == '.' || c == '!' || c == '?' || c == ';' || c == ':' || c == '\n') &&
+		    (isspace((unsigned char)unspoken[i + 1]) || unspoken[i + 1] == '\0')) {
+			size_t clen = (i + 1) < clause_sz - 1 ? (i + 1) : clause_sz - 1;
+			memcpy(out_clause, unspoken, clen);
+			out_clause[clen] = '\0';
+			size_t j = i + 1;
+			while (j < len && isspace((unsigned char)unspoken[j])) j++;
+			snprintf(out_remainder, rem_sz, "%s", unspoken + j);
+			return true;
+		}
+	}
+
+	/* 2. Comma boundary after a natural initial phrase */
+	size_t min_comma = is_first_clause ? 14 : 28;
+	size_t max_comma = is_first_clause ? 54 : 120;
+	for (size_t i = min_comma; i <= max_comma && i + 1 < len; i++) {
+		if (unspoken[i] == ',' && isspace((unsigned char)unspoken[i + 1])) {
+			size_t clen = (i + 1) < clause_sz - 1 ? (i + 1) : clause_sz - 1;
+			memcpy(out_clause, unspoken, clen);
+			out_clause[clen] = '\0';
+			size_t j = i + 1;
+			while (j < len && isspace((unsigned char)unspoken[j])) j++;
+			snprintf(out_remainder, rem_sz, "%s", unspoken + j);
+			return true;
+		}
+	}
+
+	/* 3. For the very first clause without early punctuation, split at preposition/conjunction (18-50 chars) */
 	if (is_first_clause && len >= 34) {
-		for (size_t i = 18; i <= 38 && i + 2 < len; i++) {
+		for (size_t i = 18; i <= 50 && i + 2 < len; i++) {
 			if (isspace((unsigned char)unspoken[i])) {
 				size_t j = i;
 				while (j < len && isspace((unsigned char)unspoken[j])) j++;
@@ -220,39 +251,8 @@ bool jarvis_pop_ready_tts_clause(
 		}
 	}
 
-	/* 2. Strong sentence/clause punctuation (. ! ? ; :) followed by whitespace */
-	size_t max_sent = is_first_clause ? 42 : 140;
-	for (size_t i = 8; i <= max_sent && i + 1 < len; i++) {
-		char c = unspoken[i];
-		if ((c == '.' || c == '!' || c == '?' || c == ';' || c == ':') &&
-		    isspace((unsigned char)unspoken[i + 1])) {
-			size_t clen = (i + 1) < clause_sz - 1 ? (i + 1) : clause_sz - 1;
-			memcpy(out_clause, unspoken, clen);
-			out_clause[clen] = '\0';
-			size_t j = i + 1;
-			while (j < len && isspace((unsigned char)unspoken[j])) j++;
-			snprintf(out_remainder, rem_sz, "%s", unspoken + j);
-			return true;
-		}
-	}
-
-	/* 3. Comma boundary after a reasonable phrase length */
-	size_t min_comma = is_first_clause ? 16 : 32;
-	size_t max_comma = is_first_clause ? 42 : 110;
-	for (size_t i = min_comma; i <= max_comma && i + 1 < len; i++) {
-		if (unspoken[i] == ',' && isspace((unsigned char)unspoken[i + 1])) {
-			size_t clen = (i + 1) < clause_sz - 1 ? (i + 1) : clause_sz - 1;
-			memcpy(out_clause, unspoken, clen);
-			out_clause[clen] = '\0';
-			size_t j = i + 1;
-			while (j < len && isspace((unsigned char)unspoken[j])) j++;
-			snprintf(out_remainder, rem_sz, "%s", unspoken + j);
-			return true;
-		}
-	}
-
 	/* 4. Fallback word boundary if a long unpunctuated run exceeds limit */
-	size_t max_run = is_first_clause ? 40 : 95;
+	size_t max_run = is_first_clause ? 52 : 110;
 	if (len >= max_run + 8) {
 		for (size_t i = max_run; i > 18; i--) {
 			if (isspace((unsigned char)unspoken[i])) {

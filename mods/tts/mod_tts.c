@@ -194,7 +194,7 @@ static const cp_id_t PIPER_VOCAB[] = {
 #define MAX_TTS_QUEUE 32
 
 typedef struct {
-	char text[320];
+	char text[512];
 	char voice[64];
 } tts_segment_t;
 
@@ -745,6 +745,9 @@ static void tts_engine_unload(void)
 
 static bool tts_engine_ensure_loaded(const char *voice)
 {
+	if (voice && (strncmp(voice, "edge:", 5) == 0 || strcasecmp(voice, "raquel") == 0 || strcasecmp(voice, "duarte") == 0)) {
+		return true;
+	}
 	const char *home = getenv("HOME");
 	if (!home || !*home) return false;
 
@@ -979,11 +982,92 @@ static void resolve_espeak_lang(const char *voice, bool is_piper, char *out_lang
 	}
 }
 
+static int16_t *synthesize_edge_tts(const char *seg_text, const char *voice, size_t *out_samples, int *out_rate)
+{
+	*out_samples = 0;
+	*out_rate = 24000;
+	if (!seg_text || !*seg_text) return NULL;
+
+	const char *ev = "pt-PT-RaquelNeural";
+	if (voice) {
+		if (strncmp(voice, "edge:", 5) == 0) {
+			ev = voice + 5;
+		} else if (strcasecmp(voice, "duarte") == 0) {
+			ev = "pt-PT-DuarteNeural";
+		} else if (strcasecmp(voice, "raquel") == 0) {
+			ev = "pt-PT-RaquelNeural";
+		}
+	}
+
+	char safe_text[1024];
+	size_t j = 0;
+	for (size_t i = 0; seg_text[i] && j + 2 < sizeof(safe_text); i++) {
+		if (seg_text[i] == '"' || seg_text[i] == '$' || seg_text[i] == '`' || seg_text[i] == '\\') {
+			safe_text[j++] = ' ';
+		} else {
+			safe_text[j++] = seg_text[i];
+		}
+	}
+	safe_text[j] = '\0';
+
+	const char *home = getenv("HOME");
+	char bin_path[512];
+	if (home && *home)
+		snprintf(bin_path, sizeof(bin_path), "%s/.local/bin/edge-tts-pcm", home);
+	else
+		snprintf(bin_path, sizeof(bin_path), "edge-tts-pcm");
+	if (access(bin_path, X_OK) != 0)
+		snprintf(bin_path, sizeof(bin_path), "edge-tts-pcm");
+
+	char cmd[2048];
+	snprintf(cmd, sizeof(cmd), "%s \"%s\" \"%s\" 2>/dev/null",
+	         bin_path, safe_text, ev);
+
+	FILE *fp = popen(cmd, "r");
+	if (!fp) return NULL;
+
+	size_t cap = 24000 * 2;
+	uint8_t *buf = (uint8_t *)malloc(cap);
+	if (!buf) {
+		pclose(fp);
+		return NULL;
+	}
+	size_t total = 0;
+	size_t n;
+	while ((n = fread(buf + total, 1, 4096, fp)) > 0) {
+		total += n;
+		if (total + 4096 > cap) {
+			cap *= 2;
+			uint8_t *nb = (uint8_t *)realloc(buf, cap);
+			if (!nb) {
+				free(buf);
+				pclose(fp);
+				return NULL;
+			}
+			buf = nb;
+		}
+	}
+	pclose(fp);
+
+	if (total == 0) {
+		free(buf);
+		return NULL;
+	}
+
+	*out_samples = total / sizeof(int16_t);
+	return (int16_t *)buf;
+}
+
 static int16_t *synthesize_segment_pcm(const char *seg_text, const char *voice, size_t *out_samples, int *out_rate)
 {
 	*out_samples = 0;
 	*out_rate = KOKORO_SAMPLE_RATE;
 	if (!seg_text || !*seg_text) return NULL;
+
+	if (voice && (strncmp(voice, "edge:", 5) == 0 || strcasecmp(voice, "raquel") == 0 || strcasecmp(voice, "duarte") == 0)) {
+		return synthesize_edge_tts(seg_text, voice, out_samples, out_rate);
+	}
+
 	if (!tts_engine_ensure_loaded(voice)) return NULL;
 
 	char espeak_lang[32];
@@ -1387,18 +1471,93 @@ static void enqueue_segment_locked(const char *text, const char *voice)
 static void split_and_enqueue_locked(const char *clean, const char *voice, bool is_first_clause)
 {
 	const char *p = clean;
+	bool is_edge = (voice && (strncmp(voice, "edge:", 5) == 0 ||
+	                          strcasecmp(voice, "raquel") == 0 ||
+	                          strcasecmp(voice, "duarte") == 0));
+	bool is_piper = (voice && strncmp(voice, "piper:", 6) == 0);
+	bool is_neural = (is_edge || is_piper);
+
+	if (is_neural) {
+		/* Neural Voice Strategy (Edge-TTS Raquel/Duarte & Piper ONNX):
+		 * Modern neural models generate natural cadence, pitch, and breath only across
+		 * complete prosodic units. Never chop mid-sentence at arbitrary 38-char limits.
+		 * Segment strictly on sentence terminators (. ! ? ; : or newline) up to 240 chars.
+		 * If an opening phrase has an early sentence boundary (e.g. "Olá!", "Com certeza!"),
+		 * pop it immediately for ultra-fast Time-To-First-Audio while synthesizing the remainder
+		 * in parallel in the background!
+		 */
+		while (*p) {
+			while (*p && isspace((unsigned char)*p)) p++;
+			if (!*p) break;
+
+			size_t rem = strlen(p);
+			if (rem <= 240) {
+				size_t sent_cut = 0;
+				for (size_t i = 3; i < rem; i++) {
+					if (strchr(".!?;:\n", p[i]) && (isspace((unsigned char)p[i + 1]) || p[i + 1] == '\0')) {
+						sent_cut = i + 1;
+						break;
+					}
+				}
+				if (sent_cut > 0 && sent_cut < rem) {
+					char seg[512];
+					if (sent_cut >= sizeof(seg)) sent_cut = sizeof(seg) - 1;
+					memcpy(seg, p, sent_cut);
+					seg[sent_cut] = '\0';
+					trim_trailing(seg);
+					if (seg[0]) enqueue_segment_locked(seg, voice);
+					p += sent_cut;
+					continue;
+				}
+				enqueue_segment_locked(p, voice);
+				break;
+			}
+
+			/* Longer than 240 chars: find best sentence boundary between 16 and 240 */
+			size_t cut = 0;
+			for (size_t i = 16; i < 240 && p[i]; i++) {
+				if (strchr(".!?;:\n", p[i]) && (isspace((unsigned char)p[i + 1]) || p[i + 1] == '\0')) {
+					cut = i + 1;
+					break;
+				}
+			}
+			/* Fallback to comma boundary between 50 and 200 */
+			if (!cut) {
+				for (size_t i = 50; i < 200 && p[i]; i++) {
+					if (p[i] == ',' && (isspace((unsigned char)p[i + 1]) || p[i + 1] == '\0')) {
+						cut = i + 1;
+						break;
+					}
+				}
+			}
+			/* Fallback to word boundary between 80 and 200 */
+			if (!cut) {
+				for (size_t i = 200; i > 60; i--) {
+					if (p[i] == ' ') {
+						cut = i;
+						break;
+					}
+				}
+			}
+			if (!cut) cut = (rem < 240) ? rem : 240;
+
+			char seg[512];
+			if (cut >= sizeof(seg)) cut = sizeof(seg) - 1;
+			memcpy(seg, p, cut);
+			seg[cut] = '\0';
+			trim_trailing(seg);
+			if (seg[0]) enqueue_segment_locked(seg, voice);
+			p += cut;
+		}
+		return;
+	}
+
 	bool first_seg = is_first_clause;
 	while (*p) {
 		while (*p && isspace((unsigned char)*p)) p++;
 		if (!*p) break;
 
-		/* Micro-First-Chunk Strategy:
-		 * For the very first segment (`first_seg == true`), cut at the earliest natural
-		 * sentence, clause, or comma boundary in 16..38 chars (or word boundary at <=36 chars).
-		 * On kokoro-pt-pt.onnx (4 P-cores), a 25-char opening clause synthesizes in ~210ms
-		 * and plays for ~1.4s through the persistent 1MB pw-cat pipe while Segment 2 (68 chars)
-		 * synthesizes in parallel with zero inter-clause gap!
-		 */
+		/* Micro-First-Chunk Strategy for CPU Kokoro-82M */
 		size_t max_len = first_seg ? 38 : 72;
 		size_t rem = strlen(p);
 		if (rem <= max_len) {
@@ -1438,7 +1597,7 @@ static void split_and_enqueue_locked(const char *clean, const char *voice, bool 
 		}
 		if (!cut) cut = max_len;
 
-		char seg[320];
+		char seg[512];
 		if (cut >= sizeof(seg)) cut = sizeof(seg) - 1;
 		memcpy(seg, p, cut);
 		seg[cut] = '\0';

@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+import sys
+import os
+import asyncio
+import subprocess
+import tempfile
+
+try:
+    import edge_tts
+except ImportError:
+    candidates = [
+        os.path.expanduser("~/.local/share/dwm-voice/venv/bin/python"),
+        os.path.expanduser("~/.venv/bin/python"),
+    ]
+    for venv_py in candidates:
+        if os.path.exists(venv_py) and sys.executable != venv_py:
+            os.execv(venv_py, [venv_py] + sys.argv)
+    sys.stderr.write("edge-tts not found. Install via: pip install edge-tts\n")
+    sys.exit(1)
+
+async def synth(text, voice, out_fd):
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tf:
+        tmp_mp3 = tf.name
+    try:
+        comm = edge_tts.Communicate(text, voice)
+        await comm.save(tmp_mp3)
+        cmd = ["ffmpeg", "-loglevel", "quiet", "-y", "-i", tmp_mp3, "-f", "s16le", "-ar", "24000", "-ac", "1", "pipe:1"]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+        out = proc.stdout.read()
+        proc.wait()
+        os.write(out_fd, out)
+    finally:
+        if os.path.exists(tmp_mp3):
+            os.remove(tmp_mp3)
+
+def main():
+    if len(sys.argv) < 2:
+        sys.exit(1)
+    text = sys.argv[1]
+    voice = sys.argv[2] if len(sys.argv) > 2 else "pt-PT-RaquelNeural"
+    asyncio.run(synth(text, voice, sys.stdout.fileno()))
+
+if __name__ == "__main__":
+    main()

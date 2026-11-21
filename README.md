@@ -16,11 +16,13 @@
 ### The `jarvis` CLI Tool (< 30 Seconds)
 Solve and execute natural language commands across desktop window managers (`dwm`, `sway`, `hyprland`), terminals (`tmux`, POSIX shell), browsers (`qutebrowser`, `firefox`), web applications (`site`), and game worlds (`NeverDark`):
 
+#### English Usage:
 ```bash
 # 1. Deterministic Tier-0 command execution (~0.1 ms, zero LLM round-trip):
 jarvis "switch to workspace two and open a terminal there"
 jarvis "let's listen to some miles davis"
 jarvis "scroll up 8"
+jarvis "what time is it"
 
 # 2. Dry-run inspection (prints compiled Intent IR + Action DSL JSON without executing):
 jarvis --dry-run "move this window to workspace three"
@@ -29,9 +31,35 @@ jarvis --dry-run "move this window to workspace three"
 jarvis "remember morning setup as switch to workspace 2 and open a terminal"
 jarvis "run morning setup"
 
-# 4. Multi-turn observation & reasoning across terminal panes and browser accessibility:
+# 4. Direct neural voice synthesis output:
+jarvis speak "Hello! Jarvis voice pipeline is ready and standing by."
+
+# 5. Multi-turn observation & reasoning across terminal panes and browser accessibility:
 jarvis "what error is showing in the other terminal"
 jarvis "open that file at the failing line"
+```
+
+#### Portuguese Usage (Uso em Português):
+```bash
+# 1. Execução determinística Tier-0 (~0.1 ms, sem latência de LLM):
+jarvis "muda para o workspace dois e abre um terminal aí"
+jarvis "vamos ouvir miles davis"
+jarvis "sobe 8"
+jarvis "que horas são"
+
+# 2. Inspeção em modo de teste (--dry-run: gera Intent IR + Action DSL sem executar):
+jarvis --dry-run "move esta janela para o workspace três"
+
+# 3. Memorizar um fluxo de trabalho reutilizável e executá-lo:
+jarvis "lembra configuração matinal como muda para o workspace 2 e abre um terminal"
+jarvis "executa configuração matinal"
+
+# 4. Saída direta por síntese de voz neural:
+jarvis speak "Olá! O Jarvis está pronto e configurado em português."
+
+# 5. Diagnóstico e raciocínio multi-turno (terminais, navegador e sistema):
+jarvis "que erro está a aparecer no outro terminal"
+jarvis "abre esse ficheiro na linha do erro"
 ```
 
 ### In-Memory C API
@@ -131,42 +159,125 @@ To enforce strict encapsulation across dynamically loaded `.so` adapter modules:
 
 ## 5. English & Portuguese Language Support (`en` / `pt`)
 
-`libjarvis` and its companion voice pipeline (`dwm-whisperd`, `dwm-voice`, `mod_tts.so`) support both **English (`en`)** and **Portuguese (`pt`)** speech recognition, natural language execution, and neural voice synthesis:
+`libjarvis` and its companion voice pipeline (`jarvisd`, `dwm-whisperd`, `mod_tts.so`) provide first-class, end-to-end support for both **English (`en`)** and **Portuguese (`pt`)**: speech recognition, wake-word activation, natural language understanding, Action DSL synthesis, and high-fidelity neural text-to-speech.
 
-### 1. Automatic Keyboard-Synchronized or Explicit Language Selection
-Configure the active spoken language in `~/.config/dwm-voice/lang` (or via the `dwm-voice menu` $\rightarrow$ **Whisper Language** selector):
-- **`kbd` (Default — Keyboard Layout Sync)**: Automatically follows your active keyboard layout (`Mod+Space` toggles between `US — English` and `PT — Português`), routing speech recognition to `"en"` or `"pt"` dynamically.
-- **`en` (English)**: Forces English speech recognition and command processing:
+### 5.1 Bilingual Spoken Wake-Words & Hands-Free Interaction
+
+Jarvis listens continuously via low-power adaptive Voice Activity Detection (VAD):
+- **English Spoken Wake-Word**: **`Jarvis`**
+  - *"Jarvis, what time is it?"*
+  - *"Jarvis, switch to workspace two and open a terminal there."*
+  - *"Jarvis, explain quantum physics in simple terms."*
+- **Portuguese Spoken Wake-Word**: **`Jarbas`** (or **`Jarvis`**)
+  - *"Jarbas, que horas são?"*
+  - *"Jarbas, muda para o workspace dois e abre um terminal aí."*
+  - *"Jarbas, explica-me física quântica de forma simples."*
+
+Configure the wake word in `~/.jarvisrc`:
+```ini
+wake_word = Jarbas       # Options: Jarbas, Jarvis (case-insensitive)
+```
+
+### 5.2 Speech Recognition: Keyboard Sync, Explicit Language, and Whisper Models
+
+Configure the speech-to-text language in `~/.config/dwm-voice/lang` or `~/.jarvisrc`:
+- **`kbd` (Default — Dynamic Keyboard Sync)**: Automatically follows your active X11/Wayland keyboard layout (`Mod+Space` switches between `US — English` and `PT — Português`), dynamically steering Whisper recognition without restarting daemons.
+- **`en` (English Only)**:
   ```bash
   mkdir -p ~/.config/dwm-voice
   printf 'en\n' > ~/.config/dwm-voice/lang
   ```
-- **`pt` (Portuguese — Português)**: Forces Portuguese speech recognition and multilingual command processing:
+- **`pt` (Portuguese Only — Português)**:
   ```bash
   mkdir -p ~/.config/dwm-voice
   printf 'pt\n' > ~/.config/dwm-voice/lang
   ```
-- **`auto` (Multilingual Auto-Detect)**: Lets Whisper detect the spoken language per utterance (`printf 'auto\n' > ~/.config/dwm-voice/lang`).
-
-### 2. English vs. Multilingual (Portuguese) Whisper Models
-Place quantized GGML Whisper models in `~/.local/share/whisper/` and select the active model in `~/.config/dwm-voice/model`:
-- **English-Only Ultra-Fast (Default for `en`)**:
-  - `ggml-base.en-q8_0.bin` (78 MB) or `ggml-small.en-q5_1.bin` (182 MB)
+- **`auto` (Multilingual Auto-Detect)**:
   ```bash
-  printf '%s/.local/share/whisper/ggml-base.en-q8_0.bin\n' "$HOME" > ~/.config/dwm-voice/model
+  printf 'auto\n' > ~/.config/dwm-voice/lang
   ```
-- **Portuguese & Multilingual (`pt` + `en`)**:
-  - Use a multilingual model (`ggml-base-q8_0.bin` or `ggml-small-q5_1.bin` without the `.en` suffix) so both Portuguese and English utterances transcribe cleanly:
+
+#### Recommended Whisper GGML Models (`~/.local/share/whisper/`)
+- **English-Only Ultra-Fast**: `ggml-base.en-q8_0.bin` (78 MB) or `ggml-small.en-q5_1.bin` (182 MB).
+- **Portuguese & Multilingual**: Always use multilingual models (without `.en` suffix) so Portuguese accents and vocabulary transcribe with 100% accuracy:
   ```bash
   curl -L -o ~/.local/share/whisper/ggml-small-q5_1.bin \
     https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin
   printf '%s/.local/share/whisper/ggml-small-q5_1.bin\n' "$HOME" > ~/.config/dwm-voice/model
   ```
 
-### 3. Neural TTS Voices & Multilingual Custom Ontology
-- **Neural TTS (`~/.config/dwm-voice/tts_voice`)**: Supports Kokoro-82M (`bm_daniel`, `bm_george`, `am_michael`, `bf_emma`, `af_heart` in `~/.local/share/kokoro/`) and Piper ONNX (`piper:gb`, `piper:us`, or Portuguese Piper models in `~/.local/share/piper/`) via `libespeak-ng` IPA phonemization (`en-gb-x-rp`, `en-us`, `pt`).
-- **Bilingual Compositional Ontology & ReAct Reasoning**:
-  - Custom Portuguese and English verb/entity synonyms can be added side-by-side in `~/.config/jarvis/ontology.json` (or `$JARVIS_ONTOLOGY_JSON`), while `axil-auren` remote inference (`qwen3.5-4b`) natively understands and translates both Portuguese and English queries into canonical Action DSL (`jarvis "muda para o workspace dois e abre um terminal"` / `jarvis "switch to workspace two and open a terminal"`).
+### 5.3 Neural Text-to-Speech (TTS) Voice Engines
+
+`mod_tts.so` supports three tiers of neural voices, switchable on-the-fly via `tts_voice` in `~/.jarvisrc` or `~/.config/dwm-voice/tts_voice`:
+
+| Engine | Voice Identifier | Description & Characteristics |
+| :--- | :--- | :--- |
+| **Edge-TTS (Streaming Neural)** | `edge:pt-PT-RaquelNeural` (or `raquel`) | **Ultra-realistic Portuguese voice.** Human-grade prosody, natural breathing, and pitch inflections. |
+| **Edge-TTS (Streaming Neural)** | `edge:pt-PT-DuarteNeural` (or `duarte`) | Warm European Portuguese male neural speaker. |
+| **Edge-TTS (Streaming Neural)** | `edge:en-US-JennyNeural` / `edge:en-US-GuyNeural` | Exceptionally fluid American English neural speakers. |
+| **Piper ONNX (Offline Neural)** | `piper:pt_PT-miro` | Offline European Portuguese male voice (~60ms latency, ~15MB RAM). |
+| **Piper ONNX (Offline Neural)** | `piper:pt_PT-tugao-medium` | Distinctive European Portuguese local voice. |
+| **Piper ONNX (Offline Neural)** | `piper:gb` / `piper:us` | Fast British English (`northern_english_male`) or US English (`lessac`). |
+| **Kokoro-82M ONNX (CPU)** | `pm_tuga`, `pm_alex` | Lightweight local Portuguese CPU voices via `kokoro-pt-pt.onnx`. |
+| **Kokoro-82M ONNX (CPU)** | `bm_george`, `bm_daniel`, `am_michael` | Lightweight local English CPU voices via `kokoro-v1.0.int8.onnx`. |
+
+Configure your voice in `~/.jarvisrc`:
+```ini
+# Ultra-realistic Portuguese neural voice (default recommended):
+tts_voice = edge:pt-PT-RaquelNeural
+
+# Or offline Piper Portuguese:
+# tts_voice = piper:pt_PT-miro
+
+# Or offline British English:
+# tts_voice = piper:gb
+```
+
+Test speech immediately from the terminal:
+```bash
+jarvis speak "Com certeza! O novo sistema de síntese neural de voz está operacional."
+jarvis speak "Certainly! High-fidelity neural voice synthesis is now active."
+```
+
+### 5.4 Low-Latency Streaming Prosody & Zero-Gap Pipelining (TTFA)
+
+Unlike traditional TTS systems that chop sentences into rigid 38-character micro-fragments (causing robotic pitch drops and buffer underrun pauses between clauses), `libjarvis` uses a two-tiered prosody and streaming architecture:
+1. **Low Time-To-First-Audio (TTFA ~300–500 ms)**:
+   When synthesis starts, `libjarvis` identifies early punctuation boundaries (`!`, `?`, `.`, `,`) in the opening 3–54 characters. Short natural greetings (*"Olá!"*, *"Com certeza!"*, *"Sim, claro."*, *"Certainly!"*) are popped and dispatched to playback immediately.
+2. **Pipelined Background Prefetching (0 ms Inter-Sentence Gap)**:
+   While the first clause plays through your speakers (providing a 1.5–3.0 second playback runway), the background worker thread (`tts_worker_fn`) synthesizes the next complete sentence in parallel.
+3. **Full-Sentence Prosody Units (up to 240 chars)**:
+   Subsequent sentences are preserved whole up to 240 characters. Modern neural models retain complete sentence context, producing natural declarative cadence, rising interrogatives, and authentic human breathing.
+
+### 5.5 Hardware Audio Capture & Echo-Prevention Discipline
+
+When running hands-free voice agents on laptops where the speakers are located inches from the built-in microphone, avoid naive WebRTC software acoustic echo cancellation (AEC) filters that attenuate vocal frequencies and crush VAD signal-to-noise ratios.
+
+Recommended `~/.jarvisrc` audio settings:
+```ini
+# 1. Point pw_target directly to your physical analog microphone:
+pw_target = alsa_input.pci-0000_00_1f.3.analog-stereo
+
+# 2. Disable conversational follow-up window to prevent speaker bleed loops:
+followup_ms = 0
+conv_followup_ms = 0
+```
+- **Crisp Speech Capture**: Bypassing aggressive AEC filters maintains full microphone dynamics (+20 dB gain compared to WebRTC filtering), allowing VAD and Whisper to decode speech cleanly at natural speaking volume.
+- **Zero Self-Echo Loops**: With `followup_ms = 0`, Jarvis returns directly to standby mode as soon as speech finishes, preventing laptop speaker audio from triggering self-echo loops. It only responds when explicitly addressed by wake-word (*"Jarbas"* / *"Jarvis"*).
+
+### 5.6 Bilingual Custom Ontology & Action DSL Examples
+
+`libjarvis` features a bilingual compositional grammar (`data/ontology.json`). Both Portuguese and English phrases map directly into canonical platform-neutral Action DSL:
+
+| Spoken Utterance (English) | Spoken Utterance (Portuguese) | Compiled Action DSL |
+| :--- | :--- | :--- |
+| `"switch to workspace 2"` | `"muda para o workspace 2"` | `{"op":"workspace_switch","target":2}` |
+| `"open a terminal"` | `"abre um terminal"` | `{"op":"app_launch","target":"terminal"}` |
+| `"what time is it"` | `"que horas são"` | `{"op":"get_time"}` |
+| `"let's listen to miles davis"` | `"vamos ouvir miles davis"` | `{"op":"media_play","query":"miles davis"}` |
+| `"scroll down 5"` | `"desce 5"` | `{"op":"input_scroll","direction":"down","amount":5}` |
+| `"fullscreen this window"` | `"maximiza esta janela"` | `{"op":"window_fullscreen"}` |
+| `"close this tab"` | `"fecha este separador"` | `{"op":"browser_tab_close"}` |
 
 ---
 
