@@ -162,8 +162,6 @@ on_sig(int sig)
 	(void)sig;
 	running = 0;
 	g_dec.abort_flag = 1;
-	pthread_cond_broadcast(&g_audio.cond);
-	pthread_cond_broadcast(&g_dec.cond);
 }
 
 static void
@@ -3716,8 +3714,13 @@ main(int argc, char *argv[])
 		}
 	}
 
-	signal(SIGINT, on_sig);
-	signal(SIGTERM, on_sig);
+	{
+		struct sigaction sa;
+		memset(&sa, 0, sizeof(sa));
+		sa.sa_handler = on_sig;
+		sigaction(SIGINT, &sa, NULL);
+		sigaction(SIGTERM, &sa, NULL);
+	}
 	signal(SIGHUP, SIG_IGN);
 	signal(SIGPIPE, SIG_IGN);
 	signal(SIGCHLD, SIG_IGN);
