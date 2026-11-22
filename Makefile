@@ -53,17 +53,6 @@ mods/hyprland/mod_hyprland.so: mods/hyprland/mod_hyprland.c include/ttypt/jarvis
 mods/tts/mod_tts.so: mods/tts/mod_tts.c include/ttypt/jarvis-types.h
 	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/tts/mod_tts.c $(LDFLAGS) -lxylem -ldl -lpthread -lm
 
-$(whispercpp)/Makefile:
-	@mkdir -p $(whispercpp)
-	cd $(whispercpp) && cmake .. \
-		-DCMAKE_PREFIX_PATH=/home/quirinpa/site/external/axil-auren/third_party/1.4.328.1/x86_64 \
-		-DGGML_VULKAN=ON \
-		-DBUILD_SHARED_LIBS=OFF \
-		-DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-		-DWHISPER_BUILD_EXAMPLES=OFF \
-		-DWHISPER_BUILD_TESTS=OFF \
-		-DWHISPER_BUILD_SERVER=OFF
-
 $(WHISPER_A): $(whispercpp)/Makefile
 	$(MAKE) -C $(whispercpp) -j4 whisper
 
@@ -75,7 +64,7 @@ bin/jarvisd: src/jarvisd.c $(WHISPER_A) lib/libjarvis.so
 		$(whispercpp)/ggml/src/ggml-vulkan/libggml-vulkan.a \
 		$(whispercpp)/ggml/src/libggml-cpu.a \
 		$(whispercpp)/ggml/src/libggml-base.a \
-		-Llib -ljarvis $(LDFLAGS) -lmm -lxylem -lstele -lcorm -lvulkan -lstdc++ -lgomp -lpthread -ldl -lm $(LDFLAGS-libjarvis-Linux)
+		-Llib -ljarvis $(LDFLAGS) -lmm -lxylem -lstele -lcorm -lvulkan -lstdc++ -lgomp -lpthread -ldl -lm $(LDFLAGS-jarvis-${uname})
 
 test: all
 	$(MAKE) -C tests test
