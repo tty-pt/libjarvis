@@ -1,0 +1,19 @@
+#!/bin/ksh
+#
+# $OpenBSD: jarvisd,v 1.0 2026/11/22 $
+
+daemon="@PREFIX@/bin/jarvisd"
+daemon_flags="-j"
+
+. /etc/rc.d/rc.subr
+
+rc_bg=YES
+rc_reload=NO
+
+rc_pre() {
+	if [ -x /etc/rc.d/axil_auren ]; then
+		/etc/rc.d/axil_auren check >/dev/null 2>&1 || /etc/rc.d/axil_auren start
+	fi
+}
+
+rc_cmd $1

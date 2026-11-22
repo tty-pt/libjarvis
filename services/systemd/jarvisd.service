@@ -1,0 +1,17 @@
+[Unit]
+Description=Jarvis Voice Assistant Daemon
+After=network.target pipewire.service axil-auren.service
+Requires=axil-auren.service
+Wants=pipewire.service
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=@PREFIX@/bin/jarvisd -j
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

@@ -115,7 +115,39 @@ install-extra: ${DESTDIR}${PREFIX}/lib/pkgconfig/jarvis.pc ${DESTDIR}${PREFIX}/l
 		ln -sf jarvisd $(HOME)/.local/bin/dwm-whisperd; \
 	fi
 
-install: install-extra
+install: install-extra install-services
+
+.PHONY: install-services
+install-services:
+	@if [ "${uname}" = "Linux" ] || [ -d /run/systemd/system ]; then \
+		echo "[INFO] Installing systemd services for jarvisd..."; \
+		install -d ${DESTDIR}${PREFIX}/lib/systemd/user; \
+		sed 's|@PREFIX@|${PREFIX}|g' services/systemd/jarvisd.service > ${DESTDIR}${PREFIX}/lib/systemd/user/jarvisd.service; \
+		if [ -d $(HOME)/.config/systemd/user ] || [ -n "$$(echo "${PREFIX}" | grep -E '^($(HOME)|~)')" ]; then \
+			mkdir -p $(HOME)/.config/systemd/user; \
+			sed 's|@PREFIX@|${PREFIX}|g' services/systemd/jarvisd.service > $(HOME)/.config/systemd/user/jarvisd.service; \
+		fi; \
+	elif [ "${uname}" = "OpenBSD" ]; then \
+		echo "[INFO] Installing OpenBSD rc.d service for jarvisd..."; \
+		install -d ${DESTDIR}${PREFIX}/share/examples/rc.d; \
+		sed 's|@PREFIX@|${PREFIX}|g' services/rc.d/jarvisd > ${DESTDIR}${PREFIX}/share/examples/rc.d/jarvisd; \
+		chmod 755 ${DESTDIR}${PREFIX}/share/examples/rc.d/jarvisd; \
+		if [ -w /etc/rc.d ]; then \
+			install -m 755 ${DESTDIR}${PREFIX}/share/examples/rc.d/jarvisd /etc/rc.d/jarvisd; \
+		fi; \
+	elif [ "${uname}" = "Darwin" ]; then \
+		echo "[INFO] Installing launchd service for jarvisd..."; \
+		install -d ${DESTDIR}${PREFIX}/share/launchd; \
+		sed 's|@PREFIX@|${PREFIX}|g' services/launchd/pt.tty.jarvisd.plist > ${DESTDIR}${PREFIX}/share/launchd/pt.tty.jarvisd.plist; \
+		if [ -d $(HOME)/Library/LaunchAgents ]; then \
+			sed 's|@PREFIX@|${PREFIX}|g' services/launchd/pt.tty.jarvisd.plist > $(HOME)/Library/LaunchAgents/pt.tty.jarvisd.plist; \
+		fi; \
+	elif [ "${SYS}" = "Windows" ] || [ "${uname}" = "MinGW64" ] || [ "${uname}" = "Msys" ] || [ "${uname}" = "MingW" ]; then \
+		echo "[INFO] Installing Windows services for jarvisd..."; \
+		install -d ${DESTDIR}${PREFIX}/share/windows; \
+		sed 's|@PREFIX@|${PREFIX}|g' services/windows/jarvisd.xml > ${DESTDIR}${PREFIX}/share/windows/jarvisd.xml; \
+		install -m 755 services/windows/install-service.ps1 ${DESTDIR}${PREFIX}/share/windows/install-jarvisd-service.ps1; \
+	fi
 
 clean: clean-tests
 clean-tests:
