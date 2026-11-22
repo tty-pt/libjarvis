@@ -55,7 +55,8 @@ static bool ff_is_browser_name(const char *name)
 	return ff_str_ci(name, "Firefox") ||
 	       ff_str_ci(name, "Chromium") ||
 	       ff_str_ci(name, "Chrome") ||
-	       ff_str_ci(name, "Brave");
+	       ff_str_ci(name, "Brave") ||
+	       ff_str_ci(name, "qutebrowser");
 }
 
 static __attribute__((unused)) void ff_url_encode(const char *src, char *dst, size_t dst_sz)

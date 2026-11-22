@@ -15,6 +15,7 @@
 
 #include "ttypt/libren.h"
 #include <ttypt/xy.h>
+#include "../../include/ttypt/desktop-core.h"
 #include "x11_core.h"
 
 static int tool_input(const char *args, char **out_result)
@@ -59,9 +60,11 @@ static int tool_input(const char *args, char **out_result)
 	if (strncasecmp(args, "click", 5) == 0) {
 		const char *rest = args + 5;
 		while (*rest == ' ') rest++;
-		int x = 0, y = 0;
+		int x = 0, y = 0, btn = 1;
 		char extra = '\0';
-		if (*rest && sscanf(rest, "%d %d %c", &x, &y, &extra) == 2) {
+		if (*rest && sscanf(rest, "%d %d %d %c", &x, &y, &btn, &extra) == 3) {
+			/* parsed x y btn */
+		} else if (*rest && sscanf(rest, "%d %d %c", &x, &y, &extra) == 2) {
 			/* parsed x y */
 		} else if (*rest && sscanf(rest, "%d,%d %c", &x, &y, &extra) == 2) {
 			/* parsed x,y */
@@ -71,12 +74,13 @@ static int tool_input(const char *args, char **out_result)
 			x = wx + ww / 2;
 			y = wy + wh / 2;
 		} else {
-			*out_result = strdup("Error: X11 input click accepts '<x> <y>' or 'center' (use browser tool for accessibility labels)");
+			*out_result = strdup("Error: X11 input click accepts '<x> <y> [btn]' or 'center' (use browser tool for accessibility labels)");
 			return -1;
 		}
-		x11_core_mouse_click(x, y, 1);
+		if (btn < 1 || btn > 9) btn = 1;
+		x11_core_mouse_click(x, y, btn);
 		char buf[128];
-		snprintf(buf, sizeof(buf), "click at (%d,%d) button 1", x, y);
+		snprintf(buf, sizeof(buf), "click at (%d,%d) button %d", x, y, btn);
 		*out_result = strdup(buf);
 		return 0;
 	}
@@ -106,13 +110,31 @@ static int tool_input(const char *args, char **out_result)
 		return 0;
 	}
 
-	*out_result = strdup("Error: usage: input <submit <text> | type <text> | key <combo> | click <x y | center> | scroll <up|down|left|right> [amount]>");
+	*out_result = strdup("Error: usage: input <submit <text> | type <text> | key <combo> | click <x y [btn] | center> | scroll <up|down|left|right> [amount]>");
 	return -1;
 }
 
 static int tool_x11_windows(const char *args, char **out_result)
 {
 	while (args && *args == ' ') args++;
+	if (args && strcasecmp(args, "focused") == 0) {
+		x11_win_info_t foc;
+		if (!x11_core_get_focused(&foc)) {
+			*out_result = strdup("{\"id\":\"\",\"class\":\"\",\"title\":\"\",\"x\":0,\"y\":0,\"w\":0,\"h\":0}");
+			return 0;
+		}
+		int wx = 0, wy = 0, ww = 0, wh = 0;
+		x11_core_get_geometry(NULL, &wx, &wy, &ww, &wh);
+		char ec[128], et[200], buf[512];
+		x11_core_json_escape(foc.wm_class, ec, sizeof(ec));
+		x11_core_json_escape(foc.title, et, sizeof(et));
+		snprintf(buf, sizeof(buf),
+		         "{\"id\":\"%s\",\"class\":\"%s\",\"title\":\"%s\",\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d}",
+		         foc.id, ec, et, wx, wy, ww, wh);
+		*out_result = strdup(buf);
+		return 0;
+	}
+
 	if (args && strncasecmp(args, "focus ", 6) == 0) {
 		const char *ident = args + 6;
 		while (*ident == ' ') ident++;
@@ -187,9 +209,41 @@ static int tool_clipboard(const char *args, char **out_result)
 	return 0;
 }
 
+static char *x11_context_provider(void)
+{
+	x11_win_info_t clients[32], foc, oth;
+	memset(&foc, 0, sizeof(foc));
+	memset(&oth, 0, sizeof(oth));
+	size_t n = x11_core_query_windows(clients, 32, &foc, &oth);
+	if (n == 0 && !foc.wm_class[0] && !foc.title[0]) return NULL;
+
+	char cwd[256] = {0}, fg[256] = {0};
+	if (foc.pid && x11_core_is_terminal_class(foc.wm_class)) {
+		desktop_core_resolve_pid_cwd_fg(foc.pid, cwd, sizeof(cwd), fg, sizeof(fg));
+	}
+
+	char wins[512] = {0};
+	size_t woff = 0;
+	for (size_t i = 0; i < n && woff + 64 < sizeof(wins); i++) {
+		woff += (size_t)snprintf(wins + woff, sizeof(wins) - woff,
+		                         "%stag%d:%s:'%.40s'",
+		                         i > 0 ? ", " : "",
+		                         clients[i].tag,
+		                         clients[i].wm_class,
+		                         clients[i].title);
+	}
+
+	char buf[1280];
+	snprintf(buf, sizeof(buf),
+	         "x11_focused='%s' title='%.80s' cwd='%s' fg='%s' windows=[%s]",
+	         foc.wm_class, foc.title, cwd, fg, wins);
+	return strdup(buf);
+}
+
 XY_MODULE_API void xy_install(void)
 {
 	ren_register_tool("input", "input <submit <text> | type <text> | key <combo> | click <x y | center> | scroll <up|down|left|right> [amount]>", tool_input);
 	ren_register_tool("x11_windows", "x11_windows [focus <id_or_title> | close <id>]", tool_x11_windows);
 	ren_register_tool("clipboard", "clipboard", tool_clipboard);
+	ren_register_context_provider(x11_context_provider);
 }

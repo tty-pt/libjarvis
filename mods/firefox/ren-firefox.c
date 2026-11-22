@@ -2,7 +2,7 @@
  * @file ren-firefox.c
  * @brief Standalone ren extension for Firefox/Chromium AT-SPI2 + MozLZ4 browser automation.
  *
- * ZERO libjarvis dependency — works standalone with `ren -m ren-firefox:ren-x11:ren-mm`.
+ * ZERO libjarvis or libX11 dependency — delegates window/input actions via ren_call_tool().
  */
 
 #define _GNU_SOURCE
@@ -16,47 +16,109 @@
 
 #include "ttypt/libren.h"
 #include <ttypt/xy.h>
+#include "../../include/ttypt/desktop-core.h"
 
-#include "../x11/x11_core.h"
 #include "firefox_core.h"
 
-static bool ren_ff_focus_browser(void *ud)
+static bool extract_json_str(const char *json, const char *key, char *out, size_t out_sz)
 {
-	(void)ud;
-	x11_win_info_t clients[32];
-	x11_win_info_t foc, oth;
-	size_t n = x11_core_query_windows(clients, 32, &foc, &oth);
-	if (x11_core_is_browser_class(foc.wm_class)) return true;
-
-	for (int pass = 0; pass < 2; pass++) {
-		for (size_t i = 0; i < n; i++) {
-			if (pass == 0 && !clients[i].visible) continue;
-			if (x11_core_is_browser_class(clients[i].wm_class)) {
-				return x11_core_focus_ewmh(clients[i].id, 1.2);
-			}
-		}
+	if (!json || !key || !out || out_sz == 0) return false;
+	out[0] = '\0';
+	char pat[64];
+	snprintf(pat, sizeof(pat), "\"%s\":\"", key);
+	const char *p = strstr(json, pat);
+	if (!p) return false;
+	p += strlen(pat);
+	size_t w = 0;
+	while (*p && *p != '"' && w + 1 < out_sz) {
+		if (*p == '\\' && p[1]) p++;
+		out[w++] = *p++;
 	}
-	return false;
+	out[w] = '\0';
+	return w > 0;
+}
+
+static bool extract_json_int(const char *json, const char *key, int *out_val)
+{
+	if (!json || !key || !out_val) return false;
+	char pat[64];
+	snprintf(pat, sizeof(pat), "\"%s\":", key);
+	const char *p = strstr(json, pat);
+	if (!p) return false;
+	p += strlen(pat);
+	*out_val = atoi(p);
+	return true;
 }
 
 static bool ren_ff_is_browser_focused(void *ud)
 {
 	(void)ud;
-	x11_win_info_t foc;
-	return x11_core_get_focused(&foc) && x11_core_is_browser_class(foc.wm_class);
+	char *out = NULL;
+	int rc = ren_call_tool("x11_windows", "focused", &out);
+	if (rc != 0 || !out) {
+		free(out);
+		/* If no X11 window query tool is loaded (e.g. Wayland), allow AT-SPI2 inspection */
+		return true;
+	}
+	char cls[128] = {0};
+	extract_json_str(out, "class", cls, sizeof(cls));
+	free(out);
+	return ff_is_browser_name(cls);
+}
+
+static bool ren_ff_focus_browser(void *ud)
+{
+	(void)ud;
+	if (ren_ff_is_browser_focused(NULL)) return true;
+
+	static const char *const BROWSERS[] = { "firefox", "chromium", "chrome", "brave", "qutebrowser", NULL };
+	for (size_t i = 0; BROWSERS[i]; i++) {
+		char arg[64], *out = NULL;
+		snprintf(arg, sizeof(arg), "focus %s", BROWSERS[i]);
+		int rc = ren_call_tool("x11_windows", arg, &out);
+		free(out);
+		if (rc == 0) return true;
+	}
+	for (size_t i = 0; BROWSERS[i]; i++) {
+		char arg[64], *out = NULL;
+		snprintf(arg, sizeof(arg), "focus %s", BROWSERS[i]);
+		int rc = ren_call_tool("window", arg, &out);
+		free(out);
+		if (rc == 0) return true;
+	}
+	return false;
 }
 
 static bool ren_ff_get_geometry(void *ud, int *x, int *y, int *w, int *h)
 {
 	(void)ud;
-	x11_core_get_geometry(NULL, x, y, w, h);
+	char *out = NULL;
+	int rc = ren_call_tool("x11_windows", "focused", &out);
+	if (rc != 0 || !out) {
+		free(out);
+		return false;
+	}
+	int gx = 0, gy = 0, gw = 0, gh = 0;
+	bool ok = extract_json_int(out, "x", &gx) &&
+	          extract_json_int(out, "y", &gy) &&
+	          extract_json_int(out, "w", &gw) &&
+	          extract_json_int(out, "h", &gh) &&
+	          gw > 0 && gh > 0;
+	free(out);
+	if (!ok) return false;
+	*x = gx;
+	*y = gy;
+	*w = gw;
+	*h = gh;
 	return true;
 }
 
 static void ren_ff_click_xy(void *ud, int x, int y, int btn)
 {
 	(void)ud;
-	x11_core_mouse_click(x, y, btn > 0 ? btn : 1);
+	char arg[64];
+	snprintf(arg, sizeof(arg), "click %d %d %d", x, y, btn > 0 ? btn : 1);
+	ren_call_tool("input", arg, NULL);
 }
 
 static firefox_core_ops_t ren_ff_ops(void)
@@ -72,19 +134,10 @@ static firefox_core_ops_t ren_ff_ops(void)
 
 static void spawn_browser_url(const char *url)
 {
-	pid_t pid = fork();
-	if (pid == 0) {
-		setsid();
-		int devnull = open("/dev/null", O_RDWR);
-		if (devnull >= 0) {
-			dup2(devnull, STDIN_FILENO);
-			dup2(devnull, STDOUT_FILENO);
-			dup2(devnull, STDERR_FILENO);
-			if (devnull > 2) close(devnull);
-		}
-		execlp("firefox", "firefox", "--new-tab", url, (char *)NULL);
-		execlp("xdg-open", "xdg-open", url, (char *)NULL);
-		_exit(127);
+	char *const argv[] = { "firefox", "--new-tab", (char *)url, NULL };
+	if (desktop_core_spawn_detached_argv(argv) <= 0) {
+		char *const xdg[] = { "xdg-open", (char *)url, NULL };
+		desktop_core_spawn_detached_argv(xdg);
 	}
 }
 
@@ -184,7 +237,13 @@ static int tool_browser(const char *args, char **out_result)
 			if (strcmp(role, "entry") != 0 && strcmp(role, "combo box") != 0) usleep(160000);
 		}
 		firefox_core_ensure_entry_focused(&ops);
-		x11_core_type_text(text, true);
+		char input_arg[600], *input_out = NULL;
+		snprintf(input_arg, sizeof(input_arg), "submit %s", text);
+		if (ren_call_tool("input", input_arg, &input_out) != 0) {
+			*out_result = input_out ? input_out : strdup("Error: input tool unavailable to type text");
+			return -1;
+		}
+		free(input_out);
 		char out[512];
 		if (click_msg[0]) {
 			snprintf(out, sizeof(out), "%s -> typed+enter: %.120s", click_msg, text);
@@ -243,7 +302,25 @@ static int tool_browser(const char *args, char **out_result)
 	return 0;
 }
 
+static char *ff_context_provider(void)
+{
+	firefox_tab_t tabs[FIREFOX_CORE_MAX_TABS];
+	size_t ntabs = firefox_core_populate_tabs(tabs, FIREFOX_CORE_MAX_TABS);
+	if (ntabs == 0) return NULL;
+
+	char buf[640];
+	size_t off = (size_t)snprintf(buf, sizeof(buf), "browser_tabs=%zu [", ntabs);
+	for (size_t i = 0; i < ntabs && off + 48 < sizeof(buf); i++) {
+		const char *label = tabs[i].title[0] ? tabs[i].title : tabs[i].url;
+		off += (size_t)snprintf(buf + off, sizeof(buf) - off, "%s'%.48s'",
+		                        i > 0 ? ", " : "", label);
+	}
+	snprintf(buf + off, sizeof(buf) - off, "]");
+	return strdup(buf);
+}
+
 XY_MODULE_API void xy_install(void)
 {
 	ren_register_tool("browser", "browser <inspect [filter] | tab <title_or_url_substring> | url <https://...> | search <query> | click <element_label> | send <element_label> | <text>>", tool_browser);
+	ren_register_context_provider(ff_context_provider);
 }

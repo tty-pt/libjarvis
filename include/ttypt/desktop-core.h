@@ -1,19 +1,31 @@
-#include "../include/ttypt/jarvis-desktop.h"
+#ifndef TTYPT_DESKTOP_CORE_H
+#define TTYPT_DESKTOP_CORE_H
+
+/**
+ * @file desktop-core.h
+ * @brief Self-contained POSIX/Linux desktop, /proc, .desktop, tmux, and MPRIS helpers.
+ *
+ * ZERO libjarvis, libren, libX11, or WM link dependencies!
+ */
 
 #if !defined(__wasm__) && !defined(_WIN32)
 #include <ctype.h>
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
-static void trim_trailing(char *s)
+static __attribute__((unused)) void desktop_core_trim_trailing(char *s)
 {
 	if (!s) return;
 	size_t len = strlen(s);
@@ -23,13 +35,13 @@ static void trim_trailing(char *s)
 	}
 }
 
-static bool str_contains_ci(const char *haystack, const char *needle)
+static __attribute__((unused)) bool desktop_core_str_contains_ci(const char *haystack, const char *needle)
 {
 	if (!haystack || !needle || !*needle) return false;
 	return strcasestr(haystack, needle) != NULL;
 }
 
-void jarvis_desktop_run_cmd_capture(const char *cmd, char *out, size_t out_sz)
+static __attribute__((unused)) void desktop_core_run_cmd_capture(const char *cmd, char *out, size_t out_sz)
 {
 	if (!out || out_sz == 0) return;
 	out[0] = '\0';
@@ -38,51 +50,92 @@ void jarvis_desktop_run_cmd_capture(const char *cmd, char *out, size_t out_sz)
 	if (!fp) return;
 	size_t rd = fread(out, 1, out_sz - 1, fp);
 	out[rd] = '\0';
-	trim_trailing(out);
+	desktop_core_trim_trailing(out);
 	pclose(fp);
 }
 
-pid_t jarvis_desktop_spawn_detached_sh(const char *cmd)
+static __attribute__((unused)) pid_t desktop_core_spawn_detached_sh(const char *cmd)
 {
 	if (!cmd || !*cmd) return -1;
 	pid_t pid = fork();
 	if (pid < 0) return -1;
 	if (pid == 0) {
 		setsid();
-		int devnull = open("/dev/null", O_RDWR);
-		if (devnull >= 0) {
-			dup2(devnull, STDIN_FILENO);
-			dup2(devnull, STDOUT_FILENO);
-			dup2(devnull, STDERR_FILENO);
-			if (devnull > 2) close(devnull);
+		pid_t gpid = fork();
+		if (gpid == 0) {
+			int devnull = open("/dev/null", O_RDWR);
+			if (devnull >= 0) {
+				dup2(devnull, STDIN_FILENO);
+				dup2(devnull, STDOUT_FILENO);
+				dup2(devnull, STDERR_FILENO);
+				if (devnull > 2) close(devnull);
+			}
+			execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+			_exit(127);
 		}
-		execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
-		_exit(127);
+		_exit(gpid < 0 ? 127 : 0);
 	}
-	return pid;
+	int st = 0;
+	while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+	return 0;
 }
 
-pid_t jarvis_desktop_spawn_detached_argv(char *const argv[])
+static __attribute__((unused)) pid_t desktop_core_spawn_detached_argv(char *const argv[])
 {
 	if (!argv || !argv[0]) return -1;
+	int pfd[2];
+	if (pipe(pfd) < 0) return -1;
+	fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
+	fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
+
 	pid_t pid = fork();
-	if (pid < 0) return -1;
-	if (pid == 0) {
-		setsid();
-		int devnull = open("/dev/null", O_RDWR);
-		if (devnull >= 0) {
-			dup2(devnull, STDIN_FILENO);
-			dup2(devnull, STDOUT_FILENO);
-			dup2(devnull, STDERR_FILENO);
-			if (devnull > 2) close(devnull);
-		}
-		execvp(argv[0], argv);
-		_exit(127);
+	if (pid < 0) {
+		close(pfd[0]);
+		close(pfd[1]);
+		return -1;
 	}
-	return pid;
+	if (pid == 0) {
+		close(pfd[0]);
+		setsid();
+		pid_t gpid = fork();
+		if (gpid == 0) {
+			int devnull = open("/dev/null", O_RDWR);
+			if (devnull >= 0) {
+				dup2(devnull, STDIN_FILENO);
+				dup2(devnull, STDOUT_FILENO);
+				dup2(devnull, STDERR_FILENO);
+				if (devnull > 2) close(devnull);
+			}
+			execvp(argv[0], argv);
+			unsigned char err_b = (unsigned char)(errno ? errno : 1);
+			ssize_t wr = write(pfd[1], &err_b, 1);
+			(void)wr;
+			_exit(127);
+		}
+		if (gpid < 0) {
+			unsigned char err_b = (unsigned char)(errno ? errno : 1);
+			ssize_t wr = write(pfd[1], &err_b, 1);
+			(void)wr;
+		}
+		close(pfd[1]);
+		_exit(0);
+	}
+
+	close(pfd[1]);
+	int st = 0;
+	while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+
+	unsigned char err_b = 0;
+	ssize_t n;
+	do {
+		n = read(pfd[0], &err_b, 1);
+	} while (n < 0 && errno == EINTR);
+	close(pfd[0]);
+
+	return (n == 0) ? 1 : -1;
 }
 
-void jarvis_desktop_url_encode(const char *src, char *dst, size_t dst_sz)
+static __attribute__((unused)) void desktop_core_url_encode(const char *src, char *dst, size_t dst_sz)
 {
 	static const char hex[] = "0123456789ABCDEF";
 	if (!dst || dst_sz == 0) return;
@@ -102,7 +155,7 @@ void jarvis_desktop_url_encode(const char *src, char *dst, size_t dst_sz)
 	dst[w] = '\0';
 }
 
-void jarvis_desktop_json_escape(const char *src, char *dst, size_t dst_sz)
+static __attribute__((unused)) void desktop_core_json_escape(const char *src, char *dst, size_t dst_sz)
 {
 	if (!dst || dst_sz == 0) return;
 	if (!src) { dst[0] = '\0'; return; }
@@ -127,7 +180,7 @@ void jarvis_desktop_json_escape(const char *src, char *dst, size_t dst_sz)
 	dst[w] = '\0';
 }
 
-size_t jarvis_desktop_get_child_pids(unsigned long pid, unsigned long *out_pids, size_t max_pids)
+static __attribute__((unused)) size_t desktop_core_get_child_pids(unsigned long pid, unsigned long *out_pids, size_t max_pids)
 {
 	if (!pid || !out_pids || max_pids == 0) return 0;
 	char path[128];
@@ -147,7 +200,7 @@ size_t jarvis_desktop_get_child_pids(unsigned long pid, unsigned long *out_pids,
 	return count;
 }
 
-void jarvis_desktop_read_proc_comm(unsigned long pid, char *out, size_t out_sz)
+static __attribute__((unused)) void desktop_core_read_proc_comm(unsigned long pid, char *out, size_t out_sz)
 {
 	if (!out || out_sz == 0) return;
 	out[0] = '\0';
@@ -157,12 +210,12 @@ void jarvis_desktop_read_proc_comm(unsigned long pid, char *out, size_t out_sz)
 	FILE *fp = fopen(path, "r");
 	if (!fp) return;
 	if (fgets(out, (int)out_sz, fp)) {
-		trim_trailing(out);
+		desktop_core_trim_trailing(out);
 	}
 	fclose(fp);
 }
 
-void jarvis_desktop_read_proc_cmdline(unsigned long pid, char *out, size_t out_sz)
+static __attribute__((unused)) void desktop_core_read_proc_cmdline(unsigned long pid, char *out, size_t out_sz)
 {
 	if (!out || out_sz == 0) return;
 	out[0] = '\0';
@@ -177,10 +230,10 @@ void jarvis_desktop_read_proc_cmdline(unsigned long pid, char *out, size_t out_s
 		if (out[i] == '\0') out[i] = ' ';
 	}
 	out[rd] = '\0';
-	trim_trailing(out);
+	desktop_core_trim_trailing(out);
 }
 
-bool jarvis_desktop_is_shell_name(const char *comm)
+static __attribute__((unused)) bool desktop_core_is_shell_name(const char *comm)
 {
 	if (!comm || !*comm) return false;
 	const char *c = (comm[0] == '-') ? (comm + 1) : comm;
@@ -188,7 +241,7 @@ bool jarvis_desktop_is_shell_name(const char *comm)
 	       strcmp(c, "sh") == 0 || strcmp(c, "fish") == 0 || strcmp(c, "dash") == 0;
 }
 
-void jarvis_desktop_resolve_pid_cwd_fg(unsigned long pid, char *out_cwd, size_t cwd_sz, char *out_fg, size_t fg_sz)
+static __attribute__((unused)) void desktop_core_resolve_pid_cwd_fg(unsigned long pid, char *out_cwd, size_t cwd_sz, char *out_fg, size_t fg_sz)
 {
 	const char *home = getenv("HOME");
 	if (!home || !*home) home = "/tmp";
@@ -197,7 +250,7 @@ void jarvis_desktop_resolve_pid_cwd_fg(unsigned long pid, char *out_cwd, size_t 
 	if (!pid) return;
 
 	unsigned long sh_pids[16];
-	size_t n_sh = jarvis_desktop_get_child_pids(pid, sh_pids, 16);
+	size_t n_sh = desktop_core_get_child_pids(pid, sh_pids, 16);
 	unsigned long sh_pid = n_sh > 0 ? sh_pids[n_sh - 1] : pid;
 
 	char cwd_link[128], resolved[512];
@@ -210,29 +263,29 @@ void jarvis_desktop_resolve_pid_cwd_fg(unsigned long pid, char *out_cwd, size_t 
 
 	if (out_fg && fg_sz > 0) {
 		unsigned long sub_pids[16];
-		size_t n_sub = jarvis_desktop_get_child_pids(sh_pid, sub_pids, 16);
+		size_t n_sub = desktop_core_get_child_pids(sh_pid, sub_pids, 16);
 		unsigned long target_p = n_sub > 0 ? sub_pids[n_sub - 1] : sh_pid;
-		jarvis_desktop_read_proc_cmdline(target_p, out_fg, fg_sz);
+		desktop_core_read_proc_cmdline(target_p, out_fg, fg_sz);
 		if (!out_fg[0]) {
-			jarvis_desktop_read_proc_comm(target_p, out_fg, fg_sz);
+			desktop_core_read_proc_comm(target_p, out_fg, fg_sz);
 		}
 	}
 }
 
-bool jarvis_desktop_is_idle_shell_pid(unsigned long pid)
+static __attribute__((unused)) bool desktop_core_is_idle_shell_pid(unsigned long pid)
 {
 	if (!pid) return false;
 	unsigned long sh_pids[16];
-	size_t n_sh = jarvis_desktop_get_child_pids(pid, sh_pids, 16);
+	size_t n_sh = desktop_core_get_child_pids(pid, sh_pids, 16);
 	if (n_sh == 0) return false;
 	unsigned long sh_pid = sh_pids[n_sh - 1];
 
 	unsigned long sub_pids[16];
-	size_t n_sub = jarvis_desktop_get_child_pids(sh_pid, sub_pids, 16);
+	size_t n_sub = desktop_core_get_child_pids(sh_pid, sub_pids, 16);
 	if (n_sub == 0) return true;
 
 	char tmux_out[1024];
-	jarvis_desktop_run_cmd_capture(
+	desktop_core_run_cmd_capture(
 		"tmux list-clients -F '#{client_pid}\t#{pane_current_command}\t#{pane_pid}' 2>/dev/null",
 		tmux_out, sizeof(tmux_out));
 	if (tmux_out[0]) {
@@ -248,9 +301,9 @@ bool jarvis_desktop_is_idle_shell_pid(unsigned long pid)
 			unsigned long pane_pid = strtoul(t2 + 1, NULL, 10);
 			for (size_t i = 0; i < n_sub; i++) {
 				if (sub_pids[i] == cpid) {
-					if (!jarvis_desktop_is_shell_name(pane_cmd)) return false;
+					if (!desktop_core_is_shell_name(pane_cmd)) return false;
 					unsigned long pane_children[8];
-					return jarvis_desktop_get_child_pids(pane_pid, pane_children, 8) == 0;
+					return desktop_core_get_child_pids(pane_pid, pane_children, 8) == 0;
 				}
 			}
 		}
@@ -258,25 +311,25 @@ bool jarvis_desktop_is_idle_shell_pid(unsigned long pid)
 	return false;
 }
 
-bool jarvis_desktop_is_ssh_pid(unsigned long pid)
+static __attribute__((unused)) bool desktop_core_is_ssh_pid(unsigned long pid)
 {
 	if (!pid) return false;
 	unsigned long sh_pids[16];
-	size_t n_sh = jarvis_desktop_get_child_pids(pid, sh_pids, 16);
+	size_t n_sh = desktop_core_get_child_pids(pid, sh_pids, 16);
 	if (n_sh == 0) return false;
 	unsigned long sh_pid = sh_pids[n_sh - 1];
 
 	unsigned long sub_pids[16];
-	size_t n_sub = jarvis_desktop_get_child_pids(sh_pid, sub_pids, 16);
+	size_t n_sub = desktop_core_get_child_pids(sh_pid, sub_pids, 16);
 	for (size_t i = 0; i < n_sub; i++) {
 		char comm[64];
-		jarvis_desktop_read_proc_comm(sub_pids[i], comm, sizeof(comm));
+		desktop_core_read_proc_comm(sub_pids[i], comm, sizeof(comm));
 		if (strcasecmp(comm, "ssh") == 0) return true;
 	}
 	return false;
 }
 
-void jarvis_desktop_populate_system_health(char *out, size_t out_sz)
+static __attribute__((unused)) void desktop_core_populate_system_health(char *out, size_t out_sz)
 {
 	if (!out || out_sz == 0) return;
 	out[0] = '\0';
@@ -324,63 +377,23 @@ void jarvis_desktop_populate_system_health(char *out, size_t out_sz)
 #endif
 }
 
-void jarvis_desktop_populate_tmux_panes(jarvis_world_t *w, bool active_only, int lines)
-{
-	if (!w) return;
-	char cmd[256], list_out[2048];
-	snprintf(cmd, sizeof(cmd),
-		"tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_active}\t#{window_active}' 2>/dev/null");
-	jarvis_desktop_run_cmd_capture(cmd, list_out, sizeof(list_out));
-	if (!list_out[0]) return;
-
-	char *saveptr = NULL;
-	for (char *line = strtok_r(list_out, "\n", &saveptr);
-	     line && w->pane_count < JARVIS_MAX_PANES;
-	     line = strtok_r(NULL, "\n", &saveptr)) {
-		char *t1 = strchr(line, '\t');
-		char *t2 = t1 ? strchr(t1 + 1, '\t') : NULL;
-		char *t3 = t2 ? strchr(t2 + 1, '\t') : NULL;
-		char *t4 = t3 ? strchr(t3 + 1, '\t') : NULL;
-		if (!t1 || !t2 || !t3 || !t4) continue;
-		*t1 = *t2 = *t3 = *t4 = '\0';
-		const char *pid_str = line;
-		const char *p_cmd   = t1 + 1;
-		const char *p_cwd   = t2 + 1;
-		bool p_act = (t3[1] == '1');
-		bool w_act = (t4[1] == '1');
-		if (active_only && !(p_act && w_act)) continue;
-
-		jarvis_pane_t *pn = &w->panes[w->pane_count++];
-		memset(pn, 0, sizeof(*pn));
-		snprintf(pn->pane, sizeof(pn->pane), "%s", pid_str);
-		snprintf(pn->command, sizeof(pn->command), "%s", p_cmd);
-		snprintf(pn->cwd, sizeof(pn->cwd), "%s", p_cwd);
-		pn->active = (p_act && w_act);
-
-		char cap_cmd[256];
-		snprintf(cap_cmd, sizeof(cap_cmd), "tmux capture-pane -t '%s' -p -S -%d 2>/dev/null | tail -n %d",
-		         pid_str, lines > 0 ? lines : 20, lines > 0 ? lines : 20);
-		jarvis_desktop_run_cmd_capture(cap_cmd, pn->tail, sizeof(pn->tail));
-	}
-}
-
 typedef struct {
 	char phrase[128];
 	char exec_cmd[256];
-} desktop_app_entry_t;
+} desktop_core_app_entry_t;
 
-#define MAX_CACHED_DESKTOP_APPS 256
+#define DESKTOP_CORE_MAX_CACHED_APPS 256
 
-static desktop_app_entry_t g_desktop_apps[MAX_CACHED_DESKTOP_APPS];
-static size_t              g_desktop_app_count = 0;
-static bool                g_desktop_apps_loaded = false;
+static desktop_core_app_entry_t g_dc_apps[DESKTOP_CORE_MAX_CACHED_APPS];
+static size_t                   g_dc_app_count = 0;
+static bool                     g_dc_apps_loaded = false;
 
-static void scan_desktop_dir(const char *dir_path)
+static __attribute__((unused)) void desktop_core_scan_desktop_dir(const char *dir_path)
 {
 	DIR *d = opendir(dir_path);
 	if (!d) return;
 	struct dirent *ent;
-	while ((ent = readdir(d)) != NULL && g_desktop_app_count < MAX_CACHED_DESKTOP_APPS) {
+	while ((ent = readdir(d)) != NULL && g_dc_app_count < DESKTOP_CORE_MAX_CACHED_APPS) {
 		size_t nlen = strlen(ent->d_name);
 		if (nlen <= 8 || strcmp(ent->d_name + nlen - 8, ".desktop") != 0) continue;
 
@@ -394,7 +407,7 @@ static void scan_desktop_dir(const char *dir_path)
 		char name[128] = {0}, exec_str[256] = {0}, line[512];
 
 		while (fgets(line, sizeof(line), fp)) {
-			trim_trailing(line);
+			desktop_core_trim_trailing(line);
 			if (line[0] == '[') {
 				in_entry = (strcmp(line, "[Desktop Entry]") == 0);
 				if (!in_entry && name[0]) break;
@@ -424,10 +437,10 @@ static void scan_desktop_dir(const char *dir_path)
 			clean_exec[w++] = exec_str[i];
 		}
 		clean_exec[w] = '\0';
-		trim_trailing(clean_exec);
+		desktop_core_trim_trailing(clean_exec);
 		if (!clean_exec[0]) continue;
 
-		desktop_app_entry_t *ae = &g_desktop_apps[g_desktop_app_count++];
+		desktop_core_app_entry_t *ae = &g_dc_apps[g_dc_app_count++];
 		for (size_t i = 0; name[i] && i + 1 < sizeof(ae->phrase); i++) {
 			ae->phrase[i] = (char)tolower((unsigned char)name[i]);
 			ae->phrase[i + 1] = '\0';
@@ -437,59 +450,113 @@ static void scan_desktop_dir(const char *dir_path)
 	closedir(d);
 }
 
-static void ensure_desktop_apps_loaded(void)
+static __attribute__((unused)) void desktop_core_ensure_apps_loaded(void)
 {
-	if (g_desktop_apps_loaded) return;
-	g_desktop_apps_loaded = true;
+	if (g_dc_apps_loaded) return;
+	g_dc_apps_loaded = true;
 	const char *home = getenv("HOME");
 	if (home && *home) {
 		char user_apps[512];
 		snprintf(user_apps, sizeof(user_apps), "%s/.local/share/applications", home);
-		scan_desktop_dir(user_apps);
+		desktop_core_scan_desktop_dir(user_apps);
 	}
-	scan_desktop_dir("/usr/share/applications");
-	scan_desktop_dir("/var/lib/snapd/desktop/applications");
+	desktop_core_scan_desktop_dir("/usr/share/applications");
+	desktop_core_scan_desktop_dir("/var/lib/snapd/desktop/applications");
 }
 
-void jarvis_desktop_populate_apps(jarvis_world_t *w)
+static __attribute__((unused)) bool desktop_core_is_exec_available(const char *cmd)
 {
-	if (!w) return;
-	ensure_desktop_apps_loaded();
-	for (size_t i = 0; i < g_desktop_app_count && w->custom_entity_count < JARVIS_MAX_APPS; i++) {
-		bool dup = false;
-		for (size_t j = 0; j < w->custom_entity_count; j++) {
-			if (strcmp(w->custom_entities[j].type, "gui.application") == 0 &&
-			    strcasecmp(w->custom_entities[j].phrase, g_desktop_apps[i].phrase) == 0) {
-				dup = true;
-				break;
+	if (!cmd || !*cmd) return false;
+	char tok[256];
+	size_t n = 0;
+	while (cmd[n] && !isspace((unsigned char)cmd[n])) {
+		unsigned char c = (unsigned char)cmd[n];
+		if (strchr(";|&><$`()\\\"'", c) != NULL) return false;
+		if (n + 1 >= sizeof(tok)) return false;
+		tok[n] = (char)c;
+		n++;
+	}
+	tok[n] = '\0';
+	if (!tok[0]) return false;
+
+	if (strchr(tok, '/') != NULL) {
+		struct stat st;
+		return stat(tok, &st) == 0 && !S_ISDIR(st.st_mode) && access(tok, X_OK) == 0;
+	}
+
+	const char *path_env = getenv("PATH");
+	if (!path_env || !*path_env) return false;
+	char *path_copy = strdup(path_env);
+	if (!path_copy) return false;
+
+	bool found = false;
+	char *saveptr = NULL;
+	for (char *dir = strtok_r(path_copy, ":", &saveptr); dir; dir = strtok_r(NULL, ":", &saveptr)) {
+		if (!*dir) continue;
+		char cand[512];
+		snprintf(cand, sizeof(cand), "%s/%s", dir, tok);
+		struct stat st;
+		if (stat(cand, &st) == 0 && !S_ISDIR(st.st_mode) && access(cand, X_OK) == 0) {
+			found = true;
+			break;
+		}
+	}
+	free(path_copy);
+	return found;
+}
+
+static __attribute__((unused)) bool desktop_core_resolve_known_app(
+	const char *identifier,
+	char       *out_cmd,
+	size_t      out_sz
+)
+{
+	if (!out_cmd || out_sz == 0) return false;
+	out_cmd[0] = '\0';
+	if (!identifier) return false;
+
+	while (*identifier && isspace((unsigned char)*identifier)) identifier++;
+	size_t idlen = strlen(identifier);
+	while (idlen > 0 && isspace((unsigned char)identifier[idlen - 1])) idlen--;
+	if (idlen == 0 || idlen >= 256) return false;
+
+	char id[256];
+	memcpy(id, identifier, idlen);
+	id[idlen] = '\0';
+
+	if (strpbrk(id, ";|&><$`()\\\"\n\r") != NULL) return false;
+
+	desktop_core_ensure_apps_loaded();
+	for (size_t i = 0; i < g_dc_app_count; i++) {
+		if (strcasecmp(g_dc_apps[i].phrase, id) == 0) {
+			snprintf(out_cmd, out_sz, "%s", g_dc_apps[i].exec_cmd);
+			return true;
+		}
+	}
+	if (idlen >= 3) {
+		for (size_t i = 0; i < g_dc_app_count; i++) {
+			if (desktop_core_str_contains_ci(g_dc_apps[i].phrase, id)) {
+				snprintf(out_cmd, out_sz, "%s", g_dc_apps[i].exec_cmd);
+				return true;
 			}
 		}
-		if (dup) continue;
-		jarvis_live_entity_t *ce = &w->custom_entities[w->custom_entity_count++];
-		snprintf(ce->type, sizeof(ce->type), "gui.application");
-		snprintf(ce->id, sizeof(ce->id), "%.*s", (int)(sizeof(ce->id) - 1), g_desktop_apps[i].exec_cmd);
-		snprintf(ce->phrase, sizeof(ce->phrase), "%.*s", (int)(sizeof(ce->phrase) - 1), g_desktop_apps[i].phrase);
 	}
-}
 
-const char *jarvis_desktop_resolve_app_exec(const char *identifier)
-{
-	if (!identifier || !*identifier) return identifier;
-	ensure_desktop_apps_loaded();
-	for (size_t i = 0; i < g_desktop_app_count; i++) {
-		if (strcasecmp(g_desktop_apps[i].phrase, identifier) == 0) {
-			return g_desktop_apps[i].exec_cmd;
+	bool has_ws = false;
+	for (size_t i = 0; i < idlen; i++) {
+		if (isspace((unsigned char)id[i])) {
+			has_ws = true;
+			break;
 		}
 	}
-	for (size_t i = 0; i < g_desktop_app_count; i++) {
-		if (str_contains_ci(g_desktop_apps[i].phrase, identifier)) {
-			return g_desktop_apps[i].exec_cmd;
-		}
+	if (!has_ws && desktop_core_is_exec_available(id)) {
+		snprintf(out_cmd, out_sz, "%s", id);
+		return true;
 	}
-	return identifier;
+	return false;
 }
 
-bool jarvis_desktop_mpris_control(const char *action)
+static __attribute__((unused)) bool desktop_core_mpris_control(const char *action)
 {
 	if (!action || !*action) return false;
 	char cmd[512], out[256];
@@ -499,7 +566,9 @@ bool jarvis_desktop_mpris_control(const char *action)
 		"gdbus call --session --dest \"$bus\" --object-path /org/mpris/MediaPlayer2 "
 		"--method org.mpris.MediaPlayer2.Player.%s 2>/dev/null && echo OK; done",
 		action);
-	jarvis_desktop_run_cmd_capture(cmd, out, sizeof(out));
+	desktop_core_run_cmd_capture(cmd, out, sizeof(out));
 	return strstr(out, "OK") != NULL;
 }
-#endif
+
+#endif /* !__wasm__ && !_WIN32 */
+#endif /* TTYPT_DESKTOP_CORE_H */

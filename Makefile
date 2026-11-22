@@ -1,26 +1,25 @@
 INSTALL_BIN := jarvis
 all := libjarvis jarvis
 
-libjarvis-obj-y := src/jarvis-json.o src/jarvis-ontology.o src/jarvis-solver.o src/jarvis-voice.o src/jarvis-adapters.o src/jarvis-desktop.o
-jarvis-obj-y := src/jarvis-cli-adapter.o
-LDLIBS-libjarvis := -lmm -lxylem -lstele -lcorm -lm
-LDLIBS-jarvis := -Llib -ljarvis -lmm -lxylem -lstele -lcorm -lm
+libjarvis-obj-y := src/jarvis-json.o src/jarvis-ontology.o src/jarvis-voice.o
+jarvis-obj-y :=
+LDLIBS-libjarvis := -lm
+LDLIBS-jarvis := -Llib -ljarvis -lm
 LDFLAGS-libjarvis-Linux := -Wl,-rpath,'$$ORIGIN'
 LDFLAGS-jarvis-Linux := -Wl,-rpath,'$$ORIGIN/../lib' -Wl,-rpath,'$$ORIGIN'
 CFLAGS-BIN-Windows :=
 
-CFLAGS := -g -O2 -Iinclude -I../libmm/include -I../libxylem/include -I../libstele/include -I../libcorm/include
-LDFLAGS := -L../libmm/lib -L../libxylem/lib -L../libstele/lib -L../libcorm/lib
+CFLAGS := -g -O2 -Iinclude
+LDFLAGS :=
 
 WASM_SRCS := npm/wasm/jarvis_wasm.c
-WASM_EXTRA_CFLAGS := -Iinclude -I../libmm/include -I../libxylem/include -I../libstele/include
+WASM_EXTRA_CFLAGS := -Iinclude -I../libstele/include
 
 include ../mk/include.mk
 
-WM_MODS := mods/sway/mod_sway.so mods/hyprland/mod_hyprland.so mods/tts/mod_tts.so \
-	mods/x11/jarvis-x11.so mods/x11/ren-x11.so \
-	mods/firefox/jarvis-firefox.so mods/firefox/ren-firefox.so \
-	mods/ren-jarvis/ren-jarvis.so
+WM_MODS := mods/sway/ren-sway.so mods/hyprland/ren-hyprland.so \
+	mods/x11/ren-x11.so mods/firefox/ren-firefox.so \
+	mods/desktop/ren-desktop.so mods/ren-jarvis/ren-jarvis.so
 whispercpp := submodules/whisper.cpp/build
 WHISPER_A := $(whispercpp)/src/libwhisper.a
 JARVISD_BIN := bin/jarvisd
@@ -47,43 +46,37 @@ $(whispercpp)/Makefile: $(VULKAN_SDK)/x86_64/share/cmake/SPIRV-Headers/SPIRV-Hea
 
 all: $(WM_MODS) $(JARVISD_BIN)
 
-mods/sway/mod_sway.so: mods/sway/mod_sway.c include/ttypt/jarvis-types.h
-	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/sway/mod_sway.c $(LDFLAGS) -lxylem -lstele -lcorm
+mods/sway/ren-sway.so: mods/sway/ren-sway.c
+	$(CC) $(CFLAGS) -I../axil-auren/include -I../libxylem/include -fPIC -shared -o $@ mods/sway/ren-sway.c $(LDFLAGS) -L../axil-auren/lib -lren -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
 
-mods/hyprland/mod_hyprland.so: mods/hyprland/mod_hyprland.c include/ttypt/jarvis-types.h
-	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/hyprland/mod_hyprland.c $(LDFLAGS) -lxylem -lstele -lcorm
+mods/hyprland/ren-hyprland.so: mods/hyprland/ren-hyprland.c
+	$(CC) $(CFLAGS) -I../axil-auren/include -I../libxylem/include -fPIC -shared -o $@ mods/hyprland/ren-hyprland.c $(LDFLAGS) -L../axil-auren/lib -lren -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
 
-mods/tts/mod_tts.so: mods/tts/mod_tts.c include/ttypt/jarvis-types.h
-	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/tts/mod_tts.c $(LDFLAGS) -lxylem -ldl -lpthread -lm
+mods/x11/ren-x11.so: mods/x11/ren-x11.c mods/x11/x11_core.h include/ttypt/desktop-core.h
+	$(CC) $(CFLAGS) -I../axil-auren/include -I../libxylem/include -fPIC -shared -o $@ mods/x11/ren-x11.c $(LDFLAGS) -L../axil-auren/lib -lren -lX11 -ldl -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
 
-mods/x11/jarvis-x11.so: mods/x11/jarvis-x11.c mods/x11/x11_core.h include/ttypt/jarvis-types.h include/ttypt/jarvis-desktop.h lib/libjarvis.so
-	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/x11/jarvis-x11.c $(LDFLAGS) -Llib -ljarvis -lX11 -lxylem -ldl -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
+mods/firefox/ren-firefox.so: mods/firefox/ren-firefox.c mods/firefox/firefox_core.h
+	$(CC) $(CFLAGS) -I../axil-auren/include -I../libxylem/include -fPIC -shared -o $@ mods/firefox/ren-firefox.c $(LDFLAGS) -L../axil-auren/lib -lren -ldl -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
 
-mods/x11/ren-x11.so: mods/x11/ren-x11.c mods/x11/x11_core.h
-	$(CC) $(CFLAGS) -I../axil-auren/include -I../libxylem/include -fPIC -shared -o $@ mods/x11/ren-x11.c $(LDFLAGS) -L../axil-auren/lib -lren -lX11 -lxylem -ldl -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
+mods/desktop/ren-desktop.so: mods/desktop/ren-desktop.c include/ttypt/desktop-core.h
+	$(CC) $(CFLAGS) -I../axil-auren/include -I../libxylem/include -fPIC -shared -o $@ mods/desktop/ren-desktop.c $(LDFLAGS) -L../axil-auren/lib -lren -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
 
-mods/firefox/jarvis-firefox.so: mods/firefox/jarvis-firefox.c mods/firefox/firefox_core.h include/ttypt/jarvis-types.h
-	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/firefox/jarvis-firefox.c $(LDFLAGS) -lxylem -ldl -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
-
-mods/firefox/ren-firefox.so: mods/firefox/ren-firefox.c mods/firefox/firefox_core.h mods/x11/x11_core.h
-	$(CC) $(CFLAGS) -I../axil-auren/include -I../libxylem/include -fPIC -shared -o $@ mods/firefox/ren-firefox.c $(LDFLAGS) -L../axil-auren/lib -lren -lX11 -lxylem -ldl -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
-
-mods/ren-jarvis/ren-jarvis.so: mods/ren-jarvis/ren-jarvis.c include/ttypt/jarvis-types.h include/ttypt/jarvis-desktop.h lib/libjarvis.so
+mods/ren-jarvis/ren-jarvis.so: mods/ren-jarvis/ren-jarvis.c
 	@mkdir -p mods/ren-jarvis
-	$(CC) $(CFLAGS) -I../axil-auren/include -I../libxylem/include -fPIC -shared -o $@ mods/ren-jarvis/ren-jarvis.c $(LDFLAGS) -Llib -ljarvis -L../axil-auren/lib -lren -lxylem -lstele -lcorm -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
+	$(CC) $(CFLAGS) -I../axil-auren/include -I../libxylem/include -fPIC -shared -o $@ mods/ren-jarvis/ren-jarvis.c $(LDFLAGS) -L../axil-auren/lib -lren -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
 
 $(WHISPER_A): $(whispercpp)/Makefile
 	$(MAKE) -C $(whispercpp) -j4 whisper
 
-bin/jarvisd: src/jarvisd.c $(WHISPER_A) lib/libjarvis.so
+bin/jarvisd: src/jarvisd.c src/jarvis-tts.c src/jarvis-tts.h $(WHISPER_A) lib/libjarvis.so
 	@mkdir -p bin
-	$(CC) -Iinclude -Isrc -I$(whispercpp)/../include -I$(whispercpp)/../ggml/include $(CFLAGS) -o $@ src/jarvisd.c \
+	$(CC) -Iinclude -Isrc -I$(whispercpp)/../include -I$(whispercpp)/../ggml/include $(CFLAGS) -o $@ src/jarvisd.c src/jarvis-tts.c \
 		$(WHISPER_A) \
 		$(whispercpp)/ggml/src/libggml.a \
 		$(whispercpp)/ggml/src/ggml-vulkan/libggml-vulkan.a \
 		$(whispercpp)/ggml/src/libggml-cpu.a \
 		$(whispercpp)/ggml/src/libggml-base.a \
-		-Llib -ljarvis $(LDFLAGS) -lmm -lxylem -lstele -lcorm -lvulkan -lstdc++ -lgomp -lpthread -ldl -lm $(LDFLAGS-jarvis-${uname})
+		-Llib -ljarvis $(LDFLAGS) -lvulkan -lstdc++ -lgomp -lpthread -ldl -lm $(LDFLAGS-jarvis-${uname})
 
 test: all
 	$(MAKE) -C tests test
@@ -92,25 +85,13 @@ ${DESTDIR}${PREFIX}/lib/pkgconfig/jarvis.pc: jarvis.pc
 	install -d ${DESTDIR}${PREFIX}/lib/pkgconfig
 	install -m 644 jarvis.pc $@
 
-${DESTDIR}${PREFIX}/lib/mod_sway.so: mods/sway/mod_sway.so
-	install -d ${DESTDIR}${PREFIX}/lib
-	install -m 755 mods/sway/mod_sway.so $@
+${DESTDIR}${PREFIX}/lib/ren/ren-sway.so: mods/sway/ren-sway.so
+	install -d ${DESTDIR}${PREFIX}/lib/ren
+	install -m 755 mods/sway/ren-sway.so $@
 
-${DESTDIR}${PREFIX}/lib/mod_hyprland.so: mods/hyprland/mod_hyprland.so
-	install -d ${DESTDIR}${PREFIX}/lib
-	install -m 755 mods/hyprland/mod_hyprland.so $@
-
-${DESTDIR}${PREFIX}/lib/mod_tts.so: mods/tts/mod_tts.so
-	install -d ${DESTDIR}${PREFIX}/lib
-	install -m 755 mods/tts/mod_tts.so $@
-
-${DESTDIR}${PREFIX}/lib/jarvis/jarvis-x11.so: mods/x11/jarvis-x11.so
-	install -d ${DESTDIR}${PREFIX}/lib/jarvis
-	install -m 755 mods/x11/jarvis-x11.so $@
-
-${DESTDIR}${PREFIX}/lib/jarvis/jarvis-firefox.so: mods/firefox/jarvis-firefox.so
-	install -d ${DESTDIR}${PREFIX}/lib/jarvis
-	install -m 755 mods/firefox/jarvis-firefox.so $@
+${DESTDIR}${PREFIX}/lib/ren/ren-hyprland.so: mods/hyprland/ren-hyprland.so
+	install -d ${DESTDIR}${PREFIX}/lib/ren
+	install -m 755 mods/hyprland/ren-hyprland.so $@
 
 ${DESTDIR}${PREFIX}/lib/ren/ren-x11.so: mods/x11/ren-x11.so
 	install -d ${DESTDIR}${PREFIX}/lib/ren
@@ -120,14 +101,19 @@ ${DESTDIR}${PREFIX}/lib/ren/ren-firefox.so: mods/firefox/ren-firefox.so
 	install -d ${DESTDIR}${PREFIX}/lib/ren
 	install -m 755 mods/firefox/ren-firefox.so $@
 
+${DESTDIR}${PREFIX}/lib/ren/ren-desktop.so: mods/desktop/ren-desktop.so
+	install -d ${DESTDIR}${PREFIX}/lib/ren
+	install -m 755 mods/desktop/ren-desktop.so $@
+
 ${DESTDIR}${PREFIX}/lib/ren/ren-jarvis.so: mods/ren-jarvis/ren-jarvis.so
 	install -d ${DESTDIR}${PREFIX}/lib/ren
 	install -m 755 mods/ren-jarvis/ren-jarvis.so $@
-	ln -sf ren-jarvis.so ${DESTDIR}${PREFIX}/lib/ren/mod_jarvis.so
 
-install-extra: ${DESTDIR}${PREFIX}/lib/pkgconfig/jarvis.pc ${DESTDIR}${PREFIX}/lib/mod_sway.so ${DESTDIR}${PREFIX}/lib/mod_hyprland.so ${DESTDIR}${PREFIX}/lib/mod_tts.so ${DESTDIR}${PREFIX}/lib/jarvis/jarvis-x11.so ${DESTDIR}${PREFIX}/lib/jarvis/jarvis-firefox.so ${DESTDIR}${PREFIX}/lib/ren/ren-x11.so ${DESTDIR}${PREFIX}/lib/ren/ren-firefox.so ${DESTDIR}${PREFIX}/lib/ren/ren-jarvis.so
+install-extra: ${DESTDIR}${PREFIX}/lib/pkgconfig/jarvis.pc ${DESTDIR}${PREFIX}/lib/ren/ren-sway.so ${DESTDIR}${PREFIX}/lib/ren/ren-hyprland.so ${DESTDIR}${PREFIX}/lib/ren/ren-x11.so ${DESTDIR}${PREFIX}/lib/ren/ren-firefox.so ${DESTDIR}${PREFIX}/lib/ren/ren-desktop.so ${DESTDIR}${PREFIX}/lib/ren/ren-jarvis.so
+	@rm -f ${DESTDIR}${PREFIX}/lib/mod_sway.so ${DESTDIR}${PREFIX}/lib/mod_hyprland.so ${DESTDIR}${PREFIX}/lib/mod_tts.so ${DESTDIR}${PREFIX}/lib/ren/mod_jarvis.so $(HOME)/.local/lib/mod_sway.so $(HOME)/.local/lib/mod_hyprland.so $(HOME)/.local/lib/mod_tts.so
+	@rm -f ${DESTDIR}${PREFIX}/lib/jarvis/jarvis-*.so $(HOME)/.local/lib/jarvis/jarvis-*.so
+	@rmdir ${DESTDIR}${PREFIX}/lib/jarvis $(HOME)/.local/lib/jarvis 2>/dev/null || true
 	@mkdir -p $(HOME)/.local/lib $(HOME)/.local/bin $(HOME)/.config/jarvis
-	@install -m 755 mods/tts/mod_tts.so $(HOME)/.local/lib/mod_tts.so
 	@install -m 644 data/ontology.json $(HOME)/.config/jarvis/ontology.json
 	@if [ -f bin/jarvis ]; then \
 		install -m 755 bin/jarvis $(HOME)/.local/bin/jarvis; \
@@ -206,7 +192,7 @@ install-services:
 
 clean: clean-tests
 clean-tests:
-	rm -f $(WM_MODS) bin/jarvisd
+	rm -f $(WM_MODS) bin/jarvisd src/*.o src/*.o.d
 	$(MAKE) -C tests clean
 
 # Optional Node.js & WebAssembly bindings
@@ -216,7 +202,7 @@ sync-npm-headers:
 	mkdir -p npm/include/ttypt
 	cp include/ttypt/jarvis.h npm/include/ttypt/jarvis.h
 	cp include/ttypt/jarvis-types.h npm/include/ttypt/jarvis-types.h
-	cp include/ttypt/jarvis-desktop.h npm/include/ttypt/jarvis-desktop.h
+	cp include/ttypt/desktop-core.h npm/include/ttypt/desktop-core.h
 	cp jarvis.pc npm/jarvis.pc
 
 npm-build: all sync-npm-headers

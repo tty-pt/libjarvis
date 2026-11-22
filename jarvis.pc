@@ -4,7 +4,7 @@ libdir=${exec_prefix}/lib
 includedir=${prefix}/include
 
 Name: jarvislib
-Description: Universal Compositional Semantic Solver, Cross-Platform Intent IR, Voice Pipeline, and Xylem Environment Adapters
+Description: Multilingual Voice Assistant Ontology, Adaptive VAD, Wake-Word Matching, Streaming TTS, and Desktop Automation
 Version: 1.0.0
-Libs: -L${libdir} -ljarvis -lmm -lxylem -lstele -lcorm -lm
+Libs: -L${libdir} -ljarvis -lm
 Cflags: -I${includedir}/ttypt

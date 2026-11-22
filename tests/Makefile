@@ -1,20 +1,27 @@
 CC ?= cc
-CFLAGS := -g -O2 -Wall -Wextra -fPIC -I../include -I../../libmm/include -I../../libxylem/include -I../../libstele/include -I../../libcorm/include
-LDFLAGS := -rdynamic -L. -L../lib -L../../libmm/lib -L../../libxylem/lib -L../../libstele/lib -L../../libcorm/lib \
-           -Wl,-rpath,${CURDIR} -Wl,-rpath,${CURDIR}/../lib -Wl,-rpath,${CURDIR}/../../libmm/lib -Wl,-rpath,${CURDIR}/../../libxylem/lib \
-           -Wl,-rpath,${CURDIR}/../../libstele/lib -Wl,-rpath,${CURDIR}/../../libcorm/lib
-LDLIBS := -ljarvis -lmm -lxylem -lstele -lcorm -lm
+CFLAGS := -g -O2 -Wall -Wextra -Wpedantic -fPIC -I../include -I../../axil-auren/include -I../../libxylem/include
+LDFLAGS := -rdynamic -L../lib -L../../axil-auren/lib -L../../libxylem/lib \
+           -Wl,-rpath,${CURDIR}/../lib -Wl,-rpath,${CURDIR}/../../axil-auren/lib -Wl,-rpath,${CURDIR}/../../libxylem/lib
 
-all: mock_adapter.so test_jarvis
+all: test_jarvis test_ren_mods
 
-mock_adapter.so: mock_adapter.c ../lib/libjarvis.so
-	$(CC) $(CFLAGS) -shared -o $@ mock_adapter.c $(LDFLAGS) $(LDLIBS)
+test_jarvis: test_jarvis.c ../lib/libjarvis.so
+	$(CC) $(CFLAGS) -o $@ test_jarvis.c -L../lib -Wl,-rpath,${CURDIR}/../lib -ljarvis -lm
 
-test_jarvis: test_jarvis.c mock_adapter.so ../lib/libjarvis.so
-	$(CC) $(CFLAGS) -o $@ test_jarvis.c ./mock_adapter.so $(LDFLAGS) $(LDLIBS)
+test_ren_mods: test_ren_mods.c ../../axil-auren/lib/libren.so
+	$(CC) $(CFLAGS) -o $@ test_ren_mods.c $(LDFLAGS) -lren -lxylem -ldl -lpthread
 
 test: all
-	LD_LIBRARY_PATH=../lib:../../libmm/lib:../../libxylem/lib:../../libstele/lib:../../libcorm/lib:${HOME}/.local/lib:$${LD_LIBRARY_PATH:-} ./test_jarvis
+	LD_LIBRARY_PATH=../lib:../../axil-auren/lib:../../libxylem/lib:${HOME}/.local/lib:$${LD_LIBRARY_PATH:-} ./test_jarvis
+	LD_LIBRARY_PATH=../lib:../../axil-auren/lib:../../libxylem/lib:${HOME}/.local/lib:$${LD_LIBRARY_PATH:-} ./test_ren_mods
+	../bin/jarvis --help >/dev/null 2>&1 || [ $$? -eq 0 ]
+	../bin/jarvis --dry-run --json "open a terminal" | grep -q '"dry_run":true'
+	@tmp_rc=$$(mktemp); \
+	JARVISRC="$$tmp_rc" ../bin/jarvis config wake_word Jarbas; \
+	val=$$(JARVISRC="$$tmp_rc" ../bin/jarvis config wake_word); \
+	rm -f "$$tmp_rc"; \
+	[ "$$val" = "Jarbas" ] || (echo "CLI config test failed: got '$$val'"; exit 1)
+	@echo "[PASS] bin/jarvis CLI smoke tests passed!"
 
 clean:
-	rm -f test_jarvis mock_adapter.so *.o
+	rm -f test_jarvis test_ren_mods mock_adapter.so *.o

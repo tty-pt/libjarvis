@@ -1,6 +1,6 @@
 /**
- * @file mod_tts.c
- * @brief Pure-C libxylem (XY) Neural TTS plugin (Kokoro-82M + Piper ONNX) for libjarvis.
+ * @file jarvis-tts.c
+ * @brief In-process Neural TTS subsystem (Kokoro-82M + Piper ONNX) for jarvisd.
  *
  * Features:
  * - Zero RAM at startup and when silent (0 KB allocated until speech is requested with tts_enabled=1)
@@ -11,9 +11,7 @@
  */
 
 #define _GNU_SOURCE
-#include <ttypt/jarvis-types.h>
-#include <ttypt/xy.h>
-#include <ttypt/xy-mod.h>
+#include "jarvis-tts.h"
 
 #include <arpa/inet.h>
 #include <ctype.h>
@@ -38,11 +36,6 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
-
-XY_MODULE_API void xy_install(void)
-{
-	/* Strictly zero allocations and zero model loads at startup (0 KB RAM when silent). */
-}
 
 /* ---------------------------------------------------------------------------
  * Minimal ABI Definitions for libespeak-ng.so.1 & libonnxruntime.so.1.23
@@ -962,7 +955,7 @@ static bool tts_engine_ensure_loaded(const char *voice)
 			dup2(devnull2, STDERR_FILENO);
 			close(devnull2);
 		}
-		void *st = create_env(3 /* ORT_LOGGING_LEVEL_ERROR */, "mod_tts", &g_tts.ort_env);
+		void *st = create_env(3 /* ORT_LOGGING_LEVEL_ERROR */, "jarvis-tts", &g_tts.ort_env);
 		if (saved_err2 >= 0) {
 			dup2(saved_err2, STDERR_FILENO);
 			close(saved_err2);
@@ -1728,10 +1721,11 @@ static void split_and_enqueue_locked(const char *clean, const char *voice, bool 
 }
 
 /* ---------------------------------------------------------------------------
- * Xylem Hooks: jarvis_xy_speak_clause & jarvis_xy_tts_interrupt
+ * Public API: jarvis_tts_speak_clause & jarvis_tts_interrupt
  * ------------------------------------------------------------------------- */
 
-XY_IMPL(int, jarvis_xy_tts_interrupt, int, dummy)
+int
+jarvis_tts_interrupt(int dummy)
 {
 	(void)dummy;
 	pthread_mutex_lock(&g_tts.mtx);
@@ -1756,11 +1750,12 @@ XY_IMPL(int, jarvis_xy_tts_interrupt, int, dummy)
 	return 0;
 }
 
-XY_IMPL(int, jarvis_xy_speak_clause, const char *, session_id, const char *, clause_text, int, is_final)
+int
+jarvis_tts_speak_clause(const char *session_id, const char *clause_text, int is_final)
 {
 	if (!is_tts_enabled()) {
 		/* Ensure any loaded TTS resources are released if user disabled TTS */
-		jarvis_xy_tts_interrupt(0);
+		jarvis_tts_interrupt(0);
 		return 0;
 	}
 

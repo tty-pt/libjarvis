@@ -54,72 +54,27 @@ function readUtf8(ptr, maxLen = 65536) {
 }
 
 /**
- * Deterministically solve an utterance into a compiled Action DSL object.
+ * Clean phrase: UTF-8 diacritic fold + lowercase alphanumeric + single-space normalized.
  */
-export function solveClause(utterance, surface = "any", options = {}) {
-  if (!utterance) return null;
-  if (!options.wasm && nativeBinding && nativeBinding.solve) {
-    const json = nativeBinding.solve(String(utterance), String(surface || "any"));
-    return json ? JSON.parse(json) : null;
+export function cleanPhrase(text, options = {}) {
+  if (!text) return "";
+  if (!options.wasm && nativeBinding && nativeBinding.cleanPhrase) {
+    return nativeBinding.cleanPhrase(String(text));
   }
 
   const wasm = getJarvisWasm();
-  const uPtr = allocUtf8(wasm, String(utterance));
-  const sPtr = allocUtf8(wasm, String(surface || "any"));
-  const outSz = 8192;
+  const tPtr = allocUtf8(wasm, String(text));
+  const outSz = 2048;
   const outPtr = wasm.exports.malloc(outSz);
-  const n = wasm.exports.jarvis_wasm_solve_json(uPtr, sPtr, outPtr, outSz);
-  const res = n > 0 ? JSON.parse(readUtf8(outPtr, n)) : null;
-  wasm.exports.free(uPtr);
-  wasm.exports.free(sPtr);
+  const n = wasm.exports.jarvis_wasm_clean_phrase(tPtr, outPtr, outSz);
+  const res = n > 0 ? readUtf8(outPtr, n) : "";
+  wasm.exports.free(tPtr);
   wasm.exports.free(outPtr);
   return res;
 }
 
 /**
- * Normalize and heal an arbitrary LLM JSON payload into a canonical Action DSL object.
- */
-export function normalizeDslJson(rawJson, options = {}) {
-  if (!rawJson) return null;
-  const rawStr = typeof rawJson === "string" ? rawJson : JSON.stringify(rawJson);
-  if (!options.wasm && nativeBinding && nativeBinding.normalizeDsl) {
-    const json = nativeBinding.normalizeDsl(rawStr);
-    return json ? JSON.parse(json) : null;
-  }
-
-  const wasm = getJarvisWasm();
-  const rPtr = allocUtf8(wasm, rawStr);
-  const outSz = 8192;
-  const outPtr = wasm.exports.malloc(outSz);
-  const n = wasm.exports.jarvis_wasm_normalize_dsl_json(rPtr, outPtr, outSz);
-  const res = n > 0 ? JSON.parse(readUtf8(outPtr, n)) : null;
-  wasm.exports.free(rPtr);
-  wasm.exports.free(outPtr);
-  return res;
-}
-
-/**
- * Split a compound natural language utterance into atomic clauses.
- */
-export function splitClauses(utterance, options = {}) {
-  if (!utterance) return [];
-  if (!options.wasm && nativeBinding && nativeBinding.splitClauses) {
-    return nativeBinding.splitClauses(String(utterance));
-  }
-
-  const wasm = getJarvisWasm();
-  const uPtr = allocUtf8(wasm, String(utterance));
-  const outSz = 8192;
-  const outPtr = wasm.exports.malloc(outSz);
-  const n = wasm.exports.jarvis_wasm_split_clauses_json(uPtr, outPtr, outSz);
-  const res = n > 0 ? JSON.parse(readUtf8(outPtr, n)) : [];
-  wasm.exports.free(uPtr);
-  wasm.exports.free(outPtr);
-  return res;
-}
-
-/**
- * Extract incremental streaming answer prefix from an incomplete LLM JSON response.
+ * Extract incremental streaming answer prefix from an incomplete JSON response.
  */
 export function extractStreamingAnswer(rawJsonFragment, options = {}) {
   if (!rawJsonFragment) return "";
@@ -221,40 +176,4 @@ export function writeEarconWav(wavPath, isDone = false) {
     throw new Error("@tty-pt/jarvis native addon is required for writeEarconWav");
   }
   return nativeBinding.writeEarconWav(String(wavPath), Boolean(isDone));
-}
-
-/**
- * Stateful Jarvis Orchestrator Engine (Solver + Memory + Context + ReAct Agent + Xylem Adapters).
- */
-export class JarvisEngine {
-  constructor(config = {}) {
-    if (!nativeBinding || !nativeBinding.create) {
-      throw new Error("@tty-pt/jarvis native addon is required for JarvisEngine");
-    }
-    this.handle = nativeBinding.create(config);
-  }
-
-  process(utterance, surface = "any") {
-    if (!this.handle) throw new Error("JarvisEngine is closed");
-    const json = nativeBinding.process(this.handle, String(utterance), String(surface || "any"));
-    return JSON.parse(json);
-  }
-
-  remember(key, value) {
-    if (!this.handle) throw new Error("JarvisEngine is closed");
-    return nativeBinding.remember(this.handle, String(key), String(value));
-  }
-
-  recall(query = "") {
-    if (!this.handle) throw new Error("JarvisEngine is closed");
-    const json = nativeBinding.recall(this.handle, String(query || ""));
-    return JSON.parse(json);
-  }
-
-  close() {
-    if (this.handle) {
-      nativeBinding.destroy(this.handle);
-      this.handle = null;
-    }
-  }
 }
