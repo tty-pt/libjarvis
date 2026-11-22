@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Jarvis Daemon
+Comment=Jarvis Voice Assistant Daemon
+Exec=@PREFIX@/bin/jarvisd -j
+Terminal=false
+Categories=Utility;Audio;
+X-GNOME-Autostart-enabled=true
+X-KDE-autostart-after=panel

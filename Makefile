@@ -127,6 +127,23 @@ install-services:
 			mkdir -p $(HOME)/.config/systemd/user; \
 			sed 's|@PREFIX@|${PREFIX}|g' services/systemd/jarvisd.service > $(HOME)/.config/systemd/user/jarvisd.service; \
 		fi; \
+	fi
+	@if [ -d /etc/init.d ] || [ -x /sbin/openrc-run ] || [ "${distro}" = "alpine" ] || [ "${distro}" = "gentoo" ]; then \
+		echo "[INFO] Installing OpenRC service for jarvisd..."; \
+		install -d ${DESTDIR}${PREFIX}/share/examples/openrc; \
+		sed 's|@PREFIX@|${PREFIX}|g' services/openrc/jarvisd > ${DESTDIR}${PREFIX}/share/examples/openrc/jarvisd; \
+		chmod 755 ${DESTDIR}${PREFIX}/share/examples/openrc/jarvisd; \
+		if [ -w /etc/init.d ]; then \
+			install -m 755 ${DESTDIR}${PREFIX}/share/examples/openrc/jarvisd /etc/init.d/jarvisd; \
+		fi; \
+	fi
+	@if [ "${uname}" = "FreeBSD" ] || [ "${uname}" = "NetBSD" ] || [ "${uname}" = "DragonFly" ]; then \
+		echo "[INFO] Installing FreeBSD rc.d service for jarvisd..."; \
+		install -d ${DESTDIR}${PREFIX}/etc/rc.d ${DESTDIR}${PREFIX}/share/examples/freebsd; \
+		sed 's|@PREFIX@|${PREFIX}|g' services/freebsd/jarvisd > ${DESTDIR}${PREFIX}/share/examples/freebsd/jarvisd; \
+		chmod 755 ${DESTDIR}${PREFIX}/share/examples/freebsd/jarvisd; \
+		sed 's|@PREFIX@|${PREFIX}|g' services/freebsd/jarvisd > ${DESTDIR}${PREFIX}/etc/rc.d/jarvisd; \
+		chmod 755 ${DESTDIR}${PREFIX}/etc/rc.d/jarvisd; \
 	elif [ "${uname}" = "OpenBSD" ]; then \
 		echo "[INFO] Installing OpenBSD rc.d service for jarvisd..."; \
 		install -d ${DESTDIR}${PREFIX}/share/examples/rc.d; \
@@ -147,6 +164,15 @@ install-services:
 		install -d ${DESTDIR}${PREFIX}/share/windows; \
 		sed 's|@PREFIX@|${PREFIX}|g' services/windows/jarvisd.xml > ${DESTDIR}${PREFIX}/share/windows/jarvisd.xml; \
 		install -m 755 services/windows/install-service.ps1 ${DESTDIR}${PREFIX}/share/windows/install-jarvisd-service.ps1; \
+	fi
+	@if [ -f services/xdg/jarvisd.desktop ]; then \
+		install -d ${DESTDIR}${PREFIX}/etc/xdg/autostart ${DESTDIR}${PREFIX}/share/applications; \
+		sed 's|@PREFIX@|${PREFIX}|g' services/xdg/jarvisd.desktop > ${DESTDIR}${PREFIX}/etc/xdg/autostart/jarvisd.desktop; \
+		sed 's|@PREFIX@|${PREFIX}|g' services/xdg/jarvisd.desktop > ${DESTDIR}${PREFIX}/share/applications/jarvisd.desktop; \
+		if [ -d $(HOME)/.config/autostart ] || [ -n "$$(echo "${PREFIX}" | grep -E '^($(HOME)|~)')" ]; then \
+			mkdir -p $(HOME)/.config/autostart; \
+			sed 's|@PREFIX@|${PREFIX}|g' services/xdg/jarvisd.desktop > $(HOME)/.config/autostart/jarvisd.desktop; \
+		fi; \
 	fi
 
 clean: clean-tests

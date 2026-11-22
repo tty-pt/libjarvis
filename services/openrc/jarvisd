@@ -1,0 +1,15 @@
+#!/sbin/openrc-run
+# OpenRC service script for jarvisd
+
+name="jarvisd"
+description="Jarvis Voice Assistant Daemon"
+
+command="@PREFIX@/bin/jarvisd"
+command_args="-j"
+command_background=true
+pidfile="/run/${RC_SVCNAME}.pid"
+
+depend() {
+	need net
+	use axil-auren
+}

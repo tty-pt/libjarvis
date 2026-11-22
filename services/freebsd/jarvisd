@@ -1,0 +1,31 @@
+#!/bin/sh
+#
+# $FreeBSD$
+#
+# PROVIDE: jarvisd
+# REQUIRE: LOGIN cleanvar axil_auren
+# KEYWORD: shutdown
+#
+# Add the following line to /etc/rc.conf to enable jarvisd:
+# jarvisd_enable="YES"
+#
+
+. /etc/rc.subr
+
+name="jarvisd"
+rcvar="jarvisd_enable"
+
+command="@PREFIX@/bin/jarvisd"
+command_args="-j"
+
+jarvisd_prestart() {
+	if [ -x /usr/local/etc/rc.d/axil_auren ]; then
+		service axil_auren onestatus >/dev/null 2>&1 || service axil_auren onestart
+	fi
+}
+start_precmd="jarvisd_prestart"
+
+load_rc_config $name
+: ${jarvisd_enable:="NO"}
+
+run_rc_command "$1"
