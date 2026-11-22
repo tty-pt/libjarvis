@@ -2948,6 +2948,66 @@ format_natural_voice_reply(const jarvis_process_result_t *res, char *out, size_t
 	jarvis_format_voice_reply(get_daemon_ont(), res, out, out_sz);
 }
 
+static int
+ensure_ren_jarvis_session(const char *sock_path, const struct sockaddr_un *addr)
+{
+	const char *home = getenv("HOME");
+	if (!home || !*home)
+		home = "/home/quirinpa";
+
+	unlink(sock_path);
+
+	char workdir[512];
+	const char *env_wd = getenv("JARVIS_WORKDIR");
+	if (env_wd && *env_wd && access(env_wd, X_OK) == 0) {
+		snprintf(workdir, sizeof(workdir), "%s", env_wd);
+	} else {
+		snprintf(workdir, sizeof(workdir), "%s/site", home);
+		if (access(workdir, X_OK) != 0)
+			snprintf(workdir, sizeof(workdir), "%s", home);
+	}
+
+	pid_t pid = fork();
+	if (pid == 0) {
+		int devnull = open("/dev/null", O_RDWR);
+		if (devnull >= 0) {
+			dup2(devnull, STDIN_FILENO);
+			dup2(devnull, STDOUT_FILENO);
+			dup2(devnull, STDERR_FILENO);
+			if (devnull > STDERR_FILENO)
+				close(devnull);
+		}
+		setsid();
+		if (chdir(workdir) != 0) {
+			/* best effort */
+		}
+
+		char ren_cmd[1024];
+		snprintf(ren_cmd, sizeof(ren_cmd),
+			"exec ren --session jarvis --listen '%s' --max-turns 16 -m mod_jarvis:mod_mm",
+			sock_path);
+		execlp("tmux", "tmux", "new-session", "-d", "-s", "jarvis",
+		       "-x", "120", "-y", "36", "-c", workdir, ren_cmd, (char *)NULL);
+		/* Fallback if tmux is unavailable: exec ren directly */
+		execlp("ren", "ren", "--session", "jarvis", "--listen", sock_path,
+		       "--max-turns", "16", "-m", "mod_jarvis:mod_mm", (char *)NULL);
+		_exit(127);
+	}
+	if (pid < 0)
+		return -1;
+
+	for (int i = 0; i < 30; i++) {
+		usleep(50000);
+		int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+		if (fd >= 0) {
+			if (connect(fd, (const struct sockaddr *)addr, sizeof(*addr)) == 0)
+				return fd;
+			close(fd);
+		}
+	}
+	return -1;
+}
+
 static bool
 dispatch_to_ren_tmux(const char *utterance, int *out_started_media, int *out_conv_exited)
 {
@@ -2966,16 +3026,9 @@ dispatch_to_ren_tmux(const char *utterance, int *out_started_media, int *out_con
 
 	if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
 		close(fd);
-		/* Auto-start detached tmux ren session via dwm-jarvis ensure */
-		int sys_rc = system("dwm-jarvis ensure >/dev/null 2>&1");
-		(void)sys_rc;
-		fd = socket(AF_UNIX, SOCK_STREAM, 0);
+		fd = ensure_ren_jarvis_session(sock_path, &addr);
 		if (fd < 0)
 			return false;
-		if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-			close(fd);
-			return false;
-		}
 	}
 
 	char req[4096];
