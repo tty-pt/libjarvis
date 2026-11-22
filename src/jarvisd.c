@@ -1776,6 +1776,19 @@ poll_control_socket(int srv, int cli, int is_jarvis_idle)
 			const char *st = next ? "ON\n" : "OFF\n";
 			write_all(cfd, st, strlen(st));
 			close(cfd);
+		} else if (strncmp(cbuf, "TTS_STATE|", 10) == 0) {
+			char *st = cbuf + 10;
+			char *nl = strpbrk(st, "\r\n");
+			if (nl) *nl = 0;
+			char sf[256];
+			snprintf(sf, sizeof(sf), "/tmp/jarvis-voice-%s.state", get_username());
+			if (strcmp(st, "speaking") == 0) {
+				write_state_file(sf, "tts-speaking", NULL, NULL);
+			} else if (strcmp(st, "idle") == 0) {
+				write_state_file(sf, "jarvis", NULL, NULL);
+			}
+			write_all(cfd, "OK\n", 3);
+			close(cfd);
 		} else if (strncmp(cbuf, "TTS_INTERRUPT", 13) == 0) {
 			interrupt_tts_and_clear_cache();
 			write_all(cfd, "OK\n", 3);
@@ -2389,7 +2402,7 @@ handle_jarvis_wait_ex(int srv, int cli, struct whisper_context *ctx_wake, int n_
 		pthread_mutex_unlock(&g_audio.mtx);
 
 		if (wake_confirmed && waiting_post_wake) {
-			if (is_followup_window && is_tts_file_active()) {
+			if (is_followup_window && (is_tts_file_active() || is_tts_currently_speaking(NULL, 0))) {
 				long ext_dl = now_ms() + (long)followup_ms;
 				if (ext_dl > post_wake_deadline_ms)
 					post_wake_deadline_ms = ext_dl;
@@ -2969,7 +2982,7 @@ read_jarvis_runtime_cfg(char *lang, size_t lang_sz,
 	*out_followup_ms = jarvis_rc_get_int("followup_ms", 0);
 	if (*out_followup_ms < 0 || *out_followup_ms > 3600000)
 		*out_followup_ms = 0;
-	*out_conv_followup_ms = jarvis_rc_get_int("conv_followup_ms", 9000);
+	*out_conv_followup_ms = jarvis_rc_get_int("conv_followup_ms", 10000);
 	if (*out_conv_followup_ms < 0 || *out_conv_followup_ms > 3600000)
 		*out_conv_followup_ms = 9000;
 	if (out_cmd_silence_ms) {
@@ -3535,7 +3548,7 @@ run_inprocess_jarvis_turn(int srv, struct whisper_context *ctx_wake, int n_threa
 				fprintf(afp, "%d\n", (int)getpid());
 				fclose(afp);
 			}
-			write_state_file(state_file, "jarvis", NULL, NULL);
+			write_state_file(state_file, "processing", NULL, NULL);
 
 			interrupt_tts_and_clear_cache();
 

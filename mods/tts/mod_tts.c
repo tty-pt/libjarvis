@@ -374,6 +374,46 @@ static void write_tts_active_state(const char *text, bool active)
 	}
 }
 
+/* Notify jarvisd of TTS state changes (speaking/idle) via control socket */
+
+static void
+write_all(int fd, const char *buf, size_t len)
+{
+	while (len > 0) {
+		ssize_t w = write(fd, buf, len);
+		if (w <= 0)
+			break;
+		buf += w;
+		len -= (size_t)w;
+	}
+}
+
+static void notify_tts_state(const char *state)
+{
+	const char *u = getenv("USER");
+	if (!u || !*u) u = "quirinpa";
+	char sock_path[128];
+	snprintf(sock_path, sizeof(sock_path), "/tmp/jarvis-control-%s.sock", u);
+
+	int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	if (fd < 0) return;
+
+	struct sockaddr_un addr;
+	memset(&addr, 0, sizeof(addr));
+	addr.sun_family = AF_UNIX;
+	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", sock_path);
+
+	if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		close(fd);
+		return;
+	}
+
+	char msg[128];
+	snprintf(msg, sizeof(msg), "TTS_STATE|%s\n", state);
+	write_all(fd, msg, strlen(msg));
+	close(fd);
+}
+
 static void clean_speech_text(const char *src, char *dst, size_t dst_sz)
 {
 	if (!dst || dst_sz == 0) return;
@@ -1317,6 +1357,7 @@ static void *tts_worker_fn(void *arg)
 			 */
 			if (g_tts.player_pid > 1 || g_pw_pipe_fd >= 0) {
 				close_persistent_player_locked(false);
+				notify_tts_state("idle");
 			}
 			if (mic_muted) {
 				pthread_mutex_unlock(&g_tts.mtx);
@@ -1398,6 +1439,7 @@ static void *tts_worker_fn(void *arg)
 			pthread_mutex_unlock(&g_tts.mtx);
 
 			if (!cancelled && pfd_w >= 0) {
+				notify_tts_state("speaking");
 				if (!mic_muted) {
 					set_mic_mute(true);
 					mic_muted = true;
@@ -1630,6 +1672,7 @@ XY_IMPL(int, jarvis_xy_tts_interrupt, int, dummy)
 		kill(pid, SIGKILL);
 	}
 	write_tts_active_state(NULL, false);
+	notify_tts_state("idle");
 	pthread_cond_broadcast(&g_tts.cond);
 	pthread_cond_broadcast(&g_tts.done_cond);
 	pthread_mutex_unlock(&g_tts.mtx);
