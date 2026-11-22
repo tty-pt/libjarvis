@@ -53,6 +53,10 @@ mods/hyprland/mod_hyprland.so: mods/hyprland/mod_hyprland.c include/ttypt/jarvis
 mods/tts/mod_tts.so: mods/tts/mod_tts.c include/ttypt/jarvis-types.h
 	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/tts/mod_tts.c $(LDFLAGS) -lxylem -ldl -lpthread -lm
 
+mods/ren-jarvis/ren-jarvis.so: mods/ren-jarvis/ren-jarvis.c include/ttypt/jarvis-types.h lib/libjarvis.so
+	@mkdir -p mods/ren-jarvis
+	$(CC) $(CFLAGS) -I../axil-auren/include -I../libxylem/include -fPIC -shared -o $@ mods/ren-jarvis/ren-jarvis.c $(LDFLAGS) -Llib -ljarvis -L../axil-auren/lib -lren -lxylem -lstele -lcorm
+
 $(WHISPER_A): $(whispercpp)/Makefile
 	$(MAKE) -C $(whispercpp) -j4 whisper
 
@@ -85,7 +89,12 @@ ${DESTDIR}${PREFIX}/lib/mod_tts.so: mods/tts/mod_tts.so
 	install -d ${DESTDIR}${PREFIX}/lib
 	install -m 755 mods/tts/mod_tts.so $@
 
-install-extra: ${DESTDIR}${PREFIX}/lib/pkgconfig/jarvis.pc ${DESTDIR}${PREFIX}/lib/mod_sway.so ${DESTDIR}${PREFIX}/lib/mod_hyprland.so ${DESTDIR}${PREFIX}/lib/mod_tts.so
+${DESTDIR}${PREFIX}/lib/ren/ren-jarvis.so: mods/ren-jarvis/ren-jarvis.so
+	install -d ${DESTDIR}${PREFIX}/lib/ren
+	install -m 755 mods/ren-jarvis/ren-jarvis.so $@
+	ln -sf ren-jarvis.so ${DESTDIR}${PREFIX}/lib/ren/mod_jarvis.so
+
+install-extra: ${DESTDIR}${PREFIX}/lib/pkgconfig/jarvis.pc ${DESTDIR}${PREFIX}/lib/mod_sway.so ${DESTDIR}${PREFIX}/lib/mod_hyprland.so ${DESTDIR}${PREFIX}/lib/mod_tts.so ${DESTDIR}${PREFIX}/lib/ren/ren-jarvis.so
 	@mkdir -p $(HOME)/.local/lib $(HOME)/.local/bin $(HOME)/.config/jarvis
 	@install -m 755 mods/tts/mod_tts.so $(HOME)/.local/lib/mod_tts.so
 	@install -m 644 data/ontology.json $(HOME)/.config/jarvis/ontology.json
