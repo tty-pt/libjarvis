@@ -22,10 +22,12 @@
 #include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
 #include <ttypt/jarvis.h>
+#include <ttypt/desktop-core.h>
 #include "jarvis-tts.h"
 #include "whisper.h"
 
@@ -260,21 +262,17 @@ notify_osd_async(const char *title, const char *body, int timeout_ms)
 {
 	if (!title || !*title)
 		return;
-	if (fork() == 0) {
-		char tbuf[32];
-		int fd = open("/dev/null", O_WRONLY);
-		if (fd >= 0) {
-			dup2(fd, STDOUT_FILENO);
-			dup2(fd, STDERR_FILENO);
-			close(fd);
-		}
-		snprintf(tbuf, sizeof(tbuf), "%d", timeout_ms > 0 ? timeout_ms : 4000);
-		execlp("notify-send", "notify-send",
-		       "-t", tbuf,
-		       "-h", "string:x-dunst-stack-tag:voice",
-		       title, (body && *body) ? body : "", (char *)NULL);
-		_exit(0);
-	}
+	char tbuf[32];
+	snprintf(tbuf, sizeof(tbuf), "%d", timeout_ms > 0 ? timeout_ms : 4000);
+	char *const argv[] = {
+		"notify-send",
+		"-t", tbuf,
+		"-h", "string:x-dunst-stack-tag:voice",
+		(char *)title,
+		(char *)((body && *body) ? body : ""),
+		NULL
+	};
+	desktop_core_spawn_detached_argv(argv);
 }
 
 static void
@@ -354,16 +352,8 @@ play_chime_async(const char *chime_wav)
 		return;
 	if (access(chime_wav, R_OK) != 0)
 		return;
-	if (fork() == 0) {
-		int fd = open("/dev/null", O_WRONLY);
-		if (fd >= 0) {
-			dup2(fd, STDOUT_FILENO);
-			dup2(fd, STDERR_FILENO);
-			close(fd);
-		}
-		execlp("pw-play", "pw-play", "--volume=0.75", chime_wav, (char *)NULL);
-		_exit(0);
-	}
+	char *const argv[] = { "pw-play", "--volume=0.75", (char *)chime_wav, NULL };
+	desktop_core_spawn_detached_argv(argv);
 }
 
 static void
@@ -635,6 +625,8 @@ close_pw_record(int *fd, pid_t *pid)
 	}
 	if (*pid > 0) {
 		kill(*pid, SIGTERM);
+		int st = 0;
+		while (waitpid(*pid, &st, 0) < 0 && errno == EINTR) {}
 		*pid = -1;
 	}
 }
@@ -3098,49 +3090,55 @@ ensure_ren_jarvis_session(const char *sock_path, const struct sockaddr_un *addr)
 	}
 
 	pid_t pid = fork();
-	if (pid == 0) {
-		int devnull = open("/dev/null", O_RDWR);
-		if (devnull >= 0) {
-			dup2(devnull, STDIN_FILENO);
-			dup2(devnull, STDOUT_FILENO);
-			dup2(devnull, STDERR_FILENO);
-			if (devnull > STDERR_FILENO)
-				close(devnull);
-		}
-		setsid();
-		if (chdir(workdir) != 0) {
-			/* best effort */
-		}
-
-		char ren_mods[512] = {0};
-		if (!jarvis_rc_get("ren_mods", NULL, ren_mods, sizeof(ren_mods)) || !ren_mods[0]) {
-			char wm_buf[64] = {0}, wm_mod[80];
-			jarvis_rc_get("wm", "dwm", wm_buf, sizeof(wm_buf));
-			snprintf(wm_mod, sizeof(wm_mod), "ren-%s", wm_buf[0] ? wm_buf : "dwm");
-			const char *cands[] = { wm_mod, "ren-reflex", "ren-x11", "ren-firefox", "ren-desktop", "ren-jarvis", "ren-mm", NULL };
-			size_t mo = 0;
-			for (size_t i = 0; cands[i]; i++) {
-				char sp[512];
-				snprintf(sp, sizeof(sp), "%s/.local/lib/ren/%s.so", home, cands[i]);
-				if (strcmp(cands[i], "ren-jarvis") == 0 || strcmp(cands[i], "ren-mm") == 0 ||
-				    strcmp(cands[i], "ren-reflex") == 0 || access(sp, R_OK) == 0) {
-					mo += (size_t)snprintf(ren_mods + mo, sizeof(ren_mods) - mo,
-					                       "%s%s", mo > 0 ? ":" : "", cands[i]);
-				}
-			}
-			if (!ren_mods[0]) snprintf(ren_mods, sizeof(ren_mods), "ren-jarvis:ren-reflex:ren-mm");
-		}
-
-		execlp("sh", "sh", "-c",
-		       "tmux kill-session -t jarvis >/dev/null 2>&1 || true; "
-		       "tmux new-session -d -s jarvis -x 120 -y 36 -c \"$1\" "
-		       "ren --session jarvis --listen \"$2\" --max-turns 16 -m \"$3\" >/dev/null 2>&1 "
-		       "|| exec ren --session jarvis --listen \"$2\" --max-turns 16 -m \"$3\"",
-		       "sh", workdir, sock_path, ren_mods, (char *)NULL);
-		_exit(127);
-	}
 	if (pid < 0)
 		return -1;
+	if (pid == 0) {
+		setsid();
+		pid_t gpid = fork();
+		if (gpid == 0) {
+			int devnull = open("/dev/null", O_RDWR);
+			if (devnull >= 0) {
+				dup2(devnull, STDIN_FILENO);
+				dup2(devnull, STDOUT_FILENO);
+				dup2(devnull, STDERR_FILENO);
+				if (devnull > STDERR_FILENO)
+					close(devnull);
+			}
+			if (chdir(workdir) != 0) {
+				/* best effort */
+			}
+
+			char ren_mods[512] = {0};
+			if (!jarvis_rc_get("ren_mods", NULL, ren_mods, sizeof(ren_mods)) || !ren_mods[0]) {
+				char wm_buf[64] = {0}, wm_mod[80];
+				jarvis_rc_get("wm", "dwm", wm_buf, sizeof(wm_buf));
+				snprintf(wm_mod, sizeof(wm_mod), "ren-%s", wm_buf[0] ? wm_buf : "dwm");
+				const char *cands[] = { wm_mod, "ren-reflex", "ren-x11", "ren-firefox", "ren-desktop", "ren-jarvis", "ren-mm", NULL };
+				size_t mo = 0;
+				for (size_t i = 0; cands[i]; i++) {
+					char sp[512];
+					snprintf(sp, sizeof(sp), "%s/.local/lib/ren/%s.so", home, cands[i]);
+					if (strcmp(cands[i], "ren-jarvis") == 0 || strcmp(cands[i], "ren-mm") == 0 ||
+					    strcmp(cands[i], "ren-reflex") == 0 || access(sp, R_OK) == 0) {
+						mo += (size_t)snprintf(ren_mods + mo, sizeof(ren_mods) - mo,
+						                       "%s%s", mo > 0 ? ":" : "", cands[i]);
+					}
+				}
+				if (!ren_mods[0]) snprintf(ren_mods, sizeof(ren_mods), "ren-jarvis:ren-reflex:ren-mm");
+			}
+
+			execlp("sh", "sh", "-c",
+			       "tmux kill-session -t jarvis >/dev/null 2>&1 || true; "
+			       "tmux new-session -d -s jarvis -x 120 -y 36 -c \"$1\" "
+			       "ren --session jarvis --listen \"$2\" --max-turns 16 -m \"$3\" >/dev/null 2>&1 "
+			       "|| exec ren --session jarvis --listen \"$2\" --max-turns 16 -m \"$3\"",
+			       "sh", workdir, sock_path, ren_mods, (char *)NULL);
+			_exit(127);
+		}
+		_exit(gpid < 0 ? 127 : 0);
+	}
+	int st = 0;
+	while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
 
 	for (int i = 0; i < 30; i++) {
 		usleep(50000);
@@ -3415,11 +3413,8 @@ handle_lockdown_phrase(const char *cmd_text)
 		daemon_notify(title, body, 0);
 		char lock_cmd[256];
 		jarvis_rc_get("lock_cmd", "slock", lock_cmd, sizeof(lock_cmd));
-		if (lock_cmd[0] && fork() == 0) {
-			setsid();
-			execl("/bin/sh", "sh", "-c", lock_cmd, (char *)NULL);
-			_exit(0);
-		}
+		if (lock_cmd[0])
+			desktop_core_spawn_detached_sh(lock_cmd);
 	} else {
 		jarvis_ontology_format_ui(ont, "disabled_title", wake_buf,
 		                          "  {Wake} Disabled", title, sizeof(title));
@@ -4117,7 +4112,6 @@ main(int argc, char *argv[])
 	}
 	signal(SIGHUP, SIG_IGN);
 	signal(SIGPIPE, SIG_IGN);
-	signal(SIGCHLD, SIG_IGN);
 
 	init_daemon_runtime();
 	if (start_jarvis)

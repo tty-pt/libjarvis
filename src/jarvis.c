@@ -275,9 +275,7 @@ static void ensure_daemon_running(bool activate_listener)
 {
 	char resp[64];
 	if (daemon_cmd("PING", resp, sizeof(resp))) {
-		if (activate_listener) {
-			daemon_cmd("JARVIS_ON", resp, sizeof(resp));
-		}
+		daemon_cmd(activate_listener ? "JARVIS_ON" : "JARVIS_OFF", resp, sizeof(resp));
 		return;
 	}
 
@@ -292,31 +290,27 @@ static void ensure_daemon_running(bool activate_listener)
 		snprintf(bin_path, sizeof(bin_path), "jarvisd");
 	}
 
-	if (activate_listener) {
-		char *const argv[] = {
-			"systemd-run", "--user", "--unit=jarvisd", "--collect", "--quiet",
-			bin_path, "-j", NULL
-		};
-		if (desktop_core_spawn_detached_argv(argv) <= 0) {
+	char *const start_svc[] = { "systemctl", "--user", "start", "jarvisd.service", NULL };
+	bool started_systemd = (run_argv_sync(start_svc) == 0);
+	if (!started_systemd) {
+		if (activate_listener) {
 			char *const fb[] = { bin_path, "-j", NULL };
 			desktop_core_spawn_detached_argv(fb);
-		}
-	} else {
-		char *const argv[] = {
-			"systemd-run", "--user", "--unit=jarvisd", "--collect", "--quiet",
-			bin_path, NULL
-		};
-		if (desktop_core_spawn_detached_argv(argv) <= 0) {
+		} else {
 			char *const fb[] = { bin_path, NULL };
 			desktop_core_spawn_detached_argv(fb);
 		}
 	}
 
-	for (int i = 0; i < 40; i++) {
+	int max_polls = started_systemd ? 120 : 60;
+	for (int i = 0; i < max_polls; i++) {
 		if (daemon_cmd("PING", resp, sizeof(resp))) {
+			if (started_systemd) {
+				daemon_cmd(activate_listener ? "JARVIS_ON" : "JARVIS_OFF", resp, sizeof(resp));
+			}
 			break;
 		}
-		usleep(50000);
+		usleep(100000);
 	}
 }
 
