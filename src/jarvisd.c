@@ -3043,29 +3043,6 @@ read_jarvis_runtime_cfg(char *lang, size_t lang_sz,
 }
 
 static void
-load_xy_mod_name(const char *home, const char *mod)
-{
-	if (!mod || !*mod)
-		return;
-	char clean[512];
-	if (mod[0] == '/' || mod[0] == '.') {
-		snprintf(clean, sizeof(clean), "%s", mod);
-	} else {
-		snprintf(clean, sizeof(clean), "%s/.local/lib/%s", home, mod);
-	}
-	size_t l = strlen(clean);
-	if (l > 3 && strcmp(clean + l - 3, ".so") == 0)
-		clean[l - 3] = '\0';
-	if (xy_load(clean) != XY_OK && mod[0] != '/') {
-		snprintf(clean, sizeof(clean), "%s", mod);
-		l = strlen(clean);
-		if (l > 3 && strcmp(clean + l - 3, ".so") == 0)
-			clean[l - 3] = '\0';
-		xy_load(clean);
-	}
-}
-
-static void
 init_jarvis_xylem_runtime(void)
 {
 	const char *home = getenv("HOME");
@@ -3077,32 +3054,7 @@ init_jarvis_xylem_runtime(void)
 	static char wm_buf[64];
 	jarvis_rc_get("wm", "dwm", wm_buf, sizeof(wm_buf));
 
-	char mods_cfg[512];
-	if (jarvis_rc_get("mods", NULL, mods_cfg, sizeof(mods_cfg)) && mods_cfg[0]) {
-		char *save = NULL;
-		for (char *tok = strtok_r(mods_cfg, ":, ", &save); tok; tok = strtok_r(NULL, ":, ", &save)) {
-			if (*tok)
-				load_xy_mod_name(home, tok);
-		}
-	} else {
-		char wm_mod[128];
-		snprintf(wm_mod, sizeof(wm_mod), "mod_%s", wm_buf[0] ? wm_buf : "dwm");
-		load_xy_mod_name(home, wm_mod);
-		load_xy_mod_name(home, "mod_tts");
-	}
-
-	char cfg_path[512];
-	snprintf(cfg_path, sizeof(cfg_path), "%s/.config/jarvis/mods.load", home);
-	FILE *mfp = fopen(cfg_path, "r");
-	if (mfp) {
-		char mline[512];
-		while (fgets(mline, sizeof(mline), mfp)) {
-			trim_inplace(mline);
-			if (mline[0] && mline[0] != '#')
-				load_xy_mod_name(home, mline);
-		}
-		fclose(mfp);
-	}
+	jarvis_load_mods(wm_buf, true);
 
 	const char *u = get_username();
 	char chime_wav[256], done_wav[256];
@@ -3206,15 +3158,31 @@ ensure_ren_jarvis_session(const char *sock_path, const struct sockaddr_un *addr)
 			/* best effort */
 		}
 
+		char ren_mods[512] = {0};
+		if (!jarvis_rc_get("ren_mods", NULL, ren_mods, sizeof(ren_mods)) || !ren_mods[0]) {
+			static const char *const CANDS[] = { "ren-dwm", "ren-x11", "ren-firefox", "ren-jarvis", "ren-mm", NULL };
+			size_t mo = 0;
+			for (size_t i = 0; CANDS[i]; i++) {
+				char sp[512];
+				snprintf(sp, sizeof(sp), "%s/.local/lib/ren/%s.so", home, CANDS[i]);
+				if (strcmp(CANDS[i], "ren-jarvis") == 0 || strcmp(CANDS[i], "ren-mm") == 0 ||
+				    access(sp, R_OK) == 0) {
+					mo += (size_t)snprintf(ren_mods + mo, sizeof(ren_mods) - mo,
+					                       "%s%s", mo > 0 ? ":" : "", CANDS[i]);
+				}
+			}
+			if (!ren_mods[0]) snprintf(ren_mods, sizeof(ren_mods), "ren-jarvis:ren-mm");
+		}
+
 		char ren_cmd[1024];
 		snprintf(ren_cmd, sizeof(ren_cmd),
-			"exec ren --session jarvis --listen '%s' --max-turns 16 -m mod_jarvis:mod_mm",
-			sock_path);
+			"exec ren --session jarvis --listen '%s' --max-turns 16 -m '%s'",
+			sock_path, ren_mods);
 		execlp("tmux", "tmux", "new-session", "-d", "-s", "jarvis",
 		       "-x", "120", "-y", "36", "-c", workdir, ren_cmd, (char *)NULL);
 		/* Fallback if tmux is unavailable: exec ren directly */
 		execlp("ren", "ren", "--session", "jarvis", "--listen", sock_path,
-		       "--max-turns", "16", "-m", "mod_jarvis:mod_mm", (char *)NULL);
+		       "--max-turns", "16", "-m", ren_mods, (char *)NULL);
 		_exit(127);
 	}
 	if (pid < 0)

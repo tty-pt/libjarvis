@@ -75,53 +75,6 @@ static int load_xy_mod(const char *path)
 	return rc;
 }
 
-static void autoload_xylem_modules(const char *wm)
-{
-	const char *home = getenv("HOME");
-
-	/* 1. Load modules from $JARVIS_MODS or ~/.jarvisrc mods */
-	char mods_buf[1024] = {0};
-	const char *env_mods = getenv("JARVIS_MODS");
-	if (env_mods && *env_mods) {
-		snprintf(mods_buf, sizeof(mods_buf), "%s", env_mods);
-	} else {
-		jarvis_rc_get("mods", NULL, mods_buf, sizeof(mods_buf));
-	}
-	if (mods_buf[0]) {
-		char *saveptr = NULL;
-		for (char *tok = strtok_r(mods_buf, ":, ", &saveptr); tok; tok = strtok_r(NULL, ":, ", &saveptr)) {
-			if (*tok) load_xy_mod(tok);
-		}
-	}
-
-	/* 2. Load modules from ~/.config/jarvis/mods.load if present */
-	if (home && *home) {
-		char mpath[512];
-		snprintf(mpath, sizeof(mpath), "%s/.config/jarvis/mods.load", home);
-		FILE *fp = fopen(mpath, "r");
-		if (fp) {
-			char line[512];
-			while (fgets(line, sizeof(line), fp)) {
-				char *p = line;
-				while (*p && isspace((unsigned char)*p)) p++;
-				if (!*p || *p == '#') continue;
-				size_t l = strlen(p);
-				while (l > 0 && isspace((unsigned char)p[l - 1])) p[--l] = '\0';
-				if (l > 0) load_xy_mod(p);
-			}
-			fclose(fp);
-		}
-	}
-
-	/* 3. Auto-load mod_<wm> and mod_tts */
-	if (wm && *wm) {
-		char cand[128];
-		snprintf(cand, sizeof(cand), "mod_%s", wm);
-		load_xy_mod(cand);
-	}
-	load_xy_mod("mod_tts");
-}
-
 #ifndef _WIN32
 static void notify_status_bar(void)
 {
@@ -733,7 +686,7 @@ int main(int argc, char **argv)
 	}
 
 	/* Auto-load configured or environment-matched Xylem adapter modules */
-	autoload_xylem_modules(cfg.wm);
+	jarvis_load_mods(cfg.wm, true);
 
 	if (subcmd) {
 #ifndef _WIN32

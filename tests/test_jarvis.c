@@ -1238,6 +1238,49 @@ static void test_12_i18n_and_wake_word_isolation(void)
 	printf("  [PASS] Full language-agnostic & custom wake-word isolation verified!\n");
 }
 
+#include "../include/ttypt/jarvis-desktop.h"
+
+static void test_13_desktop_helpers_and_fallback(void)
+{
+	printf("Running test_13_desktop_helpers_and_fallback...\n");
+#if !defined(__wasm__) && !defined(_WIN32)
+	char enc[128];
+	jarvis_desktop_url_encode("hello world & c++", enc, sizeof(enc));
+	assert(strcmp(enc, "hello+world+%26+c%2B%2B") == 0);
+
+	char jesc[128];
+	jarvis_desktop_json_escape("a\"b\\c\nd\te", jesc, sizeof(jesc));
+	assert(strcmp(jesc, "a\\\"b\\\\c\\nd\\te") == 0);
+
+	assert(jarvis_desktop_is_shell_name("bash"));
+	assert(jarvis_desktop_is_shell_name("-zsh"));
+	assert(!jarvis_desktop_is_shell_name("nvim"));
+
+	char health[256] = {0};
+	jarvis_desktop_populate_system_health(health, sizeof(health));
+	assert(health[0] != '\0');
+	assert(strstr(health, "Disk") != NULL || strstr(health, "RAM") != NULL);
+
+	jarvis_dsl_t dsl;
+	jarvis_adapter_result_t res;
+	memset(&dsl, 0, sizeof(dsl));
+	memset(&res, 0, sizeof(res));
+	snprintf(dsl.op, sizeof(dsl.op), "inspect_system");
+	snprintf(dsl.args.aspect, sizeof(dsl.args.aspect), "memory");
+	assert(jarvis_desktop_execute_fallback(&dsl, &res) == 0);
+	assert(res.handled && res.success);
+	assert(strstr(res.output, "\"health\"") != NULL);
+
+	memset(&dsl, 0, sizeof(dsl));
+	memset(&res, 0, sizeof(res));
+	snprintf(dsl.op, sizeof(dsl.op), "open_application");
+	assert(jarvis_desktop_execute_fallback(&dsl, &res) == 0);
+	assert(res.handled && !res.success);
+
+	printf("  [PASS] jarvis-desktop URL/JSON encoding, shell detection, health & fallback execution verified!\n");
+#endif
+}
+
 int main(void)
 {
 	assert(xy_load("./mock_adapter") == XY_OK);
@@ -1268,12 +1311,13 @@ int main(void)
 	jarvis_engine_destroy(eng);
 	test_11_conversation_continuity();
 	test_12_i18n_and_wake_word_isolation();
+	test_13_desktop_helpers_and_fallback();
 
 	char cleanup_cmd[640];
 	snprintf(cleanup_cmd, sizeof(cleanup_cmd), "rm -rf %s %s.mm", iso_mem, iso_mem);
 	int rc = system(cleanup_cmd);
 	(void)rc;
 
-	printf("\n=== ALL 12 LIBJARVIS PARITY, MULTILINGUAL, CONVERSATION & LIBMM SUITES PASSED IN PURE C ===\n");
+	printf("\n=== ALL 13 LIBJARVIS PARITY, MULTILINGUAL, CONVERSATION, DESKTOP & LIBMM SUITES PASSED IN PURE C ===\n");
 	return 0;
 }

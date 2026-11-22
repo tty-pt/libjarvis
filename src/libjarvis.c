@@ -3010,6 +3010,12 @@ bool jarvis_process(
 	memset(&world, 0, sizeof(world));
 	world.context = eng->ctx;
 	jarvis_xy_observe(&world);
+#if !defined(__wasm__) && !defined(_WIN32)
+	if (strncmp(world.wm, "mock-", 5) != 0) {
+		extern void jarvis_desktop_populate_defaults(jarvis_world_t *w);
+		jarvis_desktop_populate_defaults(&world);
+	}
+#endif
 	double observe_ms = now_ms() - t_obs0;
 
 	if (strcmp(surf, "any") == 0 && world.focused.wm_class[0]) {
@@ -3267,4 +3273,163 @@ bool jarvis_process(
 	}
 	record_session_turn(eng, utterance, combined_ops, combined_out, combined_spoken, any_expect_reply);
 	return out_result->ok;
+}
+
+#ifndef __wasm__
+static void mod_strip_so(char *buf)
+{
+	size_t l = strlen(buf);
+	if (l > 3 && strcmp(buf + l - 3, ".so") == 0) {
+		buf[l - 3] = '\0';
+	}
+}
+
+static void mod_norm_base(const char *spec, char *out, size_t out_sz)
+{
+	if (!spec || !out || out_sz == 0) {
+		if (out && out_sz) out[0] = '\0';
+		return;
+	}
+	const char *sl = strrchr(spec, '/');
+	const char *base = sl ? (sl + 1) : spec;
+	snprintf(out, out_sz, "%.*s", (int)(out_sz - 1), base);
+	mod_strip_so(out);
+}
+
+static bool mod_already_loaded(const char *bname, char loaded[][64], size_t n_loaded)
+{
+	for (size_t i = 0; i < n_loaded; i++) {
+		if (strcmp(loaded[i], bname) == 0) return true;
+	}
+	return false;
+}
+
+static bool jarvis_load_one_mod(const char *home, const char *spec, bool include_tts,
+                                char loaded[][64], size_t *n_loaded, int *out_count)
+{
+	if (!spec || !*spec) return false;
+	char bname[64];
+	mod_norm_base(spec, bname, sizeof(bname));
+	if (!bname[0]) return false;
+	if (!include_tts && strcmp(bname, "mod_tts") == 0) return false;
+	if (mod_already_loaded(bname, loaded, *n_loaded)) return true;
+
+	char clean[512];
+	snprintf(clean, sizeof(clean), "%.*s", (int)(sizeof(clean) - 1), spec);
+	mod_strip_so(clean);
+
+	bool ok = false;
+	if (clean[0] == '/' || clean[0] == '.') {
+		if (xy_load(clean) == XY_OK) ok = true;
+	} else {
+		char cand[512];
+		if (home && *home) {
+			snprintf(cand, sizeof(cand), "%s/.local/lib/%s", home, clean);
+			if (xy_load(cand) == XY_OK) ok = true;
+			if (!ok && !strchr(clean, '/')) {
+				snprintf(cand, sizeof(cand), "%s/.local/lib/dwm/%s", home, clean);
+				if (xy_load(cand) == XY_OK) ok = true;
+			}
+			if (!ok && !strchr(clean, '/')) {
+				snprintf(cand, sizeof(cand), "%s/.local/lib/jarvis/%s", home, clean);
+				if (xy_load(cand) == XY_OK) ok = true;
+			}
+		}
+		if (!ok && xy_load(clean) == XY_OK) ok = true;
+	}
+
+	if (ok) {
+		if (*n_loaded < 32) {
+			snprintf(loaded[*n_loaded], 64, "%s", bname);
+			(*n_loaded)++;
+		}
+		if (out_count) (*out_count)++;
+	}
+	return ok;
+}
+
+static void mod_trim_inplace(char *s)
+{
+	if (!s) return;
+	char *p = s;
+	while (*p && isspace((unsigned char)*p)) p++;
+	if (p != s) memmove(s, p, strlen(p) + 1);
+	size_t l = strlen(s);
+	while (l > 0 && isspace((unsigned char)s[l - 1])) s[--l] = '\0';
+}
+#endif
+
+int jarvis_load_mods(const char *wm, bool include_tts)
+{
+#ifdef __wasm__
+	(void)wm;
+	(void)include_tts;
+	return 0;
+#else
+	const char *home = getenv("HOME");
+	if (!home || !*home) home = "/home/quirinpa";
+
+	char loaded[32][64];
+	size_t n_loaded = 0;
+	int count = 0;
+
+	/* 1. $JARVIS_MODS or ~/.jarvisrc `mods = ...` */
+	char mods_buf[1024] = {0};
+	const char *env_mods = getenv("JARVIS_MODS");
+	if (env_mods && *env_mods) {
+		snprintf(mods_buf, sizeof(mods_buf), "%s", env_mods);
+	} else {
+		jarvis_rc_get("mods", NULL, mods_buf, sizeof(mods_buf));
+	}
+	if (mods_buf[0]) {
+		char *save = NULL;
+		for (char *tok = strtok_r(mods_buf, ":, ", &save); tok; tok = strtok_r(NULL, ":, ", &save)) {
+			if (*tok) jarvis_load_one_mod(home, tok, include_tts, loaded, &n_loaded, &count);
+		}
+	}
+
+	/* 2. ~/.config/jarvis/mods.load */
+	char cfg_path[512];
+	snprintf(cfg_path, sizeof(cfg_path), "%s/.config/jarvis/mods.load", home);
+	FILE *fp = fopen(cfg_path, "r");
+	if (fp) {
+		char line[512];
+		while (fgets(line, sizeof(line), fp)) {
+			mod_trim_inplace(line);
+			if (line[0] && line[0] != '#') {
+				jarvis_load_one_mod(home, line, include_tts, loaded, &n_loaded, &count);
+			}
+		}
+		fclose(fp);
+	}
+
+	/* 3. Auto-ensure default WM + browser + X11 + optional TTS chain in proper order */
+	const char *eff_wm = (wm && *wm) ? wm : "dwm";
+	if (strcmp(eff_wm, "dwm") == 0) {
+		if (!mod_already_loaded("dwm-jarvis", loaded, n_loaded) &&
+		    !mod_already_loaded("mod_dwm", loaded, n_loaded)) {
+			if (!jarvis_load_one_mod(home, "dwm/dwm-jarvis", include_tts, loaded, &n_loaded, &count)) {
+				jarvis_load_one_mod(home, "mod_dwm", include_tts, loaded, &n_loaded, &count);
+			}
+		}
+	} else {
+		char wm_jarvis[128], wm_legacy[128];
+		snprintf(wm_jarvis, sizeof(wm_jarvis), "%s-jarvis", eff_wm);
+		snprintf(wm_legacy, sizeof(wm_legacy), "mod_%s", eff_wm);
+		if (!mod_already_loaded(wm_jarvis, loaded, n_loaded) &&
+		    !mod_already_loaded(wm_legacy, loaded, n_loaded)) {
+			if (!jarvis_load_one_mod(home, wm_jarvis, include_tts, loaded, &n_loaded, &count)) {
+				jarvis_load_one_mod(home, wm_legacy, include_tts, loaded, &n_loaded, &count);
+			}
+		}
+	}
+
+	jarvis_load_one_mod(home, "jarvis/jarvis-firefox", include_tts, loaded, &n_loaded, &count);
+	jarvis_load_one_mod(home, "jarvis/jarvis-x11", include_tts, loaded, &n_loaded, &count);
+	if (include_tts) {
+		jarvis_load_one_mod(home, "mod_tts", include_tts, loaded, &n_loaded, &count);
+	}
+
+	return count;
+#endif
 }

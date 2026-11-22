@@ -7,29 +7,10 @@
 #include <unistd.h>
 #include "ttypt/libren.h"
 #include <ttypt/jarvis.h>
+#include <ttypt/jarvis-desktop.h>
 #include <ttypt/xy.h>
 
 static jarvis_engine_t *g_eng = NULL;
-
-static void load_wm_mod(const char *home, const char *mod) {
-    if (!mod || !*mod) return;
-    char clean[512];
-    if (mod[0] == '/' || mod[0] == '.') {
-        snprintf(clean, sizeof(clean), "%s", mod);
-    } else {
-        snprintf(clean, sizeof(clean), "%s/.local/lib/%s", home, mod);
-    }
-    size_t l = strlen(clean);
-    if (l > 3 && strcmp(clean + l - 3, ".so") == 0)
-        clean[l - 3] = '\0';
-    if (xy_load(clean) != XY_OK && mod[0] != '/') {
-        snprintf(clean, sizeof(clean), "%s", mod);
-        l = strlen(clean);
-        if (l > 3 && strcmp(clean + l - 3, ".so") == 0)
-            clean[l - 3] = '\0';
-        xy_load(clean);
-    }
-}
 
 static void ensure_jarvis_engine(void) {
     if (g_eng) return;
@@ -39,9 +20,7 @@ static void ensure_jarvis_engine(void) {
     char wm_buf[64] = {0};
     jarvis_rc_get("wm", "dwm", wm_buf, sizeof(wm_buf));
 
-    char wm_mod[128];
-    snprintf(wm_mod, sizeof(wm_mod), "mod_%s", wm_buf[0] ? wm_buf : "dwm");
-    load_wm_mod(home, wm_mod);
+    jarvis_load_mods(wm_buf, false);
 
     static char ont_path[512], ctx_path[512], sess_path[512], mem_path[512];
     char def_ont[512], def_mem[512], def_sess[512];
@@ -103,7 +82,9 @@ static int jarvis_tier0_hook(const char *prompt, char **out_op, char **out_outpu
     /* Check single/multi-clause high-confidence Tier-0 resolution */
     jarvis_world_t world;
     memset(&world, 0, sizeof(world));
+    world.browser_page[0] = '-';
     jarvis_xy_observe(&world);
+    world.browser_page[0] = '\0';
 
     const char *surf = "any";
     if (world.focused.wm_class[0]) {
@@ -153,7 +134,9 @@ static char *jarvis_context_hook(void) {
     ensure_jarvis_engine();
     jarvis_world_t w;
     memset(&w, 0, sizeof(w));
+    w.browser_page[0] = '-';
     jarvis_xy_observe(&w);
+    w.browser_page[0] = '\0';
 
     char wins[512] = {0};
     size_t woff = 0;
@@ -184,6 +167,9 @@ static int exec_dsl(const jarvis_dsl_t *dsl, char **out_result) {
     memset(&res, 0, sizeof(res));
     jarvis_xy_execute(dsl, &res);
     if (!res.handled) {
+        jarvis_desktop_execute_fallback(dsl, &res);
+    }
+    if (!res.handled) {
         *out_result = strdup("Error: operation not handled by active desktop adapter");
         return -1;
     }
@@ -195,101 +181,12 @@ static int exec_dsl(const jarvis_dsl_t *dsl, char **out_result) {
     return 0;
 }
 
-static int tool_workspace(const char *args, char **out_result) {
-    ensure_jarvis_engine();
-    jarvis_dsl_t dsl;
-    memset(&dsl, 0, sizeof(dsl));
-    if (strncasecmp(args, "move ", 5) == 0) {
-        snprintf(dsl.op, sizeof(dsl.op), "workspace_move_window");
-        dsl.args.workspace = atoi(args + 5);
-    } else {
-        snprintf(dsl.op, sizeof(dsl.op), "workspace_switch");
-        dsl.args.workspace = atoi(args);
-    }
-    return exec_dsl(&dsl, out_result);
-}
-
-static int tool_window(const char *args, char **out_result) {
-    ensure_jarvis_engine();
-    jarvis_dsl_t dsl;
-    memset(&dsl, 0, sizeof(dsl));
-    if (strcasecmp(args, "close") == 0) {
-        snprintf(dsl.op, sizeof(dsl.op), "window_close");
-        snprintf(dsl.target.kind, sizeof(dsl.target.kind), "window");
-    } else if (strcasecmp(args, "fullscreen") == 0) {
-        snprintf(dsl.op, sizeof(dsl.op), "window_fullscreen");
-    } else if (strcasecmp(args, "float") == 0) {
-        snprintf(dsl.op, sizeof(dsl.op), "window_float");
-    } else if (strncasecmp(args, "focus ", 6) == 0) {
-        const char *target = args + 6;
-        while (*target == ' ') target++;
-        if (strcasecmp(target, "other") == 0 || strcasecmp(target, "next") == 0 ||
-            strcasecmp(target, "previous") == 0 || strcasecmp(target, "master") == 0) {
-            snprintf(dsl.op, sizeof(dsl.op), "focus_relative_window");
-            snprintf(dsl.target.kind, sizeof(dsl.target.kind), "relative");
-            snprintf(dsl.target.relation, sizeof(dsl.target.relation), "%s", target);
-        } else {
-            snprintf(dsl.op, sizeof(dsl.op), "focus_window");
-            snprintf(dsl.target.identifier, sizeof(dsl.target.identifier), "%s", target);
-        }
-    } else {
-        *out_result = strdup("Error: usage: window <close|fullscreen|float|focus <target>>");
-        return -1;
-    }
-    return exec_dsl(&dsl, out_result);
-}
-
-static int tool_open_terminal(const char *args, char **out_result) {
-    ensure_jarvis_engine();
-    jarvis_dsl_t dsl;
-    memset(&dsl, 0, sizeof(dsl));
-    while (args && *args == ' ') args++;
-    if (args && *args) {
-        snprintf(dsl.op, sizeof(dsl.op), "spawn_shell_command");
-        snprintf(dsl.target.command, sizeof(dsl.target.command), "%s", args);
-        dsl.target.new_terminal = true;
-    } else {
-        snprintf(dsl.op, sizeof(dsl.op), "open_terminal");
-    }
-    return exec_dsl(&dsl, out_result);
-}
-
 static int tool_open_app(const char *args, char **out_result) {
     ensure_jarvis_engine();
     jarvis_dsl_t dsl;
     memset(&dsl, 0, sizeof(dsl));
     snprintf(dsl.op, sizeof(dsl.op), "open_application");
     snprintf(dsl.target.identifier, sizeof(dsl.target.identifier), "%s", args ? args : "");
-    return exec_dsl(&dsl, out_result);
-}
-
-static int tool_browser(const char *args, char **out_result) {
-    ensure_jarvis_engine();
-    jarvis_dsl_t dsl;
-    memset(&dsl, 0, sizeof(dsl));
-    while (args && *args == ' ') args++;
-    if (!args || !*args) {
-        snprintf(dsl.op, sizeof(dsl.op), "inspect_browser");
-        return exec_dsl(&dsl, out_result);
-    }
-    if (strncasecmp(args, "tab ", 4) == 0) {
-        const char *q = args + 4;
-        while (*q == ' ') q++;
-        snprintf(dsl.op, sizeof(dsl.op), "focus_tab");
-        snprintf(dsl.target.query, sizeof(dsl.target.query), "%s", q);
-    } else if (strncasecmp(args, "url ", 4) == 0) {
-        snprintf(dsl.op, sizeof(dsl.op), "open_url");
-        snprintf(dsl.target.url, sizeof(dsl.target.url), "%s", args + 4);
-    } else if (strncasecmp(args, "search ", 7) == 0) {
-        snprintf(dsl.op, sizeof(dsl.op), "search_web");
-        snprintf(dsl.target.query, sizeof(dsl.target.query), "%s", args + 7);
-    } else if (strncmp(args, "http://", 7) == 0 || strncmp(args, "https://", 8) == 0) {
-        snprintf(dsl.op, sizeof(dsl.op), "open_url");
-        snprintf(dsl.target.url, sizeof(dsl.target.url), "%s", args);
-    } else {
-        snprintf(dsl.op, sizeof(dsl.op), "search_web");
-        snprintf(dsl.target.query, sizeof(dsl.target.query), "%s", args);
-    }
     return exec_dsl(&dsl, out_result);
 }
 
@@ -479,11 +376,7 @@ XY_MODULE_API void xy_install(void) {
     ren_register_tier0(jarvis_tier0_hook);
     ren_register_context_provider(jarvis_context_hook);
 
-    ren_register_tool("workspace", "workspace <1..9 | move 1..9>", tool_workspace);
-    ren_register_tool("window", "window <close | fullscreen | float | focus <class_or_title|other|next|previous>>", tool_window);
-    ren_register_tool("open_terminal", "open_terminal [command]", tool_open_terminal);
     ren_register_tool("open_app", "open_app <application_name>", tool_open_app);
-    ren_register_tool("browser", "browser <tab <title_or_url_substring> | url <https://...> | search <query>>", tool_browser);
     ren_register_tool("media", "media <play [query] | pause | next | prev | volume_up | volume_down | mute>", tool_media);
     ren_register_tool("inspect", "inspect <terminal [focused|other] | browser [filter_query] | windows | clipboard | system [aspect]>", tool_inspect);
     ren_register_tool("input", "input <send <contact_or_entry> | <text> | submit <text> | type <text> | key <combo> | click <x y | element_label> | scroll <up|down|left|right> [amount]>", tool_input);

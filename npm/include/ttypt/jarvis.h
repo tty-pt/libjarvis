@@ -314,6 +314,17 @@ int jarvis_rc_get_int(const char *key, int fallback);
 bool jarvis_rc_set(const char *key, const char *value);
 
 /**
+ * @brief Load desktop, browser, X11, WM, and optional TTS libxylem adapter modules.
+ *
+ * Reads `$JARVIS_MODS` / `~/.jarvisrc` (`mods = ...`) and `~/.config/jarvis/mods.load`,
+ * searching `~/.local/lib/`, `~/.local/lib/dwm/`, `~/.local/lib/jarvis/`, and standard paths,
+ * then ensures WM, `jarvis-firefox`, `jarvis-x11`, and (when @p include_tts) `mod_tts` are loaded.
+ *
+ * @return Number of newly loaded adapter modules.
+ */
+int jarvis_load_mods(const char *wm, bool include_tts);
+
+/**
  * @brief Create a Jarvis orchestrator engine instance.
  */
 jarvis_engine_t *jarvis_engine_create(const jarvis_config_t *cfg);
