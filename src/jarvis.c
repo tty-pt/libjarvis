@@ -248,17 +248,62 @@ static void restart_daemon(bool was_active)
 	notify_status_bar();
 }
 
+static jarvis_ontology_t *get_cli_ont(void)
+{
+	static int loaded = 0;
+	static jarvis_ontology_t *s_ont = NULL;
+	if (!loaded) {
+		loaded = 1;
+		const char *home = getenv("HOME");
+		char def_ont[512] = {0};
+		if (home && *home)
+			snprintf(def_ont, sizeof(def_ont), "%s/.config/jarvis/ontology.json", home);
+		char ont_path[512] = {0};
+		jarvis_rc_get("ontology_path", def_ont, ont_path, sizeof(ont_path));
+		if (ont_path[0])
+			s_ont = jarvis_ontology_create(ont_path);
+	}
+	return s_ont;
+}
+
+static void get_cli_wake_word(const jarvis_ontology_t *ont, char *out, size_t out_sz)
+{
+	if (!out || out_sz == 0) return;
+	const char *ont_wake = ont ? jarvis_ontology_get_wake_word(ont) : NULL;
+	if (!ont_wake || !*ont_wake) ont_wake = "assistant";
+	jarvis_rc_get("wake_word", ont_wake, out, out_sz);
+	if (!out[0]) snprintf(out, out_sz, "%s", ont_wake);
+}
+
+static void get_cli_default_lang(const jarvis_ontology_t *ont, char *out, size_t out_sz)
+{
+	if (!out || out_sz == 0) return;
+	const char *ont_lang = ont ? jarvis_ontology_get_lang(ont) : NULL;
+	if (!ont_lang || !*ont_lang) ont_lang = "en";
+	jarvis_rc_get("lang", ont_lang, out, out_sz);
+	if (!out[0]) snprintf(out, out_sz, "%s", ont_lang);
+}
+
+static void get_cli_default_voice(const jarvis_ontology_t *ont, char *out, size_t out_sz)
+{
+	char lang[32];
+	get_cli_default_lang(ont, lang, sizeof(lang));
+	const char *def_voice = (strncmp(lang, "pt", 2) == 0) ? "pm_tuga" : "bm_daniel";
+	jarvis_rc_get("tts_voice", def_voice, out, out_sz);
+	if (!out[0]) snprintf(out, out_sz, "%s", def_voice);
+}
+
 static void do_jarvis_start(bool quiet)
 {
 	(void)system("wpctl set-mute @DEFAULT_AUDIO_SOURCE@ 0 2>/dev/null || true");
 	ensure_daemon_running(true);
 	notify_status_bar();
 	if (!quiet) {
-		char wake[64];
-		jarvis_rc_get("wake_word", "jarbas", wake, sizeof(wake));
-		char title[128], body[256];
-		snprintf(title, sizeof(title), "  %c%s Ativo", toupper((unsigned char)wake[0]), wake + 1);
-		snprintf(body, sizeof(body), "Diga “%s” a qualquer momento, ou “%s, bloquear” para desligar.", wake, wake);
+		const jarvis_ontology_t *ont = get_cli_ont();
+		char wake[64], title[128], body[256];
+		get_cli_wake_word(ont, wake, sizeof(wake));
+		jarvis_ontology_format_ui(ont, "active_title", wake, "  {Wake} Active", title, sizeof(title));
+		jarvis_ontology_format_ui(ont, "active_body", wake, "Say “{wake}” anytime, or “{wake}, lockdown” to stop.", body, sizeof(body));
 		jarvis_xy_notify(title, body, 0);
 	}
 }
@@ -269,11 +314,12 @@ static void do_jarvis_stop(bool quiet)
 	daemon_cmd("JARVIS_OFF", resp, sizeof(resp));
 	notify_status_bar();
 	if (!quiet) {
-		char wake[64];
-		jarvis_rc_get("wake_word", "jarbas", wake, sizeof(wake));
-		char title[128];
-		snprintf(title, sizeof(title), "  %c%s Desligado", toupper((unsigned char)wake[0]), wake + 1);
-		jarvis_xy_notify(title, "Escuta de microfone desativada.", 0);
+		const jarvis_ontology_t *ont = get_cli_ont();
+		char wake[64], title[128], body[256];
+		get_cli_wake_word(ont, wake, sizeof(wake));
+		jarvis_ontology_format_ui(ont, "disabled_title", wake, "  {Wake} Disabled", title, sizeof(title));
+		jarvis_ontology_format_ui(ont, "mic_disabled_body", wake, "Microphone listening disabled.", body, sizeof(body));
+		jarvis_xy_notify(title, body, 0);
 	}
 }
 
@@ -281,7 +327,12 @@ static void do_jarvis_lockdown(bool quiet)
 {
 	do_jarvis_stop(true);
 	if (!quiet) {
-		jarvis_xy_notify("  Bloqueio", "Escuta desativada e a bloquear o ecrã...", 0);
+		const jarvis_ontology_t *ont = get_cli_ont();
+		char wake[64], title[128], body[256];
+		get_cli_wake_word(ont, wake, sizeof(wake));
+		jarvis_ontology_format_ui(ont, "lockdown_short_title", wake, "  Lockdown", title, sizeof(title));
+		jarvis_ontology_format_ui(ont, "lockdown_short_body", wake, "Listening disabled and locking screen...", body, sizeof(body));
+		jarvis_xy_notify(title, body, 0);
 	}
 	char lock_cmd[256];
 	jarvis_rc_get("lock_cmd", "slock", lock_cmd, sizeof(lock_cmd));
@@ -295,37 +346,67 @@ static void do_jarvis_lockdown(bool quiet)
 
 static void do_jarvis_menu(void)
 {
+	const jarvis_ontology_t *ont = get_cli_ont();
 	bool running = is_daemon_listening();
 	int tts_on = jarvis_rc_get_int("tts_enabled", 1);
 	char voice[64], lang[32], model_path[512], wake[64];
-	jarvis_rc_get("tts_voice", "pm_alex", voice, sizeof(voice));
-	jarvis_rc_get("lang", "pt-pt", lang, sizeof(lang));
+	get_cli_default_voice(ont, voice, sizeof(voice));
+	get_cli_default_lang(ont, lang, sizeof(lang));
 	jarvis_rc_get("whisper_model", "ggml-base-q8_0.bin", model_path, sizeof(model_path));
-	jarvis_rc_get("wake_word", "jarbas", wake, sizeof(wake));
+	get_cli_wake_word(ont, wake, sizeof(wake));
 	int fms = jarvis_rc_get_int("followup_ms", 8000);
 
 	const char *model_base = strrchr(model_path, '/');
 	model_base = model_base ? (model_base + 1) : model_path;
 
+	char st_on[64], st_off[64], fw_always[96], fw_conv[64], fw_strict[64];
+	char lbl_wake[64], lbl_voice[64];
+	char it_toggle[128], it_tts[128], it_fw[128], it_lock[128], it_lang[128];
+	char it_model[128], it_dmenu[128], it_clear[128], it_ren[128], it_rc[128];
+	jarvis_ontology_format_ui(ont, "menu_state_on", wake, "ON", st_on, sizeof(st_on));
+	jarvis_ontology_format_ui(ont, "menu_state_off", wake, "OFF", st_off, sizeof(st_off));
+	jarvis_ontology_format_ui(ont, "menu_followup_always", wake, "Always-On", fw_always, sizeof(fw_always));
+	jarvis_ontology_format_ui(ont, "menu_followup_conv", wake, "Conversational", fw_conv, sizeof(fw_conv));
+	jarvis_ontology_format_ui(ont, "menu_followup_strict", wake, "Strict", fw_strict, sizeof(fw_strict));
+	jarvis_ontology_format_ui(ont, "menu_wake_label", wake, "wake", lbl_wake, sizeof(lbl_wake));
+	jarvis_ontology_format_ui(ont, "menu_voice_label", wake, "voice", lbl_voice, sizeof(lbl_voice));
+	jarvis_ontology_format_ui(ont, "menu_item_toggle", wake, "1. Toggle Listening", it_toggle, sizeof(it_toggle));
+	jarvis_ontology_format_ui(ont, "menu_item_tts", wake, "2. Neural TTS Voice", it_tts, sizeof(it_tts));
+	jarvis_ontology_format_ui(ont, "menu_item_followup", wake, "3. Follow-up Window", it_fw, sizeof(it_fw));
+	jarvis_ontology_format_ui(ont, "menu_item_lock", wake, "4. Lockdown (Disable Listening + Lock Screen)", it_lock, sizeof(it_lock));
+	jarvis_ontology_format_ui(ont, "menu_item_lang", wake, "5. Whisper / TTS Language", it_lang, sizeof(it_lang));
+	jarvis_ontology_format_ui(ont, "menu_item_model", wake, "6. Whisper Model", it_model, sizeof(it_model));
+	jarvis_ontology_format_ui(ont, "menu_item_dmenu", wake, "7. Semantic Command Bar", it_dmenu, sizeof(it_dmenu));
+	jarvis_ontology_format_ui(ont, "menu_item_clear", wake, "8. Clear Learned Shortcuts & Cache", it_clear, sizeof(it_clear));
+	jarvis_ontology_format_ui(ont, "menu_item_ren", wake, "9. Open ren Terminal (dwm-jarvis)", it_ren, sizeof(it_ren));
+	jarvis_ontology_format_ui(ont, "menu_item_rc", wake, "10. Edit ~/.jarvisrc", it_rc, sizeof(it_rc));
+
 	char items[2048];
 	snprintf(items, sizeof(items),
-		"1. Alternar Escuta (%s — palavra: “%s”)\n"
-		"2. Voz Neural TTS: %s (voz: %s)\n"
-		"3. Janela de Seguimento: %s (%d ms)\n"
-		"4. Bloquear (Desligar Escuta + Bloquear Ecrã)\n"
-		"5. Idioma Whisper / TTS: %s\n"
-		"6. Modelo Whisper: %s\n"
-		"7. Barra de Comandos Semântica\n"
-		"8. Limpar Atalhos e Cache Aprendidos\n"
-		"9. Abrir Terminal ren (dwm-jarvis)\n"
-		"10. Editar ~/.jarvisrc",
-		running ? "ATIVO [Amarelo]" : "DESLIGADO [Prata]", wake,
-		tts_on ? "ATIVO" : "DESLIGADO", voice,
-		fms >= 3600000 ? "Modo Sem Palavra de Ativação" : (fms > 0 ? "Conversacional" : "Estrito"), fms,
-		lang, model_base);
+		"%s (%s — %s: “%s”)\n"
+		"%s: %s (%s: %s)\n"
+		"%s: %s (%d ms)\n"
+		"%s\n"
+		"%s: %s\n"
+		"%s: %s\n"
+		"%s\n"
+		"%s\n"
+		"%s\n"
+		"%s",
+		it_toggle, running ? st_on : st_off, lbl_wake, wake,
+		it_tts, tts_on ? st_on : st_off, lbl_voice, voice,
+		it_fw, fms >= 3600000 ? fw_always : (fms > 0 ? fw_conv : fw_strict), fms,
+		it_lock,
+		it_lang, lang,
+		it_model, model_base,
+		it_dmenu,
+		it_clear,
+		it_ren,
+		it_rc);
 
-	char choice[512] = {0};
-	if (jarvis_xy_prompt(" Jarbas:", items, choice, sizeof(choice)) <= 0 || !choice[0]) {
+	char mprompt[128], choice[512] = {0};
+	jarvis_ontology_format_ui(ont, "menu_prompt", wake, " {Wake}:", mprompt, sizeof(mprompt));
+	if (jarvis_xy_prompt(mprompt, items, choice, sizeof(choice)) <= 0 || !choice[0]) {
 		return;
 	}
 
@@ -333,91 +414,111 @@ static void do_jarvis_menu(void)
 		if (running) do_jarvis_stop(false);
 		else do_jarvis_start(false);
 	} else if (strncmp(choice, "2.", 2) == 0) {
-		const char *vitems =
-			"pm_tuga                      (Português de Portugal — Masculino, Tuga)\n"
-			"pm_alex                      (Português — Masculino, Alex)\n"
-			"pm_santa                     (Português — Masculino, Santa)\n"
-			"pf_dora                      (Português — Feminino, Dora)\n"
+		char v_off[128], vprompt[128], vitems[1536];
+		jarvis_ontology_format_ui(ont, "menu_voice_off", wake, "off                          (Disable Neural TTS Voice)", v_off, sizeof(v_off));
+		jarvis_ontology_format_ui(ont, "voice_prompt", wake, "🗣 TTS Voice:", vprompt, sizeof(vprompt));
+		snprintf(vitems, sizeof(vitems),
+			"pm_tuga                      (Português de Portugal — Male, Tuga)\n"
+			"pm_alex                      (Português — Male, Alex)\n"
+			"pm_santa                     (Português — Male, Santa)\n"
+			"pf_dora                      (Português — Female, Dora)\n"
 			"bm_daniel                    (English — British Male, Daniel)\n"
 			"bm_george                    (English — British Male, George)\n"
 			"bm_lewis                     (English — British Male, Lewis)\n"
 			"bf_emma                      (English — British Female, Emma)\n"
 			"am_michael                   (English — American Male, Michael)\n"
 			"af_heart                     (English — American Female, Heart)\n"
-			"off                          (Desativar Voz Neural TTS)";
+			"%s", v_off);
 		char vchoice[256] = {0};
-		if (jarvis_xy_prompt("🗣 Voz TTS:", vitems, vchoice, sizeof(vchoice)) > 0 && vchoice[0]) {
+		if (jarvis_xy_prompt(vprompt, vitems, vchoice, sizeof(vchoice)) > 0 && vchoice[0]) {
 			char vid[64] = {0};
 			sscanf(vchoice, "%63s", vid);
 			if (strcmp(vid, "off") == 0) {
 				jarvis_rc_set("tts_enabled", "0");
-				char resp[64];
+				char resp[64], ttitle[128], tbody[256];
 				daemon_cmd("TTS_INTERRUPT", resp, sizeof(resp));
-				jarvis_xy_notify("🗣  Voz Neural Desativada", "Modo silencioso ativo.", 0);
+				jarvis_ontology_format_ui(ont, "tts_off_title", wake, "🗣  Neural Voice Disabled", ttitle, sizeof(ttitle));
+				jarvis_ontology_format_ui(ont, "tts_off_body", wake, "Silent mode active.", tbody, sizeof(tbody));
+				jarvis_xy_notify(ttitle, tbody, 0);
 			} else if (vid[0]) {
 				jarvis_rc_set("tts_enabled", "1");
 				jarvis_rc_set("tts_voice", vid);
 				const char *tlang = (vid[0] == 'p') ? "pt-pt" : ((vid[0] == 'a') ? "en-us" : "en-gb-x-rp");
 				jarvis_rc_set("tts_lang", tlang);
-				jarvis_xy_notify("🗣  Voz Neural Ativa", vid, 0);
-				char resp[64];
-				daemon_cmd("TTS_SPEAK|Às suas ordens.", resp, sizeof(resp));
+				char ttitle[128], greet[128], cmd_sp[192], resp[64];
+				jarvis_ontology_format_ui(ont, "tts_on_title", wake, "🗣  Neural Voice Active", ttitle, sizeof(ttitle));
+				jarvis_xy_notify(ttitle, vid, 0);
+				jarvis_ontology_format_ui(ont, "tts_greeting", wake, "Ready.", greet, sizeof(greet));
+				snprintf(cmd_sp, sizeof(cmd_sp), "TTS_SPEAK|%s", greet);
+				daemon_cmd(cmd_sp, resp, sizeof(resp));
 			}
 		}
 	} else if (strncmp(choice, "3.", 2) == 0) {
-		const char *fitems =
-			"8000     (8s Janela de Seguimento — sem repetir a palavra de ativação)\n"
-			"15000    (15s Janela de Seguimento Prolongada)\n"
-			"3600000  (Modo Contínuo — falar diretamente sem palavra de ativação)\n"
-			"0        (Modo Estrito — exigir sempre a palavra de ativação)";
+		char f8[160], f15[160], fc[160], fs[160], fprompt[128], fitems[768];
+		jarvis_ontology_format_ui(ont, "menu_followup_8s", wake, "8000     (8s Follow-up Window — no wake word needed)", f8, sizeof(f8));
+		jarvis_ontology_format_ui(ont, "menu_followup_15s", wake, "15000    (15s Extended Follow-up Window)", f15, sizeof(f15));
+		jarvis_ontology_format_ui(ont, "menu_followup_cont", wake, "3600000  (Continuous Mode — speak directly without wake word)", fc, sizeof(fc));
+		jarvis_ontology_format_ui(ont, "menu_followup_strict_opt", wake, "0        (Strict Mode — always require wake word)", fs, sizeof(fs));
+		jarvis_ontology_format_ui(ont, "followup_prompt", wake, "🎙 Follow-up:", fprompt, sizeof(fprompt));
+		snprintf(fitems, sizeof(fitems), "%s\n%s\n%s\n%s", f8, f15, fc, fs);
 		char fchoice[256] = {0};
-		if (jarvis_xy_prompt("🎙 Seguimento:", fitems, fchoice, sizeof(fchoice)) > 0 && fchoice[0]) {
+		if (jarvis_xy_prompt(fprompt, fitems, fchoice, sizeof(fchoice)) > 0 && fchoice[0]) {
 			char fval[32] = {0};
 			sscanf(fchoice, "%31s", fval);
 			if (fval[0]) {
+				char ftitle[128];
 				jarvis_rc_set("followup_ms", fval);
-				jarvis_xy_notify("🎙  Janela de Seguimento", fval, 0);
+				jarvis_ontology_format_ui(ont, "followup_title", wake, "🎙  Follow-up Window", ftitle, sizeof(ftitle));
+				jarvis_xy_notify(ftitle, fval, 0);
 			}
 		}
 	} else if (strncmp(choice, "4.", 2) == 0) {
 		do_jarvis_lockdown(false);
 	} else if (strncmp(choice, "5.", 2) == 0) {
-		const char *lang_items =
-			"pt-pt (Português Europeu)\n"
+		char l_kbd[128], l_auto[128], lprompt[128], lang_items[512];
+		jarvis_ontology_format_ui(ont, "menu_lang_kbd", wake, "kbd   (Follow keyboard layout automatically)", l_kbd, sizeof(l_kbd));
+		jarvis_ontology_format_ui(ont, "menu_lang_auto", wake, "auto  (Whisper auto-detect)", l_auto, sizeof(l_auto));
+		jarvis_ontology_format_ui(ont, "lang_prompt", wake, "🌐 Language:", lprompt, sizeof(lprompt));
+		snprintf(lang_items, sizeof(lang_items),
 			"en    (English)\n"
+			"pt-pt (Português Europeu)\n"
 			"es    (Español)\n"
 			"fr    (Français)\n"
 			"de    (Deutsch)\n"
-			"kbd   (Seguir layout do teclado automaticamente)\n"
-			"auto  (Deteção automática Whisper)";
+			"%s\n%s", l_kbd, l_auto);
 		char gchoice[256] = {0};
-		if (jarvis_xy_prompt("🌐 Idioma:", lang_items, gchoice, sizeof(gchoice)) > 0 && gchoice[0]) {
+		if (jarvis_xy_prompt(lprompt, lang_items, gchoice, sizeof(gchoice)) > 0 && gchoice[0]) {
 			char gval[32] = {0};
 			sscanf(gchoice, "%31s", gval);
 			if (gval[0]) {
+				char ltitle[128];
 				jarvis_rc_set("lang", gval);
 				if (strncmp(gval, "pt", 2) == 0) jarvis_rc_set("tts_lang", "pt-pt");
 				else if (strncmp(gval, "en", 2) == 0) jarvis_rc_set("tts_lang", "en-gb-x-rp");
-				jarvis_xy_notify("🌐  Idioma Atualizado", gval, 0);
+				jarvis_ontology_format_ui(ont, "lang_updated_title", wake, "🌐  Language Updated", ltitle, sizeof(ltitle));
+				jarvis_xy_notify(ltitle, gval, 0);
 			}
 		}
 	} else if (strncmp(choice, "6.", 2) == 0) {
-		const char *mitems =
-			"ggml-base-q8_0.bin           (78 MB  - Multilingue Rápido Q8)\n"
-			"ggml-small-q8_0.bin          (252 MB - Multilingue Alta Precisão Q8)\n"
-			"ggml-small-q5_1.bin          (182 MB - Multilingue Q5)\n"
-			"ggml-base.en-q8_0.bin        (78 MB  - Inglês Apenas Ultra-Rápido)";
+		char m1[128], m2[128], m3[128], m4[128], wprompt[128], mitems[640];
+		jarvis_ontology_format_ui(ont, "menu_model_base_q8", wake, "ggml-base-q8_0.bin           (78 MB  - Fast Multilingual Q8)", m1, sizeof(m1));
+		jarvis_ontology_format_ui(ont, "menu_model_small_q8", wake, "ggml-small-q8_0.bin          (252 MB - High-Accuracy Multilingual Q8)", m2, sizeof(m2));
+		jarvis_ontology_format_ui(ont, "menu_model_small_q5", wake, "ggml-small-q5_1.bin          (182 MB - Multilingual Q5)", m3, sizeof(m3));
+		jarvis_ontology_format_ui(ont, "menu_model_en_q8", wake, "ggml-base.en-q8_0.bin        (78 MB  - English-Only Fast Q8)", m4, sizeof(m4));
+		jarvis_ontology_format_ui(ont, "whisper_prompt", wake, "🧠 Whisper Model:", wprompt, sizeof(wprompt));
+		snprintf(mitems, sizeof(mitems), "%s\n%s\n%s\n%s", m1, m2, m3, m4);
 		char mchoice[256] = {0};
-		if (jarvis_xy_prompt("🧠 Modelo Whisper:", mitems, mchoice, sizeof(mchoice)) > 0 && mchoice[0]) {
+		if (jarvis_xy_prompt(wprompt, mitems, mchoice, sizeof(mchoice)) > 0 && mchoice[0]) {
 			char mfile[128] = {0};
 			sscanf(mchoice, "%127s", mfile);
 			if (mfile[0]) {
 				const char *home = getenv("HOME");
-				char full_m[512];
+				char full_m[512], wtitle[128];
 				snprintf(full_m, sizeof(full_m), "%s/.local/share/whisper/%s", home ? home : "", mfile);
 				jarvis_rc_set("whisper_model", full_m);
 				restart_daemon(running);
-				jarvis_xy_notify("🧠  Modelo Whisper Ativo", mfile, 0);
+				jarvis_ontology_format_ui(ont, "whisper_updated_title", wake, "🧠  Whisper Model Active", wtitle, sizeof(wtitle));
+				jarvis_xy_notify(wtitle, mfile, 0);
 			}
 		}
 	} else if (strncmp(choice, "7.", 2) == 0) {
@@ -666,22 +767,30 @@ int main(int argc, char **argv)
 			return 0;
 		}
 		if (strcmp(subcmd, "tts-on") == 0) {
+			const jarvis_ontology_t *ont = get_cli_ont();
 			jarvis_rc_set("tts_enabled", "1");
 			if (subarg && *subarg) {
 				jarvis_rc_set("tts_voice", subarg);
 			}
-			char v[64];
-			jarvis_rc_get("tts_voice", "pm_alex", v, sizeof(v));
-			if (!quiet) jarvis_xy_notify("🗣  Voz Neural Ativa", v, 0);
-			char resp[64];
-			daemon_cmd("TTS_SPEAK|Às suas ordens.", resp, sizeof(resp));
+			char v[64], wake[64], ttitle[128], greet[128], cmd_sp[192], resp[64];
+			get_cli_default_voice(ont, v, sizeof(v));
+			get_cli_wake_word(ont, wake, sizeof(wake));
+			jarvis_ontology_format_ui(ont, "tts_on_title", wake, "🗣  Neural Voice Active", ttitle, sizeof(ttitle));
+			if (!quiet) jarvis_xy_notify(ttitle, v, 0);
+			jarvis_ontology_format_ui(ont, "tts_greeting", wake, "Ready.", greet, sizeof(greet));
+			snprintf(cmd_sp, sizeof(cmd_sp), "TTS_SPEAK|%s", greet);
+			daemon_cmd(cmd_sp, resp, sizeof(resp));
 			return 0;
 		}
 		if (strcmp(subcmd, "tts-off") == 0) {
+			const jarvis_ontology_t *ont = get_cli_ont();
 			jarvis_rc_set("tts_enabled", "0");
-			char resp[64];
+			char resp[64], wake[64], ttitle[128], tbody[256];
+			get_cli_wake_word(ont, wake, sizeof(wake));
 			daemon_cmd("TTS_INTERRUPT", resp, sizeof(resp));
-			if (!quiet) jarvis_xy_notify("🗣  Voz Neural Desativada", "Modo silencioso ativo.", 0);
+			jarvis_ontology_format_ui(ont, "tts_off_title", wake, "🗣  Neural Voice Disabled", ttitle, sizeof(ttitle));
+			jarvis_ontology_format_ui(ont, "tts_off_body", wake, "Silent mode active.", tbody, sizeof(tbody));
+			if (!quiet) jarvis_xy_notify(ttitle, tbody, 0);
 			return 0;
 		}
 #endif
@@ -729,14 +838,18 @@ int main(int argc, char **argv)
 		}
 		if (strcmp(subcmd, "notify") == 0) {
 			if (utterance[0]) {
+				const jarvis_ontology_t *ont = get_cli_ont();
+				char wake[64], ntitle[128];
+				get_cli_wake_word(ont, wake, sizeof(wake));
+				jarvis_ontology_format_ui(ont, "notify_title", wake, "  {Wake}", ntitle, sizeof(ntitle));
 #ifndef _WIN32
 				char cmd[1024], resp[64];
-				snprintf(cmd, sizeof(cmd), "TTS_NOTIFY| Jarbas|%s", utterance);
+				snprintf(cmd, sizeof(cmd), "TTS_NOTIFY|%s|%s", ntitle, utterance);
 				if (!daemon_cmd(cmd, resp, sizeof(resp)))
 #endif
 				{
 					if (!quiet)
-						jarvis_xy_notify(" Jarbas", utterance, 1);
+						jarvis_xy_notify(ntitle, utterance, 1);
 					jarvis_xy_speak_clause("notify", utterance, 2);
 				}
 			}
@@ -749,9 +862,14 @@ int main(int argc, char **argv)
 			if (emb_path[0]) unlink(emb_path);
 #endif
 			if (!quiet) {
-				jarvis_xy_notify("  Cache Limpa", "Caches de contexto e embeddings limpas.", 0);
+				const jarvis_ontology_t *ont = get_cli_ont();
+				char wake[64], ctitle[128], cbody[256];
+				get_cli_wake_word(ont, wake, sizeof(wake));
+				jarvis_ontology_format_ui(ont, "cache_cleared_title", wake, "  Cache Cleared", ctitle, sizeof(ctitle));
+				jarvis_ontology_format_ui(ont, "cache_cleared_body", wake, "Context and embedding caches cleared.", cbody, sizeof(cbody));
+				jarvis_xy_notify(ctitle, cbody, 0);
 			}
-			printf("Cleared Jarvis caches\n");
+			printf("Cleared caches\n");
 			return 0;
 		}
 		if (strcmp(subcmd, "warmup") == 0) {
@@ -759,10 +877,14 @@ int main(int argc, char **argv)
 			jarvis_engine_destroy(w_eng);
 			return 0;
 		} else if (strcmp(subcmd, "dmenu") == 0 || strcmp(subcmd, "omni") == 0) {
+			const jarvis_ontology_t *ont = get_cli_ont();
+			char wake[64], dprompt[128];
+			get_cli_wake_word(ont, wake, sizeof(wake));
+			jarvis_ontology_format_ui(ont, "dmenu_prompt", wake, " {Wake}:", dprompt, sizeof(dprompt));
 			char candidates[4096];
 			build_prompt_candidates(fs_path, candidates, sizeof(candidates));
 			char selection[512] = {0};
-			if (jarvis_xy_prompt(" Jarbas:", candidates, selection, sizeof(selection)) <= 0 || !selection[0]) {
+			if (jarvis_xy_prompt(dprompt, candidates, selection, sizeof(selection)) <= 0 || !selection[0]) {
 				return 0;
 			}
 			char *arrow = strstr(selection, "▸");
@@ -823,16 +945,23 @@ int main(int argc, char **argv)
 		printf("%s\n", jbuf);
 	} else if (!ok) {
 		if (!quiet) {
-			char body[560];
+			const jarvis_ontology_t *ont = jarvis_engine_get_ontology(eng);
+			char wake[64], utitle[128], body[560];
+			get_cli_wake_word(ont, wake, sizeof(wake));
+			jarvis_ontology_format_ui(ont, "unrecognized_title", wake, "  {Wake} — Unrecognized", utitle, sizeof(utitle));
 			snprintf(body, sizeof(body), "“%s”", utterance);
-			jarvis_xy_notify("  Jarbas — Não Reconhecido", body, 0);
+			jarvis_xy_notify(utitle, body, 0);
 		}
 		printf("Error: %s\n", res.error[0] ? res.error : "unresolved");
 	} else {
 		const char *out_msg = res.combined_result.output[0] ? res.combined_result.output : res.combined_result.error;
 		if (!quiet && strcmp(res.last_dsl.op, "answer_question") != 0) {
-			char title[256], body[1024];
-			snprintf(title, sizeof(title), "  Jarbas → %s (%s)",
+			const jarvis_ontology_t *ont = jarvis_engine_get_ontology(eng);
+			char wake[64], ntitle[128], title[256], body[1024];
+			get_cli_wake_word(ont, wake, sizeof(wake));
+			jarvis_ontology_format_ui(ont, "notify_title", wake, "  {Wake}", ntitle, sizeof(ntitle));
+			snprintf(title, sizeof(title), "%s → %s (%s)",
+			         ntitle,
 			         res.last_dsl.op[0] ? res.last_dsl.op : "action",
 			         res.source[0] ? res.source : "solver");
 			snprintf(body, sizeof(body), "“%.300s”\n▸ %.680s", utterance, out_msg);

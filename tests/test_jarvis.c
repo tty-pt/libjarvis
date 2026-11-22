@@ -1165,6 +1165,79 @@ static void test_11_conversation_continuity(void)
 	printf("  [PASS] Conversation continuity, Tier-0 fast-path, persistence, TTL pruning, >32KB chat JSON, and long TTS segmentation verified!\n");
 }
 
+static void test_12_i18n_and_wake_word_isolation(void)
+{
+	printf("Running test_12_i18n_and_wake_word_isolation...\n");
+
+	const char *custom_ont_json =
+		"{"
+		"\"wake_word\":\"komputer\","
+		"\"lang\":\"de\","
+		"\"whisper_echo_prefixes\":[\"was ist\"],"
+		"\"op_abort_phrases\":[\"stopp\",\"{wake} halt\"],"
+		"\"tts_interrupt_phrases\":[\"ruhe\"],"
+		"\"lockdown_phrases\":[\"{wake} schliessen\",\"sperren\",\"{wake} sperren\"],"
+		"\"screen_lock_keywords\":[\"sperren\"],"
+		"\"tier1_triggers\":[\" datei \",\" lesen \",\"explain\"],"
+		"\"ui_strings\":{\"notify_title\":\"AI {Wake}\",\"active_body\":\"Sag {wake}!\"}"
+		"}";
+
+	jarvis_ontology_t *kont = jarvis_ontology_create_from_json(custom_ont_json);
+	assert(kont != NULL);
+
+	assert(strcmp(jarvis_ontology_get_wake_word(kont), "komputer") == 0);
+	assert(strcmp(jarvis_ontology_get_lang(kont), "de") == 0);
+
+	/* Whisper echo prefix (no hardcoded "o que ") */
+	assert(jarvis_ontology_has_echo_prefix(kont, "was ist das"));
+	assert(!jarvis_ontology_has_echo_prefix(kont, "hallo welt"));
+
+	/* Op abort vs pure TTS interrupt + {wake} template expansion */
+	assert(jarvis_ontology_is_op_abort(kont, "Komputer, halt!", NULL));
+	assert(jarvis_ontology_is_op_abort(kont, "stopp", NULL));
+	assert(jarvis_ontology_is_op_abort(kont, "zort halt", "zort"));
+	assert(!jarvis_ontology_is_op_abort(kont, "ruhe", NULL));
+	assert(jarvis_ontology_is_tts_interrupt_ex(kont, "ruhe", NULL));
+	assert(jarvis_ontology_is_tts_interrupt_ex(kont, "stopp", NULL));
+
+	/* Lockdown + screen lock keywords + runtime wake override */
+	assert(jarvis_voice_is_lockdown_phrase_ex(kont, "komputer schliessen", NULL));
+	assert(jarvis_voice_is_lockdown_phrase_ex(kont, "zort schliessen", "zort"));
+	assert(!jarvis_voice_is_lockdown_phrase_ex(kont, "komputer schliessen", "zort"));
+	assert(jarvis_ontology_is_screen_lock_phrase(kont, "sperren"));
+	assert(!jarvis_ontology_is_screen_lock_phrase(kont, "komputer schliessen"));
+
+	/* Tier-1 trigger boundary matching */
+	assert(jarvis_ontology_matches_tier1_trigger(kont, "datei"));
+	assert(jarvis_ontology_matches_tier1_trigger(kont, "bitte datei lesen"));
+	assert(!jarvis_ontology_matches_tier1_trigger(kont, "kandidaten"));
+
+	/* UI string {Wake} / {wake} expansion */
+	char uibuf[128];
+	jarvis_ontology_format_ui(kont, "notify_title", "zort", "fallback", uibuf, sizeof(uibuf));
+	assert(strcmp(uibuf, "AI Zort") == 0);
+	jarvis_ontology_format_ui(kont, "active_body", "zort", "fallback", uibuf, sizeof(uibuf));
+	assert(strcmp(uibuf, "Sag zort!") == 0);
+	jarvis_ontology_format_ui(kont, "missing_key", "zort", "Hi {Wake} ({wake})", uibuf, sizeof(uibuf));
+	assert(strcmp(uibuf, "Hi Zort (zort)") == 0);
+
+	jarvis_ontology_destroy(kont);
+
+	/* Regression checks against bundled data/ontology.json */
+	jarvis_ontology_t *pt_ont = jarvis_ontology_create("../data/ontology.json");
+	assert(pt_ont != NULL);
+	assert(!jarvis_ontology_matches_tier1_trigger(pt_ont, "thread"));
+	assert(jarvis_ontology_matches_tier1_trigger(pt_ont, "please read this file"));
+	assert(jarvis_ontology_is_op_abort(pt_ont, "zort para", "zort"));
+	assert(!jarvis_ontology_is_op_abort(pt_ont, "cala-te", "zort"));
+	assert(jarvis_ontology_is_tts_interrupt_ex(pt_ont, "cala te", "zort"));
+	assert(jarvis_voice_is_lockdown_phrase_ex(pt_ont, "zort bloqueia", "zort"));
+	assert(jarvis_ontology_is_screen_lock_phrase(pt_ont, "zort bloquear"));
+	jarvis_ontology_destroy(pt_ont);
+
+	printf("  [PASS] Full language-agnostic & custom wake-word isolation verified!\n");
+}
+
 int main(void)
 {
 	assert(xy_load("./mock_adapter") == XY_OK);
@@ -1173,6 +1246,7 @@ int main(void)
 	jarvis_config_init(&cfg);
 	/* Test deterministically without external LLM latency first, using built-in solver + ReAct synthesizer */
 	cfg.infer_mode = JARVIS_INFER_NONE;
+	cfg.ontology_path = "../data/ontology.json";
 	char iso_mem[256];
 	snprintf(iso_mem, sizeof(iso_mem), "/tmp/jarvis_main_test_%d.json", (int)getpid());
 	cfg.memory_path = iso_mem;
@@ -1193,12 +1267,13 @@ int main(void)
 
 	jarvis_engine_destroy(eng);
 	test_11_conversation_continuity();
+	test_12_i18n_and_wake_word_isolation();
 
 	char cleanup_cmd[640];
 	snprintf(cleanup_cmd, sizeof(cleanup_cmd), "rm -rf %s %s.mm", iso_mem, iso_mem);
 	int rc = system(cleanup_cmd);
 	(void)rc;
 
-	printf("\n=== ALL 11 LIBJARVIS PARITY, MULTILINGUAL, CONVERSATION & LIBMM SUITES PASSED IN PURE C ===\n");
+	printf("\n=== ALL 12 LIBJARVIS PARITY, MULTILINGUAL, CONVERSATION & LIBMM SUITES PASSED IN PURE C ===\n");
 	return 0;
 }

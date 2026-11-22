@@ -89,14 +89,18 @@ bool               jarvis_normalize_dsl_val(const jjson_val_t *raw, jarvis_dsl_t
 #define JARVIS_MAX_CAP_SLOT_TYPES     4
 #define JARVIS_MAX_CAP_COMPILE_FIELDS 6
 #define JARVIS_MAX_CAP_PHRASES        24
-#define JARVIS_MAX_UI_STRINGS         32
+#define JARVIS_MAX_UI_STRINGS         96
 #define JARVIS_MAX_REPLY_TEMPLATES    48
 #define JARVIS_MAX_WAKE_VARIANTS      64
 #define JARVIS_MAX_POLITE_PREFIXES    48
 #define JARVIS_MAX_DICTATION_VERBS    32
 #define JARVIS_MAX_DEICTIC_PRONOUNS   32
 #define JARVIS_MAX_TTS_INTERRUPTS     64
-#define JARVIS_MAX_LOCKDOWN_PHRASES   32
+#define JARVIS_MAX_OP_ABORTS          96
+#define JARVIS_MAX_LOCKDOWN_PHRASES   48
+#define JARVIS_MAX_SCREEN_LOCK_KW     16
+#define JARVIS_MAX_ECHO_PREFIXES      16
+#define JARVIS_MAX_TIER1_TRIGGERS     64
 #define JARVIS_MAX_HALLUCINATIONS     64
 #define JARVIS_MAX_ARG_PREPS          48
 #define JARVIS_MAX_INTERROGATIVES     32
@@ -266,8 +270,20 @@ struct jarvis_ontology {
 	char                  tts_interrupts[JARVIS_MAX_TTS_INTERRUPTS][JARVIS_ID_LEN];
 	size_t                tts_interrupt_count;
 
+	char                  op_abort_phrases[JARVIS_MAX_OP_ABORTS][JARVIS_ID_LEN];
+	size_t                op_abort_count;
+
 	char                  lockdown_phrases[JARVIS_MAX_LOCKDOWN_PHRASES][JARVIS_ID_LEN];
 	size_t                lockdown_phrase_count;
+
+	char                  screen_lock_keywords[JARVIS_MAX_SCREEN_LOCK_KW][JARVIS_SHORT_LEN];
+	size_t                screen_lock_kw_count;
+
+	char                  echo_prefixes[JARVIS_MAX_ECHO_PREFIXES][JARVIS_SHORT_LEN];
+	size_t                echo_prefix_count;
+
+	char                  tier1_triggers[JARVIS_MAX_TIER1_TRIGGERS][JARVIS_SHORT_LEN];
+	size_t                tier1_trigger_count;
 
 	char                  hallucinations[JARVIS_MAX_HALLUCINATIONS][JARVIS_ID_LEN];
 	size_t                hallucination_count;
@@ -344,6 +360,7 @@ bool jarvis_ontology_is_polite_prefix(const jarvis_ontology_t *ont, const char *
 bool jarvis_ontology_is_dictation_verb(const jarvis_ontology_t *ont, const char *word);
 bool jarvis_ontology_is_deictic_pronoun(const jarvis_ontology_t *ont, const char *word);
 bool jarvis_ontology_is_tts_interrupt(const jarvis_ontology_t *ont, const char *clean_clause);
+bool jarvis_ontology_has_echo_prefix(const jarvis_ontology_t *ont, const char *clean_text);
 bool jarvis_ontology_is_interrogative(const jarvis_ontology_t *ont, const char *word);
 bool jarvis_ontology_clause_targets_other(const jarvis_ontology_t *ont, const char *clause);
 int  jarvis_ontology_extract_workspace_number(const jarvis_ontology_t *ont, const char *clause, int def_ws);

@@ -372,21 +372,33 @@ void jarvis_format_voice_reply(
 	out[w] = '\0';
 }
 
-bool jarvis_voice_is_lockdown_phrase(const char *phrase)
+bool jarvis_voice_is_lockdown_phrase_ex(
+	const jarvis_ontology_t *ont,
+	const char              *phrase,
+	const char              *custom_wake_word
+)
 {
 	if (!phrase) return false;
 	char clean[JARVIS_STR_LEN];
 	jarvis_clean_phrase(phrase, clean, sizeof(clean));
 	if (!clean[0]) return false;
 
-	const jarvis_ontology_t *ont = jarvis_voice_default_ontology();
+	if (!ont) ont = jarvis_voice_default_ontology();
 	if (!ont) return false;
+
+	const char *eff_wake = (custom_wake_word && *custom_wake_word)
+		? custom_wake_word
+		: (ont->wake_word[0] ? ont->wake_word : "");
+	char wake_clean[JARVIS_SHORT_LEN] = {0};
+	if (eff_wake[0])
+		jarvis_clean_phrase(eff_wake, wake_clean, sizeof(wake_clean));
 
 	/* Also normalize ASR polite tails and wake prefixes before matching */
 	char norm[JARVIS_STR_LEN], stripped[JARVIS_STR_LEN];
 	jarvis_ontology_normalize_asr(ont, NULL, clean, norm, sizeof(norm));
 	stripped[0] = '\0';
-	if (jarvis_voice_match_wake(ont, norm[0] ? norm : clean, NULL, false, stripped, sizeof(stripped)) != 2) {
+	if (jarvis_voice_match_wake(ont, norm[0] ? norm : clean, eff_wake[0] ? eff_wake : NULL,
+	                            false, stripped, sizeof(stripped)) != 2) {
 		stripped[0] = '\0';
 	}
 	const char *cands[3] = { clean, norm[0] ? norm : clean, stripped[0] ? stripped : clean };
@@ -394,7 +406,27 @@ bool jarvis_voice_is_lockdown_phrase(const char *phrase)
 	for (int c = 0; c < 3; c++) {
 		const char *p = cands[c];
 		for (size_t i = 0; i < ont->lockdown_phrase_count; i++) {
-			const char *lp = ont->lockdown_phrases[i];
+			const char *lp_raw = ont->lockdown_phrases[i];
+			if (!lp_raw[0]) continue;
+			char lp_exp[JARVIS_ID_LEN];
+			const char *tpl_pos = strstr(lp_raw, "{wake}");
+			if (tpl_pos) {
+				if (!wake_clean[0]) continue;
+				size_t w = 0;
+				for (size_t k = 0; lp_raw[k] && w + 1 < sizeof(lp_exp); ) {
+					if (strncmp(&lp_raw[k], "{wake}", 6) == 0) {
+						w += (size_t)snprintf(lp_exp + w, sizeof(lp_exp) - w, "%s", wake_clean);
+						k += 6;
+					} else {
+						lp_exp[w++] = lp_raw[k++];
+					}
+				}
+				lp_exp[w] = '\0';
+			} else {
+				snprintf(lp_exp, sizeof(lp_exp), "%s", lp_raw);
+			}
+			char lp[JARVIS_ID_LEN];
+			jarvis_clean_phrase(lp_exp, lp, sizeof(lp));
 			if (!lp[0]) continue;
 			if (strcmp(p, lp) == 0) return true;
 			if (strlen(p) >= 6 && strlen(lp) >= 6 &&
@@ -404,6 +436,11 @@ bool jarvis_voice_is_lockdown_phrase(const char *phrase)
 		}
 	}
 	return false;
+}
+
+bool jarvis_voice_is_lockdown_phrase(const char *phrase)
+{
+	return jarvis_voice_is_lockdown_phrase_ex(jarvis_voice_default_ontology(), phrase, NULL);
 }
 
 bool jarvis_voice_write_earcon_wav(const char *wav_path, bool is_done)

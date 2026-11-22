@@ -15,12 +15,14 @@
 #include <ttypt/xy.h>
 #include <ttypt/xy-mod.h>
 
+#include <arpa/inet.h>
 #include <ctype.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <malloc.h>
 #include <math.h>
+#include <netinet/in.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -29,6 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -311,6 +314,23 @@ static bool is_tts_enabled(void)
 	return true;
 }
 
+static void resolve_default_lang(char *out, size_t out_sz)
+{
+	const char *env_l = getenv("JARVIS_TTS_LANG");
+	if (env_l && *env_l) {
+		snprintf(out, out_sz, "%s", env_l);
+		return;
+	}
+	if (rc_lookup("tts_lang", out, out_sz) && out[0]) {
+		return;
+	}
+	if (rc_lookup("lang", out, out_sz) && out[0] &&
+	    strcmp(out, "kbd") != 0 && strcmp(out, "auto") != 0) {
+		return;
+	}
+	snprintf(out, out_sz, "en");
+}
+
 static void get_tts_voice(char *out, size_t out_sz)
 {
 	const char *env_v = getenv("JARVIS_VOICE");
@@ -321,7 +341,13 @@ static void get_tts_voice(char *out, size_t out_sz)
 	if (rc_lookup("tts_voice", out, out_sz) && out[0]) {
 		return;
 	}
-	snprintf(out, out_sz, "pm_tuga");
+	char def_lang[32];
+	resolve_default_lang(def_lang, sizeof(def_lang));
+	if (strncasecmp(def_lang, "pt", 2) == 0) {
+		snprintf(out, out_sz, "pm_tuga");
+	} else {
+		snprintf(out, out_sz, "bm_daniel");
+	}
 }
 
 static void set_mic_mute(bool muted)
@@ -374,7 +400,7 @@ static void write_tts_active_state(const char *text, bool active)
 	}
 }
 
-/* Notify jarvisd of TTS state changes (speaking/idle) via control socket */
+/* Notify jarvisd of TTS state changes (speaking/idle) via TCP control socket */
 
 static void
 write_all(int fd, const char *buf, size_t len)
@@ -388,20 +414,35 @@ write_all(int fd, const char *buf, size_t len)
 	}
 }
 
+static int resolve_daemon_port(void)
+{
+	const char *env_p = getenv("JARVIS_PORT");
+	if (env_p && *env_p) {
+		int p = atoi(env_p);
+		if (p > 0 && p <= 65535) return p;
+	}
+	char pbuf[32];
+	if (rc_lookup("port", pbuf, sizeof(pbuf)) && pbuf[0]) {
+		int p = atoi(pbuf);
+		if (p > 0 && p <= 65535) return p;
+	}
+	return 8179;
+}
+
 static void notify_tts_state(const char *state)
 {
-	const char *u = getenv("USER");
-	if (!u || !*u) u = "quirinpa";
-	char sock_path[128];
-	snprintf(sock_path, sizeof(sock_path), "/tmp/jarvis-control-%s.sock", u);
-
-	int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	int port = resolve_daemon_port();
+	int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
 	if (fd < 0) return;
 
-	struct sockaddr_un addr;
+	struct timeval tv = { .tv_sec = 0, .tv_usec = 200000 };
+	setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+	struct sockaddr_in addr;
 	memset(&addr, 0, sizeof(addr));
-	addr.sun_family = AF_UNIX;
-	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", sock_path);
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons((uint16_t)port);
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
 	if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
 		close(fd);
@@ -585,8 +626,23 @@ static int16_t lookup_vocab_id(const cp_id_t *table, uint32_t cp)
 static void normalize_espeak_voice(const char *in_voice, char *out_voice, size_t out_sz)
 {
 	if (!in_voice || !*in_voice) {
-		snprintf(out_voice, out_sz, "pt");
-		return;
+		char def_lang[32];
+		resolve_default_lang(def_lang, sizeof(def_lang));
+		in_voice = def_lang[0] ? def_lang : "en";
+		if (in_voice == def_lang) {
+			/* copy safely before recursion / fallthrough */
+			char tmp[32];
+			size_t i = 0;
+			for (; def_lang[i] && i + 1 < sizeof(tmp); i++) {
+				char c = (char)tolower((unsigned char)def_lang[i]);
+				tmp[i] = (c == '_') ? '-' : c;
+			}
+			tmp[i] = '\0';
+			if (strcmp(tmp, "pt-pt") == 0) snprintf(out_voice, out_sz, "pt");
+			else if (strcmp(tmp, "fr-fr") == 0) snprintf(out_voice, out_sz, "fr");
+			else snprintf(out_voice, out_sz, "%s", tmp);
+			return;
+		}
 	}
 	char tmp[32];
 	size_t i = 0;
@@ -620,9 +676,8 @@ static bool select_espeak_voice(const char *espeak_voice)
 		if (norm[0] && g_tts.espeak_SetVoice(norm) == 0) return true;
 	}
 
-	/* Fallback 2: European Portuguese ("pt") or English ("en") so translator is never NULL */
-	if (g_tts.espeak_SetVoice("pt") == 0) return true;
-	if (g_tts.espeak_SetVoice("en") == 0) return true;
+	/* Fallback 2: neutral English ("en") if configured locale is missing */
+	if (strcmp(norm, "en") != 0 && g_tts.espeak_SetVoice("en") == 0) return true;
 	return false;
 }
 
@@ -809,7 +864,11 @@ static bool tts_engine_ensure_loaded(const char *voice)
 			snprintf(model_path, sizeof(model_path), "%s/.local/share/piper/%s.onnx", home, p_name);
 		}
 	} else {
-		bool is_pt_voice = (!voice || !*voice || tolower((unsigned char)voice[0]) == 'p');
+		char def_lang[32];
+		resolve_default_lang(def_lang, sizeof(def_lang));
+		bool is_pt_voice = (voice && *voice)
+			? (tolower((unsigned char)voice[0]) == 'p')
+			: (strncasecmp(def_lang, "pt", 2) == 0);
 		snprintf(model_path, sizeof(model_path), "%s/.local/share/kokoro/kokoro-pt-pt.onnx", home);
 		if (is_pt_voice && access(model_path, R_OK) == 0 && access(voices_bin, R_OK) == 0) {
 			want_kokoro_pt = true;
@@ -836,8 +895,10 @@ static bool tts_engine_ensure_loaded(const char *voice)
 			tts_engine_unload();
 			return false;
 		}
+		char def_lang[32];
+		resolve_default_lang(def_lang, sizeof(def_lang));
 		if (g_tts.espeak_Init(0x02 /* AUDIO_OUTPUT_SYNCHRONOUS */, 0, NULL, 0) <= 0 ||
-		    !select_espeak_voice("pt")) {
+		    !select_espeak_voice(def_lang)) {
 			tts_engine_unload();
 			return false;
 		}
@@ -1004,11 +1065,18 @@ static void resolve_espeak_lang(const char *voice, bool is_piper, char *out_lang
 		return;
 	}
 
+	if (!voice || !voice[0]) {
+		char def_lang[32];
+		resolve_default_lang(def_lang, sizeof(def_lang));
+		normalize_espeak_voice(def_lang, out_lang, out_sz);
+		return;
+	}
+
 	/* Kokoro-82M standard 1-character language code prefix:
 	 * 'a' = American English, 'b' = British English, 'p' = European Portuguese (pt),
 	 * 'e' = Spanish, 'f' = French (fr), 'i' = Italian, 'h' = Hindi, 'j' = Japanese, 'z' = Mandarin
 	 */
-	switch (voice && voice[0] ? tolower((unsigned char)voice[0]) : 'p') {
+	switch (tolower((unsigned char)voice[0])) {
 	case 'a': snprintf(out_lang, out_sz, "en-us"); break;
 	case 'b': snprintf(out_lang, out_sz, "en-gb-x-rp"); break;
 	case 'p': snprintf(out_lang, out_sz, "pt"); break;
@@ -1018,7 +1086,12 @@ static void resolve_espeak_lang(const char *voice, bool is_piper, char *out_lang
 	case 'h': snprintf(out_lang, out_sz, "hi"); break;
 	case 'j': snprintf(out_lang, out_sz, "ja"); break;
 	case 'z': snprintf(out_lang, out_sz, "cmn"); break;
-	default:  snprintf(out_lang, out_sz, "pt"); break;
+	default: {
+		char def_lang[32];
+		resolve_default_lang(def_lang, sizeof(def_lang));
+		normalize_espeak_voice(def_lang, out_lang, out_sz);
+		break;
+	}
 	}
 }
 
@@ -1028,7 +1101,11 @@ static int16_t *synthesize_edge_tts(const char *seg_text, const char *voice, siz
 	*out_rate = 24000;
 	if (!seg_text || !*seg_text) return NULL;
 
-	const char *ev = "pt-PT-RaquelNeural";
+	char def_lang[32];
+	resolve_default_lang(def_lang, sizeof(def_lang));
+	const char *ev = (strncasecmp(def_lang, "pt", 2) == 0)
+		? "pt-PT-RaquelNeural"
+		: "en-GB-RyanNeural";
 	if (voice) {
 		if (strncmp(voice, "edge:", 5) == 0) {
 			ev = voice + 5;

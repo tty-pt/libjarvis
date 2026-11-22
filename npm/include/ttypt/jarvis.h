@@ -130,12 +130,32 @@ jarvis_ontology_t *jarvis_ontology_create_from_json(const char *json_str);
 void jarvis_ontology_destroy(jarvis_ontology_t *ont);
 
 bool jarvis_ontology_is_tts_interrupt(const jarvis_ontology_t *ont, const char *cleaned_text);
+bool jarvis_ontology_is_tts_interrupt_ex(
+	const jarvis_ontology_t *ont,
+	const char              *cleaned_text,
+	const char              *custom_wake_word
+);
+bool jarvis_ontology_is_op_abort(
+	const jarvis_ontology_t *ont,
+	const char              *phrase,
+	const char              *custom_wake_word
+);
+bool jarvis_ontology_is_screen_lock_phrase(const jarvis_ontology_t *ont, const char *phrase);
+bool jarvis_ontology_matches_tier1_trigger(const jarvis_ontology_t *ont, const char *text);
 const char *jarvis_ontology_get_wake_word(const jarvis_ontology_t *ont);
 const char *jarvis_ontology_get_lang(const jarvis_ontology_t *ont);
 const char *jarvis_ontology_get_lang_name(const jarvis_ontology_t *ont);
 const char *jarvis_ontology_get_wake_prompt(const jarvis_ontology_t *ont);
 const char *jarvis_ontology_get_cmd_prompt(const jarvis_ontology_t *ont);
 const char *jarvis_ontology_get_ui_string(const jarvis_ontology_t *ont, const char *key, const char *fallback);
+void jarvis_ontology_format_ui(
+	const jarvis_ontology_t *ont,
+	const char              *key,
+	const char              *custom_wake_word,
+	const char              *fallback,
+	char                    *out,
+	size_t                   out_sz
+);
 const char *jarvis_ontology_get_reply_template(const jarvis_ontology_t *ont, const char *key);
 
 /**
@@ -439,6 +459,11 @@ void jarvis_format_voice_reply(
  * @brief Check if a spoken command is a voice lockdown / disable phrase
  *        ("lockdown", "turn off jarvis", "go to sleep", "stop listening").
  */
+bool jarvis_voice_is_lockdown_phrase_ex(
+	const jarvis_ontology_t *ont,
+	const char              *phrase,
+	const char              *custom_wake_word
+);
 bool jarvis_voice_is_lockdown_phrase(const char *phrase);
 
 /**

@@ -29,6 +29,8 @@
 #include "whisper.h"
 
 static volatile sig_atomic_t g_jarvis_active = 0;
+static volatile sig_atomic_t g_in_followup   = 0;
+static volatile sig_atomic_t g_tts_speaking  = 0;
 static jarvis_engine_t      *g_jarvis_eng    = NULL;
 static pthread_mutex_t       g_jarvis_mtx    = PTHREAD_MUTEX_INITIALIZER;
 
@@ -299,6 +301,52 @@ write_state_file(const char *path, const char *prefix, const char *detail, const
 }
 
 static void
+get_active_wake_word(char *out, size_t out_sz)
+{
+	if (!out || out_sz == 0)
+		return;
+	const jarvis_ontology_t *ont = get_daemon_ont();
+	const char *ont_wake = jarvis_ontology_get_wake_word(ont);
+	if (!ont_wake || !*ont_wake)
+		ont_wake = "assistant";
+	jarvis_rc_get("wake_word", ont_wake, out, out_sz);
+	if (!out[0])
+		snprintf(out, out_sz, "%s", ont_wake);
+}
+
+static void
+update_idle_voice_state(const char *state_file)
+{
+	if (!state_file || !*state_file || strcmp(state_file, "-") == 0)
+		return;
+	if (!g_jarvis_active) {
+		if (g_tts_speaking) {
+			write_state_file(state_file, "tts-speaking", NULL, NULL);
+		} else {
+			unlink(state_file);
+			notify_bar();
+		}
+		return;
+	}
+	if (g_tts_speaking) {
+		write_state_file(state_file, "tts-speaking", NULL, NULL);
+		return;
+	}
+	pthread_mutex_lock(&g_op_turn.mtx);
+	int op_active = g_op_turn.active;
+	pthread_mutex_unlock(&g_op_turn.mtx);
+	if (op_active) {
+		write_state_file(state_file, "processing", NULL, NULL);
+		return;
+	}
+	if (g_in_followup) {
+		write_state_file(state_file, "jarvis-cmd", NULL, NULL);
+		return;
+	}
+	write_state_file(state_file, "jarvis", NULL, NULL);
+}
+
+static void
 play_chime_async(const char *chime_wav)
 {
 	if (!chime_wav || !*chime_wav || strcmp(chime_wav, "-") == 0)
@@ -322,7 +370,7 @@ static void
 resolve_lang(const char *req_lang, char *out, size_t out_sz)
 {
 	const char *def_lang = jarvis_ontology_get_lang(get_daemon_ont());
-	if (!def_lang || !*def_lang) def_lang = "pt";
+	if (!def_lang || !*def_lang) def_lang = "en";
 
 	if (!req_lang || !*req_lang || strcmp(req_lang, "kbd") == 0) {
 		char rc_lang[32] = {0};
@@ -1523,6 +1571,7 @@ static void
 interrupt_tts_and_clear_cache(void)
 {
 	clear_tts_speaking_cache();
+	g_tts_speaking = 0;
 	jarvis_xy_tts_interrupt(0);
 }
 
@@ -1577,9 +1626,10 @@ is_bargein_stop_phrase(const char *text)
 {
 	if (!text || !*text)
 		return 0;
-	char norm[256];
+	char norm[256], wake_buf[64];
 	jarvis_clean_phrase(text, norm, sizeof(norm));
-	return jarvis_ontology_is_tts_interrupt(get_daemon_ont(), norm) ? 1 : 0;
+	get_active_wake_word(wake_buf, sizeof(wake_buf));
+	return jarvis_ontology_is_tts_interrupt_ex(get_daemon_ont(), norm, wake_buf) ? 1 : 0;
 }
 
 static int
@@ -1587,43 +1637,9 @@ is_op_abort_phrase(const char *text)
 {
 	if (!text || !*text)
 		return 0;
-	char norm[256];
-	jarvis_clean_phrase(text, norm, sizeof(norm));
-	if (!norm[0])
-		return 0;
-
-	/* Pure TTS-mute phrases stop speech only; active ren turn keeps running. */
-	static const char *const tts_only[] = {
-		"stop talking", "stop speaking", "shut up", "be quiet", "quiet",
-		"silence", "silencio", "cala te", "cala a boca", "boca fechada",
-		"para de falar", "pare de falar", "chega de falar",
-		"desliga a voz", "mutar voz", "mute", "cala",
-		NULL
-	};
-	for (int i = 0; tts_only[i]; i++) {
-		if (strcmp(norm, tts_only[i]) == 0)
-			return 0;
-	}
-
-	static const char *const op_aborts[] = {
-		"stop", "stop it", "stop now", "stop everything", "stop jarvis", "stop jarbas",
-		"cancel", "cancel that", "cancel it", "abort", "nevermind", "never mind",
-		"enough", "forget it",
-		"para", "pare", "parar", "para tudo", "pare tudo", "para com isso", "pare com isso",
-		"para agora", "pare agora", "para por favor", "pare por favor",
-		"para jarbas", "pare jarbas", "para jarvis", "pare jarvis",
-		"cancela", "cancelar", "cancele", "cancela isso", "cancelar isso", "cancele isso",
-		"abortar", "aborta", "abortar tudo",
-		"nao manda", "nao envia", "nao envie", "nao faz isso",
-		"basta", "chega", "esquece", "esqueca", "deixa pra la",
-		"ta bom", "ja deu",
-		NULL
-	};
-	for (int i = 0; op_aborts[i]; i++) {
-		if (strcmp(norm, op_aborts[i]) == 0)
-			return 1;
-	}
-	return 0;
+	char wake_buf[64];
+	get_active_wake_word(wake_buf, sizeof(wake_buf));
+	return jarvis_ontology_is_op_abort(get_daemon_ont(), text, wake_buf) ? 1 : 0;
 }
 
 /*
@@ -1686,9 +1702,10 @@ jarvis_set_active(int active)
 			fprintf(fp, "%d\n", (int)getpid());
 			fclose(fp);
 		}
-		write_state_file(state_file, "jarvis", NULL, NULL);
+		update_idle_voice_state(state_file);
 	} else {
 		g_jarvis_active = 0;
+		g_in_followup = 0;
 		g_cancel_req = 1;
 		g_dec.abort_flag = 1;
 		interrupt_tts_and_clear_cache();
@@ -1783,9 +1800,11 @@ poll_control_socket(int srv, int cli, int is_jarvis_idle)
 			char sf[256];
 			snprintf(sf, sizeof(sf), "/tmp/jarvis-voice-%s.state", get_username());
 			if (strcmp(st, "speaking") == 0) {
-				write_state_file(sf, "tts-speaking", NULL, NULL);
+				g_tts_speaking = 1;
+				update_idle_voice_state(sf);
 			} else if (strcmp(st, "idle") == 0) {
-				write_state_file(sf, "jarvis", NULL, NULL);
+				g_tts_speaking = 0;
+				update_idle_voice_state(sf);
 			}
 			write_all(cfd, "OK\n", 3);
 			close(cfd);
@@ -1808,7 +1827,11 @@ poll_control_socket(int srv, int cli, int is_jarvis_idle)
 			char *nl = strpbrk(payload, "\r\n");
 			if (nl) *nl = '\0';
 			char *sep = strchr(payload, '|');
-			const char *title = "  Jarbas";
+			char def_title[128], wake_buf[64];
+			get_active_wake_word(wake_buf, sizeof(wake_buf));
+			jarvis_ontology_format_ui(get_daemon_ont(), "notify_title", wake_buf,
+			                          "  {Wake}", def_title, sizeof(def_title));
+			const char *title = def_title;
 			const char *msg = payload;
 			if (sep) {
 				*sep = '\0';
@@ -2154,8 +2177,10 @@ handle_jarvis_wait_ex(int srv, int cli, struct whisper_context *ctx_wake, int n_
 	int tts_was_active_in_utter = is_tts_currently_speaking(NULL, 0) ? 1 : 0;
 	char live_cmd[4096] = {0};
 
-	if (is_followup_window)
+	if (is_followup_window) {
+		g_in_followup = 1;
 		write_state_file(state_file, "jarvis-cmd", NULL, NULL);
+	}
 
 	int eff_silence_ms = operating_mode ? jarvis_rc_get_int("steer_silence_ms", 680) : cmd_silence_ms;
 	int min_silence_ms = operating_mode ? 480 : 640;
@@ -2253,8 +2278,10 @@ handle_jarvis_wait_ex(int srv, int cli, struct whisper_context *ctx_wake, int n_
 							decoded_cmd_is_final = 1;
 						if (strcmp(live_cmd, candidate) != 0) {
 							snprintf(live_cmd, sizeof(live_cmd), "%s", candidate);
-							write_state_file(state_file, "cmd", live_cmd,
-							                 jarvis_ontology_get_ui_string(get_daemon_ont(), "command_live", "  Jarvis Command (Live)..."));
+							char cmd_live_hdr[128];
+							jarvis_ontology_format_ui(get_daemon_ont(), "command_live", wake_word,
+							                          "  {Wake} Command (Live)...", cmd_live_hdr, sizeof(cmd_live_hdr));
+							write_state_file(state_file, "cmd", live_cmd, cmd_live_hdr);
 						}
 					}
 				}
@@ -2410,17 +2437,19 @@ handle_jarvis_wait_ex(int srv, int cli, struct whisper_context *ctx_wake, int n_
 			if (now_ms() >= post_wake_deadline_ms) {
 				if (is_followup_window) {
 					is_followup_window = 0;
+					g_in_followup = 0;
 					wake_confirmed = 0;
 					waiting_post_wake = 0;
 					chime_played = 0;
-					write_state_file(state_file, "jarvis", NULL, NULL);
+					update_idle_voice_state(state_file);
 					continue;
 				}
 				restore_speaker_after_command(NULL);
 				decode_reset_session();
 				audio_release(WARM_HOLD_MS);
 				free(wake_pcm);
-				write_state_file(state_file, "jarvis", NULL, NULL);
+				g_in_followup = 0;
+				update_idle_voice_state(state_file);
 				if (cli >= 0)
 					write_all(cli, "TIMEOUT\n", 8);
 				return 2;
@@ -2541,8 +2570,12 @@ handle_jarvis_wait_ex(int srv, int cli, struct whisper_context *ctx_wake, int n_
 						pthread_mutex_unlock(&g_audio.mtx);
 						post_wake_deadline_ms = now_ms() + 6000L;
 						write_state_file(state_file, "jarvis-cmd", NULL, NULL);
-						notify_osd_async(jarvis_ontology_get_ui_string(get_daemon_ont(), "listening_title", "  Jarvis Listening..."),
-						                 jarvis_ontology_get_ui_string(get_daemon_ont(), "listening_body", "Speak your command now."), 4500);
+						char ltitle[128], lbody[256];
+						jarvis_ontology_format_ui(get_daemon_ont(), "listening_title", wake_word,
+						                          "  {Wake} Listening...", ltitle, sizeof(ltitle));
+						jarvis_ontology_format_ui(get_daemon_ont(), "listening_body", wake_word,
+						                          "Speak your command now.", lbody, sizeof(lbody));
+						notify_osd_async(ltitle, lbody, 4500);
 						continue;
 					} else if (wmatch >= 1) {
 						/* User is speaking a continuous one-shot "<wake> <command>" utterance.
@@ -2566,8 +2599,10 @@ handle_jarvis_wait_ex(int srv, int cli, struct whisper_context *ctx_wake, int n_
 						if (wmatch == 2 && inline_cmd[0] != '\0') {
 							snprintf(live_cmd, sizeof(live_cmd), "%s", inline_cmd);
 							decoded_cmd_voiced_f = snap_voiced_f;
-							write_state_file(state_file, "cmd", live_cmd,
-							                 jarvis_ontology_get_ui_string(get_daemon_ont(), "command_live", "  Jarvis Command (Live)..."));
+							char cmd_live_hdr[128];
+							jarvis_ontology_format_ui(get_daemon_ont(), "command_live", wake_word,
+							                          "  {Wake} Command (Live)...", cmd_live_hdr, sizeof(cmd_live_hdr));
+							write_state_file(state_file, "cmd", live_cmd, cmd_live_hdr);
 						} else {
 							live_cmd[0] = '\0';
 							write_state_file(state_file, "jarvis-cmd", NULL, NULL);
@@ -2647,8 +2682,10 @@ handle_jarvis_wait_ex(int srv, int cli, struct whisper_context *ctx_wake, int n_
 						cmd_start_f = speech_start_f;
 						decoded_cmd_voiced_f = snap_voiced_f;
 						snprintf(live_cmd, sizeof(live_cmd), "%s", heard);
-						write_state_file(state_file, "cmd", live_cmd,
-						                 jarvis_ontology_get_ui_string(get_daemon_ont(), "command_live", "  Jarvis Command (Live)..."));
+						char cmd_live_hdr[128];
+						jarvis_ontology_format_ui(get_daemon_ont(), "command_live", wake_word,
+						                          "  {Wake} Command (Live)...", cmd_live_hdr, sizeof(cmd_live_hdr));
+						write_state_file(state_file, "cmd", live_cmd, cmd_live_hdr);
 					} else if (pause_wake_check && !spoke_during_decode &&
 					           (voiced_frames >= 20 || silence_frames >= 12)) {
 						/* Finished a non-Jarvis phrase and paused: reset cleanly */
@@ -2832,8 +2869,12 @@ handle_jarvis_wait_ex(int srv, int cli, struct whisper_context *ctx_wake, int n_
 						pthread_mutex_unlock(&g_audio.mtx);
 						post_wake_deadline_ms = now_ms() + 6000L;
 						write_state_file(state_file, "jarvis-cmd", NULL, NULL);
-						notify_osd_async(jarvis_ontology_get_ui_string(get_daemon_ont(), "listening_title", "  Jarvis Listening..."),
-						                 jarvis_ontology_get_ui_string(get_daemon_ont(), "listening_body", "Speak your command now."), 4500);
+						char ltitle[128], lbody[256];
+						jarvis_ontology_format_ui(get_daemon_ont(), "listening_title", wake_word,
+						                          "  {Wake} Listening...", ltitle, sizeof(ltitle));
+						jarvis_ontology_format_ui(get_daemon_ont(), "listening_body", wake_word,
+						                          "Speak your command now.", lbody, sizeof(lbody));
+						notify_osd_async(ltitle, lbody, 4500);
 						continue;
 					} else if (wm == 0) {
 						if (tts_on || (tts_was_active_in_utter && active_tts[0])) {
@@ -2858,8 +2899,10 @@ handle_jarvis_wait_ex(int srv, int cli, struct whisper_context *ctx_wake, int n_
 					trailing_soft_frames = 0;
 					decoded_cmd_is_final = 0;
 					if (live_cmd[0] != '\0') {
-						write_state_file(state_file, "cmd", live_cmd,
-						                 jarvis_ontology_get_ui_string(get_daemon_ont(), "command_live", "  Jarvis Command (Live)..."));
+						char cmd_live_hdr[128];
+						jarvis_ontology_format_ui(get_daemon_ont(), "command_live", wake_word,
+						                          "  {Wake} Command (Live)...", cmd_live_hdr, sizeof(cmd_live_hdr));
+						write_state_file(state_file, "cmd", live_cmd, cmd_live_hdr);
 					}
 					continue;
 				}
@@ -2909,12 +2952,16 @@ handle_jarvis_wait_ex(int srv, int cli, struct whisper_context *ctx_wake, int n_
 			write_all(cli, reply, strlen(reply));
 		}
 		if (!operating_mode) {
-			notify_osd_async(jarvis_ontology_get_ui_string(get_daemon_ont(), "command_title", "\xef\x95\x84  Jarvis Command"),
-			                 live_cmd, 6000);
+			char ctitle[128];
+			jarvis_ontology_format_ui(get_daemon_ont(), "command_title", wake_word,
+			                          "  {Wake} Command", ctitle, sizeof(ctitle));
+			notify_osd_async(ctitle, live_cmd, 6000);
 		}
 		return 0;
 	} else {
-		write_state_file(state_file, "jarvis", NULL, NULL);
+		if (!operating_mode)
+			g_in_followup = 0;
+		update_idle_voice_state(state_file);
 		if (cli >= 0)
 			write_all(cli, "EMPTY\n", 6);
 		return 2;
@@ -2976,7 +3023,7 @@ read_jarvis_runtime_cfg(char *lang, size_t lang_sz,
                         int *out_cmd_silence_ms)
 {
 	const char *ont_lang = jarvis_ontology_get_lang(get_daemon_ont());
-	const char *def_lang = (ont_lang && *ont_lang) ? ont_lang : "pt";
+	const char *def_lang = (ont_lang && *ont_lang) ? ont_lang : "en";
 
 	jarvis_rc_get("lang", def_lang, lang, lang_sz);
 	*out_followup_ms = jarvis_rc_get_int("followup_ms", 0);
@@ -3324,8 +3371,11 @@ dispatch_to_ren_tmux(const char *utterance, int *out_started_media, int *out_con
 				*out_started_media = 1;
 			if (strcmp(arg1, "conversation_control") == 0 && out_conv_exited)
 				*out_conv_exited = 1;
-			char title[256], body[1024];
-			snprintf(title, sizeof(title), "  Jarvis → %s (tier-0)", arg1[0] ? arg1 : "action");
+			char title[256], body[1024], wake_buf[64], ntitle[128];
+			get_active_wake_word(wake_buf, sizeof(wake_buf));
+			jarvis_ontology_format_ui(get_daemon_ont(), "notify_title", wake_buf,
+			                          "  {Wake}", ntitle, sizeof(ntitle));
+			snprintf(title, sizeof(title), "%s → %s (tier-0)", ntitle, arg1[0] ? arg1 : "action");
 			snprintf(body, sizeof(body), "“%.350s”\n▸ %.550s", utterance, arg2);
 			jarvis_xy_notify(title, body, 1);
 		} else if (strcmp(ev, "TOOL") == 0) {
@@ -3412,8 +3462,12 @@ op_turn_worker_fn(void *arg)
 				                    ? res.combined_result.output
 				                    : res.combined_result.error;
 				if (strcmp(res.last_dsl.op, "answer_question") != 0) {
-					char title[256], body[1024];
-					snprintf(title, sizeof(title), "  Jarvis → %s (%s)",
+					char title[384], body[1024], wake_buf[64], ntitle[128];
+					get_active_wake_word(wake_buf, sizeof(wake_buf));
+					jarvis_ontology_format_ui(get_daemon_ont(), "notify_title", wake_buf,
+					                          "  {Wake}", ntitle, sizeof(ntitle));
+					snprintf(title, sizeof(title), "%s → %s (%s)",
+					         ntitle,
 					         res.last_dsl.op[0] ? res.last_dsl.op : "action",
 					         res.source[0] ? res.source : "solver");
 					snprintf(body, sizeof(body), "“%.350s”\n▸ %.550s", eff_cmd, out_msg);
@@ -3437,10 +3491,14 @@ op_turn_worker_fn(void *arg)
 				s_pending_frag[0] = '\0';
 				act_rc = 1;
 				if (wargs->was_followup <= 0) {
-					char body[512];
-					const char *unrec_lbl = jarvis_ontology_get_ui_string(get_daemon_ont(), "unrecognized_body", "unrecognized command");
-					snprintf(body, sizeof(body), "“%.420s” (%s)", cmd_text, unrec_lbl);
-					jarvis_xy_notify(jarvis_ontology_get_ui_string(get_daemon_ont(), "unrecognized_title", "  Jarvis — Unrecognized"), body, 0);
+					char body[560], wake_buf[64], utitle[128], ubody[128];
+					get_active_wake_word(wake_buf, sizeof(wake_buf));
+					jarvis_ontology_format_ui(get_daemon_ont(), "unrecognized_title", wake_buf,
+					                          "  {Wake} — Unrecognized", utitle, sizeof(utitle));
+					jarvis_ontology_format_ui(get_daemon_ont(), "unrecognized_body", wake_buf,
+					                          "unrecognized command", ubody, sizeof(ubody));
+					snprintf(body, sizeof(body), "“%.380s” (%s)", cmd_text, ubody);
+					jarvis_xy_notify(utitle, body, 0);
 				}
 			}
 		}
@@ -3464,13 +3522,16 @@ static void
 handle_lockdown_phrase(const char *cmd_text)
 {
 	jarvis_set_active(0);
-	char clean_ld[256];
-	jarvis_clean_phrase(cmd_text, clean_ld, sizeof(clean_ld));
-	int want_screen_lock = (strstr(clean_ld, "lock") != NULL ||
-	                        strstr(clean_ld, "bloque") != NULL);
+	const jarvis_ontology_t *ont = get_daemon_ont();
+	char wake_buf[64], title[128], body[256];
+	get_active_wake_word(wake_buf, sizeof(wake_buf));
+	int want_screen_lock = jarvis_ontology_is_screen_lock_phrase(ont, cmd_text) ? 1 : 0;
 	if (want_screen_lock) {
-		jarvis_xy_notify(jarvis_ontology_get_ui_string(get_daemon_ont(), "lockdown_title", "  Jarbas Bloqueio"),
-		                 jarvis_ontology_get_ui_string(get_daemon_ont(), "lockdown_body", "Escuta contínua desativada. A bloquear o ecrã."), 0);
+		jarvis_ontology_format_ui(ont, "lockdown_title", wake_buf,
+		                          "  {Wake} Lockdown", title, sizeof(title));
+		jarvis_ontology_format_ui(ont, "lockdown_body", wake_buf,
+		                          "Continuous listening disabled. Locking screen.", body, sizeof(body));
+		jarvis_xy_notify(title, body, 0);
 		char lock_cmd[256];
 		jarvis_rc_get("lock_cmd", "slock", lock_cmd, sizeof(lock_cmd));
 		if (lock_cmd[0] && fork() == 0) {
@@ -3479,7 +3540,11 @@ handle_lockdown_phrase(const char *cmd_text)
 			_exit(0);
 		}
 	} else {
-		jarvis_xy_notify("  Jarbas Desligado", "Escuta contínua desativada.", 0);
+		jarvis_ontology_format_ui(ont, "disabled_title", wake_buf,
+		                          "  {Wake} Disabled", title, sizeof(title));
+		jarvis_ontology_format_ui(ont, "disabled_body", wake_buf,
+		                          "Continuous listening disabled.", body, sizeof(body));
+		jarvis_xy_notify(title, body, 0);
 	}
 }
 
@@ -3505,13 +3570,11 @@ run_inprocess_jarvis_turn(int srv, struct whisper_context *ctx_wake, int n_threa
 		next_followup = is_speaker_playing_c() ? 0 : 3600000;
 	}
 
-	write_state_file(state_file, (next_followup > 0) ? "jarvis-cmd" : "jarvis", NULL, NULL);
+	g_in_followup = (next_followup > 0) ? 1 : 0;
+	update_idle_voice_state(state_file);
 
 	char wake_buf[64];
-	const char *ont_wake = jarvis_ontology_get_wake_word(get_daemon_ont());
-	if (!ont_wake || !*ont_wake)
-		ont_wake = "jarvis";
-	jarvis_rc_get("wake_word", ont_wake, wake_buf, sizeof(wake_buf));
+	get_active_wake_word(wake_buf, sizeof(wake_buf));
 
 	char cmd_text[4096] = {0};
 	int rc = handle_jarvis_wait(srv, -1, ctx_wake, n_threads,
@@ -3538,7 +3601,7 @@ run_inprocess_jarvis_turn(int srv, struct whisper_context *ctx_wake, int n_threa
 				fclose(lfp);
 			}
 
-			if (jarvis_voice_is_lockdown_phrase(cmd_text)) {
+			if (jarvis_voice_is_lockdown_phrase_ex(get_daemon_ont(), cmd_text, wake_buf)) {
 				handle_lockdown_phrase(cmd_text);
 				return;
 			}
@@ -3604,12 +3667,12 @@ run_inprocess_jarvis_turn(int srv, struct whisper_context *ctx_wake, int n_threa
 					break;
 
 				if (op_rc == 2) {
-					write_state_file(state_file, "jarvis", NULL, NULL);
+					update_idle_voice_state(state_file);
 					continue;
 				}
 
 				if (op_rc == 0 && steer_cmd[0] != '\0') {
-					if (jarvis_voice_is_lockdown_phrase(steer_cmd)) {
+					if (jarvis_voice_is_lockdown_phrase_ex(get_daemon_ont(), steer_cmd, wake_buf)) {
 						pthread_mutex_lock(&g_op_turn.mtx);
 						g_op_turn.was_stopped = 1;
 						pthread_mutex_unlock(&g_op_turn.mtx);
@@ -3622,12 +3685,15 @@ run_inprocess_jarvis_turn(int srv, struct whisper_context *ctx_wake, int n_threa
 						g_op_turn.was_stopped = 1;
 						pthread_mutex_unlock(&g_op_turn.mtx);
 						send_ren_control_cmd("STOP", NULL, 0);
-						notify_osd_async("  Jarvis Stopped", steer_cmd, 4000);
-						write_state_file(state_file, "jarvis", NULL, NULL);
+						char stitle[128];
+						jarvis_ontology_format_ui(get_daemon_ont(), "stopped_title", wake_buf,
+						                          "  {Wake} Stopped", stitle, sizeof(stitle));
+						notify_osd_async(stitle, steer_cmd, 4000);
+						update_idle_voice_state(state_file);
 						continue;
 					} else if (is_bargein_stop_phrase(steer_cmd)) {
 						interrupt_tts_and_clear_cache();
-						write_state_file(state_file, "jarvis", NULL, NULL);
+						update_idle_voice_state(state_file);
 						continue;
 					} else {
 						interrupt_tts_and_clear_cache();
@@ -3641,8 +3707,11 @@ run_inprocess_jarvis_turn(int srv, struct whisper_context *ctx_wake, int n_threa
 							snprintf(pending_next_cmd, sizeof(pending_next_cmd), "%s", steer_cmd);
 							break;
 						}
-						notify_osd_async("  Jarvis Steering", steer_cmd, 5000);
-						write_state_file(state_file, "jarvis", NULL, NULL);
+						char sttitle[128];
+						jarvis_ontology_format_ui(get_daemon_ont(), "steering_title", wake_buf,
+						                          "  {Wake} Steering", sttitle, sizeof(sttitle));
+						notify_osd_async(sttitle, steer_cmd, 5000);
+						update_idle_voice_state(state_file);
 						continue;
 					}
 				}
@@ -3677,14 +3746,21 @@ run_inprocess_jarvis_turn(int srv, struct whisper_context *ctx_wake, int n_threa
 				if ((act_rc == 0 || act_rc == -1) && !started_media && !conv_exited && !is_speaker_playing_c())
 					*io_next_followup = eff_followup;
 			}
-			write_state_file(state_file, (*io_next_followup > 0) ? "jarvis-cmd" : "jarvis", NULL, NULL);
+			g_in_followup = (*io_next_followup > 0) ? 1 : 0;
+			update_idle_voice_state(state_file);
 			break;
 		}
 	} else if (rc == 2) {
-		write_state_file(state_file, "jarvis", NULL, NULL);
-		if (was_followup <= 0)
-			jarvis_xy_notify(jarvis_ontology_get_ui_string(get_daemon_ont(), "standby_title", "  Jarvis Standby"),
-			                 jarvis_ontology_get_ui_string(get_daemon_ont(), "standby_body", "No command spoken."), 0);
+		g_in_followup = 0;
+		update_idle_voice_state(state_file);
+		if (was_followup <= 0) {
+			char sbtitle[128], sbbody[256];
+			jarvis_ontology_format_ui(get_daemon_ont(), "standby_title", wake_buf,
+			                          "  {Wake} Standby", sbtitle, sizeof(sbtitle));
+			jarvis_ontology_format_ui(get_daemon_ont(), "standby_body", wake_buf,
+			                          "No command spoken.", sbbody, sizeof(sbbody));
+			jarvis_xy_notify(sbtitle, sbbody, 0);
+		}
 	}
 }
 
@@ -3846,6 +3922,23 @@ serve_client_request(int srv, int cli, char *buf,
 		close(cli);
 		return;
 	}
+	if (strncmp(buf, "TTS_STATE|", 10) == 0) {
+		char *st = buf + 10;
+		char *nl = strpbrk(st, "\r\n");
+		if (nl) *nl = '\0';
+		char sf[256];
+		snprintf(sf, sizeof(sf), "/tmp/jarvis-voice-%s.state", get_username());
+		if (strcmp(st, "speaking") == 0) {
+			g_tts_speaking = 1;
+			update_idle_voice_state(sf);
+		} else if (strcmp(st, "idle") == 0) {
+			g_tts_speaking = 0;
+			update_idle_voice_state(sf);
+		}
+		write_all(cli, "OK\n", 3);
+		close(cli);
+		return;
+	}
 	if (strncmp(buf, "TTS_INTERRUPT", 13) == 0) {
 		interrupt_tts_and_clear_cache();
 		write_all(cli, "OK\n", 3);
@@ -3871,7 +3964,11 @@ serve_client_request(int srv, int cli, char *buf,
 		if (nl)
 			*nl = '\0';
 		char *sep = strchr(rest, '|');
-		const char *title = "Jarbas";
+		char def_title[128], wake_buf[64];
+		get_active_wake_word(wake_buf, sizeof(wake_buf));
+		jarvis_ontology_format_ui(get_daemon_ont(), "notify_title", wake_buf,
+		                          "  {Wake}", def_title, sizeof(def_title));
+		const char *title = def_title;
 		const char *msg = rest;
 		char title_buf[128] = {0};
 		if (sep) {

@@ -1246,11 +1246,11 @@ static bool requires_agent_reasoning(const jarvis_engine_t *eng, const char *utt
 
 	const jarvis_ontology_t *ont = eng->ont ? eng->ont : jarvis_ontology_get_active();
 
-	/* If ASR normalization strips a leading Whisper prompt-echo ("o que épode ...")
+	/* If ASR normalization strips a leading Whisper prompt-echo
 	 * and the normalized utterance deterministically solves as a high-confidence Tier-0
 	 * command without starting with an interrogative, do not force ReAct agent reasoning.
 	 */
-	if (ont && strncmp(clean, "o que ", 6) == 0) {
+	if (ont && jarvis_ontology_has_echo_prefix(ont, clean)) {
 		jarvis_ir_t norm_ir;
 		if (jarvis_solve_clause(ont, utterance, "any", NULL, &norm_ir) && norm_ir.score >= 0.90) {
 			return false;
@@ -2672,10 +2672,18 @@ bool jarvis_auren_run_react_agent(
 	snprintf(utterance, sizeof(utterance), "%s", raw_utterance);
 
 	const char *lang_name = jarvis_ontology_get_lang_name(eng->ont);
+	const char *ont_wake = jarvis_ontology_get_wake_word(eng->ont);
+	char wake_buf[JARVIS_SHORT_LEN] = {0};
+	jarvis_rc_get("wake_word", ont_wake, wake_buf, sizeof(wake_buf));
+	if (!wake_buf[0]) snprintf(wake_buf, sizeof(wake_buf), "%s", ont_wake);
+	if (wake_buf[0] >= 'a' && wake_buf[0] <= 'z') {
+		wake_buf[0] = (char)(wake_buf[0] - 'a' + 'A');
+	}
+
 	char sys_prompt[2048];
 	snprintf(
 		sys_prompt, sizeof(sys_prompt),
-		"You are Jarvis, Tony Stark's intelligent Linux desktop assistant and systems engineer. "
+		"You are %s, an intelligent Linux desktop assistant and systems engineer. "
 		"You control a live Linux desktop (window manager, terminals, tmux, browser, audio, shell, and coding tools). "
 		"You operate in a ReAct Observe-Reason-Act loop: you can either call an OBSERVATION tool first to inspect "
 		"live terminal panes, browser accessibility page content, clipboard, system health, or command output, OR immediately emit one or more ACTION DSL objects (or a JSON array of DSL objects) to fulfill the user's intent. "
@@ -2683,6 +2691,7 @@ bool jarvis_auren_run_react_agent(
 		"When using `answer_question`, keep your spoken reply crisp, natural, and concise (1 to 3 short sentences, under 450 characters) in %s (or the language of the user's request). "
 		"If you ask the user a clarifying or follow-up question and want them to reply, include \"expect_reply\":true in \"args\". "
 		"Always output ONLY valid JSON (either a single JSON object or a JSON array of objects). No markdown prose outside JSON.",
+		wake_buf,
 		(lang_name && *lang_name) ? lang_name : "English"
 	);
 
@@ -2720,7 +2729,7 @@ bool jarvis_auren_run_react_agent(
 		"- media_volume: {\"op\": \"media_volume\", \"target\": {}, \"args\": {\"action\": \"volume_up|volume_down|volume_mute\"}}\n"
 		"- record_start: {\"op\": \"record_start\", \"target\": {}, \"args\": {\"mode\": \"screen|mic|both\"}}\n"
 		"- record_stop: {\"op\": \"record_stop\", \"target\": {}}\n"
-		"- answer_question: {\"op\": \"answer_question\", \"target\": {}, \"args\": {\"answer\": \"<concise Jarvis reply>\", \"expect_reply\": false}}\n"
+		"- answer_question: {\"op\": \"answer_question\", \"target\": {}, \"args\": {\"answer\": \"<concise spoken reply>\", \"expect_reply\": false}}\n"
 		"- conversation_control: {\"op\": \"conversation_control\", \"target\": {}, \"args\": {\"action\": \"enter|exit|reset\"}}\n"
 		"- wm_help: {\"op\": \"wm_help\", \"target\": {\"query\": \"<wm_or_shortcut_question>\"}}\n\n"
 		"DECISION GUIDELINES:\n"
@@ -2730,7 +2739,7 @@ bool jarvis_auren_run_react_agent(
 		"4. If the user asks a quick question about the current time, date, free RAM, disk space, CPU load, or active directory/window, answer IMMEDIATELY in 1 turn with `answer_question` using the live fields below (never spawn a terminal just to run `date` or `pwd` for a spoken question).\n"
 		"5. If the user asks to remember a preference or workflow, emit `remember_fact`. If they invoke a remembered workflow later, expand it into a JSON array `[step1, step2, ...]` of all actions in that workflow.\n"
 		"6. Use previous conversation messages, Live Terminal Panes, Live Browser Content, and Recent action context to resolve follow-ups ('actually move it to workspace 6 instead', 'nevermind bring it back', 'open that file', 'explain more', 'yes do it'). If the user wants to end the conversation or reset the topic, emit `conversation_control`.\n"
-		"7. For any local or remote shell command, SSH command (e.g. `ssh tty.pt 'df -h'`), or CLI tool (nvim, vim, git, grep, find, make), use `spawn_shell_command`. If the user asks to OPEN A TERMINAL with a command/program/config (e.g. 'open a terminal with vim', 'abre um terminal com a minha configuracao de vim'), you MUST set \"new_terminal\": true on `spawn_shell_command`!\n";
+		"7. For any local or remote shell command, SSH command (e.g. `ssh tty.pt 'df -h'`), or CLI tool (nvim, vim, git, grep, find, make), use `spawn_shell_command`. If the user asks to OPEN A TERMINAL with a command/program/config (e.g. 'open a terminal with vim'), you MUST set \"new_terminal\": true on `spawn_shell_command`!\n";
 
 	char state_sum[4096];
 	summarize_world_for_prompt(eng, world, state_sum, sizeof(state_sum));

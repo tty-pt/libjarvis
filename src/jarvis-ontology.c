@@ -142,7 +142,25 @@ size_t jarvis_clean_phrase(const char *text, char *out, size_t out_sz)
 				continue;
 			}
 		}
-		/* Treat common multi-byte Unicode punctuation (C2 A1..BF, E2 80.., E3 80..) as spaces */
+		/* Fold Greek uppercase Α..Ω (0xCE 0x91..0xA9, excluding unassigned 0xA2) to lowercase UTF-8 */
+		if (c == 0xCE && (p[1] & 0xC0) == 0x80 && w + 2 < out_sz) {
+			unsigned char c2 = p[1];
+			if (c2 >= 0x91 && c2 <= 0x9F) {
+				out[w++] = (char)0xCE;
+				out[w++] = (char)(c2 + 0x20);
+				p++;
+				prev_space = false;
+				continue;
+			}
+			if (c2 >= 0xA0 && c2 <= 0xA9 && c2 != 0xA2) {
+				out[w++] = (char)0xCF;
+				out[w++] = (char)(c2 - 0x20);
+				p++;
+				prev_space = false;
+				continue;
+			}
+		}
+		/* Treat common multi-byte Unicode punctuation (C2 A1..BF, E2 80.., E3 80.., EF BC..) as spaces */
 		if (c == 0xC2 && (p[1] == 0xA1 || p[1] == 0xBF || p[1] == 0xAB || p[1] == 0xBB)) {
 			p++;
 			if (!prev_space && w + 1 < out_sz) {
@@ -152,7 +170,8 @@ size_t jarvis_clean_phrase(const char *text, char *out, size_t out_sz)
 			continue;
 		}
 		if ((c == 0xE2 && p[1] == 0x80 && (p[2] & 0xC0) == 0x80) ||
-		    (c == 0xE3 && p[1] == 0x80 && (p[2] >= 0x80 && p[2] <= 0x9F))) {
+		    (c == 0xE3 && p[1] == 0x80 && (p[2] >= 0x80 && p[2] <= 0x9F)) ||
+		    (c == 0xEF && p[1] == 0xBC && ((p[2] >= 0x81 && p[2] <= 0x8F) || (p[2] >= 0x9A && p[2] <= 0xA0)))) {
 			p += 2;
 			if (!prev_space && w + 1 < out_sz) {
 				out[w++] = ' ';
@@ -175,6 +194,77 @@ size_t jarvis_clean_phrase(const char *text, char *out, size_t out_sz)
 	}
 	out[w] = '\0';
 	return w;
+}
+
+static void clean_phrase_preserve_wake_tpl(const char *src, char *dst, size_t dst_sz)
+{
+	if (!dst || dst_sz == 0) return;
+	dst[0] = '\0';
+	if (!src || !*src) return;
+
+	if (!strstr(src, "{wake}") && !strstr(src, "{Wake}")) {
+		jarvis_clean_phrase(src, dst, dst_sz);
+		return;
+	}
+
+	static const char *const SENTINEL = "xjarviswakex";
+	const size_t slen = strlen(SENTINEL);
+	char masked[JARVIS_STR_LEN];
+	size_t mw = 0;
+	for (size_t i = 0; src[i] && mw + slen + 1 < sizeof(masked); ) {
+		if (strncmp(&src[i], "{wake}", 6) == 0 || strncmp(&src[i], "{Wake}", 6) == 0) {
+			memcpy(masked + mw, SENTINEL, slen);
+			mw += slen;
+			i += 6;
+		} else {
+			masked[mw++] = src[i++];
+		}
+	}
+	masked[mw] = '\0';
+
+	char cleaned[JARVIS_STR_LEN];
+	jarvis_clean_phrase(masked, cleaned, sizeof(cleaned));
+
+	size_t dw = 0;
+	for (size_t i = 0; cleaned[i] && dw + 1 < dst_sz; ) {
+		if (strncmp(&cleaned[i], SENTINEL, slen) == 0 && dw + 6 < dst_sz) {
+			memcpy(dst + dw, "{wake}", 6);
+			dw += 6;
+			i += slen;
+		} else {
+			dst[dw++] = cleaned[i++];
+		}
+	}
+	dst[dw] = '\0';
+}
+
+static void expand_wake_tpl_str(const char *tpl, const char *wake, char *out, size_t out_sz)
+{
+	if (!out || out_sz == 0) return;
+	out[0] = '\0';
+	if (!tpl) return;
+
+	const char *w_lo = (wake && *wake) ? wake : "assistant";
+	char w_cap[JARVIS_SHORT_LEN];
+	snprintf(w_cap, sizeof(w_cap), "%s", w_lo);
+	if (w_cap[0] >= 'a' && w_cap[0] <= 'z') {
+		w_cap[0] = (char)(w_cap[0] - 'a' + 'A');
+	}
+
+	size_t w = 0;
+	for (size_t i = 0; tpl[i] && w + 1 < out_sz; ) {
+		if (strncmp(&tpl[i], "{wake}", 6) == 0) {
+			w += (size_t)snprintf(out + w, out_sz - w, "%s", w_lo);
+			i += 6;
+		} else if (strncmp(&tpl[i], "{Wake}", 6) == 0) {
+			w += (size_t)snprintf(out + w, out_sz - w, "%s", w_cap);
+			i += 6;
+		} else {
+			out[w++] = tpl[i++];
+		}
+	}
+	if (w < out_sz) out[w] = '\0';
+	else out[out_sz - 1] = '\0';
 }
 
 bool jarvis_is_non_speech_hallucination(const char *text)
@@ -555,7 +645,11 @@ jarvis_ontology_t *jarvis_ontology_create_from_json(const char *json_str)
 	load_short_str_list(jjson_obj_get(root, "dictation_verbs"), ont->dictation_verbs, JARVIS_MAX_DICTATION_VERBS, &ont->dictation_verb_count);
 	load_short_str_list(jjson_obj_get(root, "deictic_pronouns"), ont->deictic_pronouns, JARVIS_MAX_DEICTIC_PRONOUNS, &ont->deictic_pronoun_count);
 	load_id_str_list(jjson_obj_get(root, "tts_interrupt_phrases"), ont->tts_interrupts, JARVIS_MAX_TTS_INTERRUPTS, &ont->tts_interrupt_count);
+	load_id_str_list(jjson_obj_get(root, "op_abort_phrases"), ont->op_abort_phrases, JARVIS_MAX_OP_ABORTS, &ont->op_abort_count);
 	load_id_str_list(jjson_obj_get(root, "lockdown_phrases"), ont->lockdown_phrases, JARVIS_MAX_LOCKDOWN_PHRASES, &ont->lockdown_phrase_count);
+	load_short_str_list(jjson_obj_get(root, "screen_lock_keywords"), ont->screen_lock_keywords, JARVIS_MAX_SCREEN_LOCK_KW, &ont->screen_lock_kw_count);
+	load_short_str_list(jjson_obj_get(root, "whisper_echo_prefixes"), ont->echo_prefixes, JARVIS_MAX_ECHO_PREFIXES, &ont->echo_prefix_count);
+	load_short_str_list(jjson_obj_get(root, "tier1_triggers"), ont->tier1_triggers, JARVIS_MAX_TIER1_TRIGGERS, &ont->tier1_trigger_count);
 	load_id_str_list(jjson_obj_get(root, "hallucination_phrases"), ont->hallucinations, JARVIS_MAX_HALLUCINATIONS, &ont->hallucination_count);
 
 	/* 1. Stopwords */
@@ -803,7 +897,7 @@ jarvis_ontology_t *jarvis_ontology_create_from_json(const char *json_str)
 	}
 	for (size_t i = 0; i < ont->polite_prefix_count; i++) {
 		char c[JARVIS_SHORT_LEN];
-		jarvis_clean_phrase(ont->polite_prefixes[i], c, sizeof(c));
+		clean_phrase_preserve_wake_tpl(ont->polite_prefixes[i], c, sizeof(c));
 		snprintf(ont->polite_prefixes[i], sizeof(ont->polite_prefixes[i]), "%s", c);
 	}
 	for (size_t i = 0; i < ont->dictation_verb_count; i++) {
@@ -818,8 +912,13 @@ jarvis_ontology_t *jarvis_ontology_create_from_json(const char *json_str)
 	}
 	for (size_t i = 0; i < ont->tts_interrupt_count; i++) {
 		char c[JARVIS_ID_LEN];
-		jarvis_clean_phrase(ont->tts_interrupts[i], c, sizeof(c));
+		clean_phrase_preserve_wake_tpl(ont->tts_interrupts[i], c, sizeof(c));
 		snprintf(ont->tts_interrupts[i], sizeof(ont->tts_interrupts[i]), "%s", c);
+	}
+	for (size_t i = 0; i < ont->op_abort_count; i++) {
+		char c[JARVIS_ID_LEN];
+		clean_phrase_preserve_wake_tpl(ont->op_abort_phrases[i], c, sizeof(c));
+		snprintf(ont->op_abort_phrases[i], sizeof(ont->op_abort_phrases[i]), "%s", c);
 	}
 	for (size_t i = 0; i < ont->interrogative_count; i++) {
 		char c[JARVIS_SHORT_LEN];
@@ -828,8 +927,34 @@ jarvis_ontology_t *jarvis_ontology_create_from_json(const char *json_str)
 	}
 	for (size_t i = 0; i < ont->lockdown_phrase_count; i++) {
 		char c[JARVIS_ID_LEN];
-		jarvis_clean_phrase(ont->lockdown_phrases[i], c, sizeof(c));
+		clean_phrase_preserve_wake_tpl(ont->lockdown_phrases[i], c, sizeof(c));
 		snprintf(ont->lockdown_phrases[i], sizeof(ont->lockdown_phrases[i]), "%s", c);
+	}
+	for (size_t i = 0; i < ont->screen_lock_kw_count; i++) {
+		char c[JARVIS_SHORT_LEN];
+		jarvis_clean_phrase(ont->screen_lock_keywords[i], c, sizeof(c));
+		snprintf(ont->screen_lock_keywords[i], sizeof(ont->screen_lock_keywords[i]), "%s", c);
+	}
+	for (size_t i = 0; i < ont->echo_prefix_count; i++) {
+		char c[JARVIS_SHORT_LEN];
+		jarvis_clean_phrase(ont->echo_prefixes[i], c, sizeof(c));
+		snprintf(ont->echo_prefixes[i], sizeof(ont->echo_prefixes[i]), "%s", c);
+	}
+	for (size_t i = 0; i < ont->tier1_trigger_count; i++) {
+		char c[JARVIS_SHORT_LEN];
+		jarvis_clean_phrase(ont->tier1_triggers[i], c, sizeof(c));
+		if (c[0]) {
+			const char *raw = ont->tier1_triggers[i];
+			size_t rlen = strlen(raw);
+			bool lead_sp = (rlen > 0 && isspace((unsigned char)raw[0]));
+			bool trail_sp = (rlen > 0 && isspace((unsigned char)raw[rlen - 1]));
+			char buf[JARVIS_SHORT_LEN];
+			snprintf(buf, sizeof(buf), "%s%s%s",
+			         lead_sp ? " " : "", c, trail_sp ? " " : "");
+			snprintf(ont->tier1_triggers[i], sizeof(ont->tier1_triggers[i]), "%s", buf);
+		} else {
+			ont->tier1_triggers[i][0] = '\0';
+		}
 	}
 	for (size_t i = 0; i < ont->hallucination_count; i++) {
 		char c[JARVIS_ID_LEN];
@@ -1049,7 +1174,7 @@ jarvis_ontology_t *jarvis_ontology_create(const char *json_path)
 const char *jarvis_ontology_get_wake_word(const jarvis_ontology_t *ont)
 {
 	if (!ont) ont = jarvis_ontology_get_active();
-	return (ont && ont->wake_word[0]) ? ont->wake_word : "jarvis";
+	return (ont && ont->wake_word[0]) ? ont->wake_word : "assistant";
 }
 
 const char *jarvis_ontology_get_lang(const jarvis_ontology_t *ont)
@@ -1087,6 +1212,25 @@ const char *jarvis_ontology_get_ui_string(const jarvis_ontology_t *ont, const ch
 		}
 	}
 	return fallback ? fallback : "";
+}
+
+void jarvis_ontology_format_ui(
+	const jarvis_ontology_t *ont,
+	const char              *key,
+	const char              *custom_wake_word,
+	const char              *fallback,
+	char                    *out,
+	size_t                   out_sz
+)
+{
+	if (!out || out_sz == 0) return;
+	out[0] = '\0';
+	if (!ont) ont = jarvis_ontology_get_active();
+	const char *tpl = jarvis_ontology_get_ui_string(ont, key, fallback);
+	const char *eff_wake = (custom_wake_word && *custom_wake_word)
+		? custom_wake_word
+		: jarvis_ontology_get_wake_word(ont);
+	expand_wake_tpl_str(tpl, eff_wake, out, out_sz);
 }
 
 const char *jarvis_ontology_get_reply_template(const jarvis_ontology_t *ont, const char *key)
@@ -1163,11 +1307,115 @@ bool jarvis_ontology_is_deictic_pronoun(const jarvis_ontology_t *ont, const char
 	return false;
 }
 
+static bool match_phrase_with_wake_tpl(
+	const char *clean_clause,
+	const char *tpl,
+	const char *wake_clean
+)
+{
+	if (!clean_clause || !tpl || !tpl[0]) return false;
+	if (!strstr(tpl, "{wake}")) {
+		return strcmp(tpl, clean_clause) == 0;
+	}
+	if (!wake_clean || !wake_clean[0]) return false;
+	char expanded[JARVIS_ID_LEN];
+	expand_wake_tpl_str(tpl, wake_clean, expanded, sizeof(expanded));
+	return strcmp(expanded, clean_clause) == 0;
+}
+
+bool jarvis_ontology_is_tts_interrupt_ex(
+	const jarvis_ontology_t *ont,
+	const char              *clean_clause,
+	const char              *custom_wake_word
+)
+{
+	if (!ont || !clean_clause || !clean_clause[0]) return false;
+	const char *eff_wake = (custom_wake_word && *custom_wake_word) ? custom_wake_word : ont->wake_word;
+	char wake_clean[JARVIS_SHORT_LEN] = {0};
+	if (eff_wake && *eff_wake) {
+		jarvis_clean_phrase(eff_wake, wake_clean, sizeof(wake_clean));
+	}
+	for (size_t i = 0; i < ont->tts_interrupt_count; i++) {
+		if (match_phrase_with_wake_tpl(clean_clause, ont->tts_interrupts[i], wake_clean)) {
+			return true;
+		}
+	}
+	for (size_t i = 0; i < ont->op_abort_count; i++) {
+		if (match_phrase_with_wake_tpl(clean_clause, ont->op_abort_phrases[i], wake_clean)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 bool jarvis_ontology_is_tts_interrupt(const jarvis_ontology_t *ont, const char *clean_clause)
 {
-	if (!ont || !clean_clause) return false;
-	for (size_t i = 0; i < ont->tts_interrupt_count; i++) {
-		if (strcmp(ont->tts_interrupts[i], clean_clause) == 0) return true;
+	return jarvis_ontology_is_tts_interrupt_ex(ont, clean_clause, NULL);
+}
+
+bool jarvis_ontology_is_op_abort(
+	const jarvis_ontology_t *ont,
+	const char              *phrase,
+	const char              *custom_wake_word
+)
+{
+	if (!ont || !phrase || !*phrase) return false;
+	char clean[JARVIS_ID_LEN];
+	jarvis_clean_phrase(phrase, clean, sizeof(clean));
+	if (!clean[0]) return false;
+
+	const char *eff_wake = (custom_wake_word && *custom_wake_word) ? custom_wake_word : ont->wake_word;
+	char wake_clean[JARVIS_SHORT_LEN] = {0};
+	if (eff_wake && *eff_wake) {
+		jarvis_clean_phrase(eff_wake, wake_clean, sizeof(wake_clean));
+	}
+	for (size_t i = 0; i < ont->op_abort_count; i++) {
+		if (match_phrase_with_wake_tpl(clean, ont->op_abort_phrases[i], wake_clean)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool jarvis_ontology_is_screen_lock_phrase(const jarvis_ontology_t *ont, const char *phrase)
+{
+	if (!ont || !phrase || !*phrase) return false;
+	char clean[JARVIS_ID_LEN];
+	jarvis_clean_phrase(phrase, clean, sizeof(clean));
+	if (!clean[0]) return false;
+	for (size_t i = 0; i < ont->screen_lock_kw_count; i++) {
+		if (ont->screen_lock_keywords[i][0] && strstr(clean, ont->screen_lock_keywords[i]) != NULL) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool jarvis_ontology_matches_tier1_trigger(const jarvis_ontology_t *ont, const char *text)
+{
+	if (!ont || !text || !*text) return false;
+	char clean[512];
+	jarvis_clean_phrase(text, clean, sizeof(clean));
+	if (!clean[0]) return false;
+	char padded[520];
+	snprintf(padded, sizeof(padded), " %s ", clean);
+	for (size_t i = 0; i < ont->tier1_trigger_count; i++) {
+		if (ont->tier1_triggers[i][0] && strstr(padded, ont->tier1_triggers[i]) != NULL) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool jarvis_ontology_has_echo_prefix(const jarvis_ontology_t *ont, const char *clean_text)
+{
+	if (!ont || !clean_text || !clean_text[0]) return false;
+	for (size_t i = 0; i < ont->echo_prefix_count; i++) {
+		const char *ep = ont->echo_prefixes[i];
+		size_t plen = strlen(ep);
+		if (plen > 0 && strncmp(clean_text, ep, plen) == 0 && clean_text[plen] == ' ') {
+			return true;
+		}
 	}
 	return false;
 }
@@ -1825,33 +2073,61 @@ void jarvis_ontology_normalize_asr(
 		i++;
 	}
 
-	/* 3. Strip leading Whisper prompt-echo fragments ("o que e" / "o que") when immediately
-	 *    followed by a polite modal or command verb (e.g. "o que épode ir ...").
+	/* 3. Strip leading Whisper prompt-echo fragments (from ontology whisper_echo_prefixes)
+	 *    when immediately followed by a polite modal or command verb.
 	 */
 	size_t start_idx = 0;
-	if (ont && n_tok >= 3 &&
-	    strcmp(clean_toks[0], "o") == 0 && strcmp(clean_toks[1], "que") == 0) {
-		size_t check_idx = 2;
-		if (strcmp(clean_toks[2], "e") == 0 && n_tok >= 4) {
-			check_idx = 3;
+	if (ont && ont->echo_prefix_count > 0 && n_tok >= 2) {
+		size_t best_ep_toks = 0;
+		for (size_t ei = 0; ei < ont->echo_prefix_count; ei++) {
+			const char *ep = ont->echo_prefixes[ei];
+			if (!ep[0]) continue;
+			char ep_copy[JARVIS_SHORT_LEN];
+			snprintf(ep_copy, sizeof(ep_copy), "%s", ep);
+			char *ep_toks[8];
+			size_t n_ep = 0;
+			char *ep_save = NULL;
+			for (char *t = strtok_r(ep_copy, " ", &ep_save); t && n_ep < 8; t = strtok_r(NULL, " ", &ep_save)) {
+				ep_toks[n_ep++] = t;
+			}
+			if (n_ep == 0 || n_tok <= n_ep || n_ep <= best_ep_toks) continue;
+			bool match = true;
+			for (size_t k = 0; k < n_ep; k++) {
+				if (strcmp(clean_toks[k], ep_toks[k]) != 0) {
+					match = false;
+					break;
+				}
+			}
+			if (!match) continue;
+			const char *nxt = clean_toks[n_ep];
+			bool followed_by_modal_or_verb =
+				jarvis_ontology_is_polite_prefix(ont, nxt) ||
+				jarvis_ontology_is_verb_head(ont, nxt);
+			if (!followed_by_modal_or_verb) {
+				for (size_t pi = 0; pi < ont->polite_prefix_count; pi++) {
+					const char *pp = ont->polite_prefixes[pi];
+					if (!pp[0] || strstr(pp, "{wake}") || strchr(pp, ' ') || strlen(pp) < 4) continue;
+					if (jarvis_token_similarity(nxt, pp) >= 0.75) {
+						followed_by_modal_or_verb = true;
+						break;
+					}
+				}
+			}
+			if (followed_by_modal_or_verb) {
+				best_ep_toks = n_ep;
+			}
 		}
-		const char *nxt = clean_toks[check_idx];
-		bool followed_by_modal_or_verb =
-			jarvis_ontology_is_polite_prefix(ont, nxt) ||
-			jarvis_ontology_is_verb_head(ont, nxt) ||
-			jarvis_token_similarity(nxt, "podes") >= 0.75 ||
-			jarvis_token_similarity(nxt, "pode") >= 0.75;
-		if (followed_by_modal_or_verb) {
-			start_idx = check_idx;
+		if (best_ep_toks > 0) {
+			start_idx = best_ep_toks;
 		}
 	}
 
-	/* Snap elided leading modal token (e.g. "épode" -> "podes") */
+	/* Snap elided leading modal token (e.g. "epode" -> "podes") */
 	if (ont && start_idx < n_tok && !jarvis_ontology_is_vocab_word(ont, clean_toks[start_idx])) {
 		for (size_t pi = 0; pi < ont->polite_prefix_count; pi++) {
 			const char *pp = ont->polite_prefixes[pi];
-			if (!strchr(pp, ' ') && strlen(pp) >= 4 &&
-			    jarvis_token_similarity(clean_toks[start_idx], pp) >= 0.76) {
+			if (!pp[0] || strstr(pp, "{wake}") || strchr(pp, ' ') || strlen(pp) < 4) continue;
+			if (jarvis_token_similarity(clean_toks[start_idx], pp) >= 0.76) {
 				snprintf(folded_toks[start_idx], sizeof(folded_toks[0]), "%s", pp);
 				snprintf(clean_toks[start_idx], sizeof(clean_toks[0]), "%s", pp);
 				break;
