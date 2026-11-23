@@ -113,6 +113,26 @@ static bool ren_ff_get_geometry(void *ud, int *x, int *y, int *w, int *h)
 	return true;
 }
 
+static bool ren_ff_get_screen_bounds(void *ud, int *sw, int *sh)
+{
+	(void)ud;
+	char *out = NULL;
+	int rc = ren_call_tool("x11_windows", "focused", &out);
+	if (rc != 0 || !out) {
+		free(out);
+		return false;
+	}
+	int gsw = 0, gsh = 0;
+	bool ok = extract_json_int(out, "sw", &gsw) &&
+	          extract_json_int(out, "sh", &gsh) &&
+	          gsw > 0 && gsh > 0;
+	free(out);
+	if (!ok) return false;
+	*sw = gsw;
+	*sh = gsh;
+	return true;
+}
+
 static void ren_ff_click_xy(void *ud, int x, int y, int btn)
 {
 	(void)ud;
@@ -134,6 +154,7 @@ static firefox_core_ops_t ren_ff_ops(void)
 	ops.focus_browser        = ren_ff_focus_browser;
 	ops.is_browser_focused   = ren_ff_is_browser_focused;
 	ops.get_focused_geometry = ren_ff_get_geometry;
+	ops.get_screen_bounds    = ren_ff_get_screen_bounds;
 	ops.click_xy             = ren_ff_click_xy;
 	ops.should_abort         = ren_ff_should_abort;
 	ops.ud                   = NULL;
@@ -239,6 +260,36 @@ static int tool_browser(const char *args, char **out_result)
 		return (wrc == 1) ? 0 : -1;
 	}
 
+	if (strcasecmp(args, "close") == 0 || strncasecmp(args, "close ", 6) == 0) {
+		const char *q = (strlen(args) > 6) ? (args + 6) : "";
+		while (*q == ' ') q++;
+		if (!ren_ff_focus_browser(NULL)) {
+			*out_result = strdup("Error: no focused browser window to close tab");
+			return -1;
+		}
+		char tab_title[128] = {0};
+		if (*q && !firefox_core_switch_tab(&ops, q, tab_title, sizeof(tab_title))) {
+			char err[300];
+			snprintf(err, sizeof(err), "Error: no open browser tab matching: %.200s", q);
+			*out_result = strdup(err);
+			return -1;
+		}
+		char *in_out = NULL;
+		int irc = ren_call_tool("input", "key ctrl+w", &in_out);
+		if (irc != 0) {
+			*out_result = in_out ? in_out : strdup("Error: input tool unavailable to close browser tab");
+			return -1;
+		}
+		free(in_out);
+		char out[256];
+		if (tab_title[0])
+			snprintf(out, sizeof(out), "closed tab '%s'", tab_title);
+		else
+			snprintf(out, sizeof(out), "closed current browser tab");
+		*out_result = strdup(out);
+		return 0;
+	}
+
 	if (strncasecmp(args, "tab ", 4) == 0) {
 		const char *q = args + 4;
 		while (*q == ' ') q++;
@@ -246,11 +297,16 @@ static int tool_browser(const char *args, char **out_result)
 		char tab_title[128] = {0};
 		if (firefox_core_switch_tab(&ops, q, tab_title, sizeof(tab_title))) {
 			ff_doc_state_t doc;
-			char reason[64] = {0};
-			int wrc = firefox_core_wait_loaded(&ops, NULL, NULL, NULL, 1500, false, &doc, reason, sizeof(reason));
-			if (wrc == -2) {
-				*out_result = strdup("Error: interrupted after switching browser tab");
-				return -1;
+			firefox_core_probe_doc(&doc);
+			if (!(doc.found && doc.showing && !doc.defunct && !doc.busy &&
+			      doc.url[0] != '\0' && strcmp(doc.url, "about:blank") != 0 &&
+			      doc.child_count > 0)) {
+				char reason[64] = {0};
+				int wrc = firefox_core_wait_loaded(&ops, NULL, NULL, NULL, 1200, false, &doc, reason, sizeof(reason));
+				if (wrc == -2) {
+					*out_result = strdup("Error: interrupted after switching browser tab");
+					return -1;
+				}
 			}
 			firefox_tab_t tabs[FIREFOX_CORE_MAX_TABS];
 			size_t ntabs = firefox_core_populate_tabs(tabs, FIREFOX_CORE_MAX_TABS);
@@ -276,15 +332,21 @@ static int tool_browser(const char *args, char **out_result)
 
 		char role[64] = {0}, msg[512] = {0};
 		if (firefox_core_click_element(&ops, q, 1, role, sizeof(role), msg, sizeof(msg))) {
-			char *out = (char *)malloc(FF_INSPECT_BUF_SZ + 768);
+			char *out = (char *)malloc(FF_INSPECT_BUF_SZ + 1024);
 			if (!out) return -1;
 			if (strcmp(role, "table row") == 0 || strcmp(role, "page tab") == 0 || strcmp(role, "list item") == 0) {
-				usleep(120000);
+				usleep(160000);
 				firefox_tab_t tabs[FIREFOX_CORE_MAX_TABS];
 				size_t ntabs = firefox_core_populate_tabs(tabs, FIREFOX_CORE_MAX_TABS);
 				char page[FF_INSPECT_BUF_SZ] = {0};
-				firefox_core_inspect_a11y(&ops, tabs, ntabs, "entry", page, sizeof(page));
-				snprintf(out, FF_INSPECT_BUF_SZ + 768, "%s%s%s", msg, page[0] ? "\n" : "", page);
+				firefox_core_inspect_a11y(&ops, tabs, ntabs, NULL, page, sizeof(page));
+				ff_focused_input_t foc;
+				if (firefox_core_get_focused_input(&ops, &foc)) {
+					snprintf(out, FF_INSPECT_BUF_SZ + 1024, "%s (focused: [%s '%.48s'])%s%s",
+					         msg, foc.role, foc.label, page[0] ? "\n" : "", page);
+				} else {
+					snprintf(out, FF_INSPECT_BUF_SZ + 1024, "%s%s%s", msg, page[0] ? "\n" : "", page);
+				}
 			} else {
 				ff_doc_state_t after_doc;
 				char reason[64] = {0};
@@ -300,15 +362,25 @@ static int tool_browser(const char *args, char **out_result)
 				size_t ntabs = firefox_core_populate_tabs(tabs, FIREFOX_CORE_MAX_TABS);
 				char page[FF_INSPECT_BUF_SZ] = {0};
 				firefox_core_read_a11y(&ops, tabs, ntabs, NULL, 0, page, sizeof(page));
-				snprintf(out, FF_INSPECT_BUF_SZ + 768, "%s (%s)%s%s",
-				         msg, reason, page[0] ? "\n" : "", page);
+				ff_focused_input_t foc;
+				if (firefox_core_get_focused_input(&ops, &foc)) {
+					snprintf(out, FF_INSPECT_BUF_SZ + 1024, "%s (%s; focused: [%s '%.48s'])%s%s",
+					         msg, reason, foc.role, foc.label, page[0] ? "\n" : "", page);
+				} else {
+					snprintf(out, FF_INSPECT_BUF_SZ + 1024, "%s (%s)%s%s",
+					         msg, reason, page[0] ? "\n" : "", page);
+				}
 			}
 			*out_result = out;
 			return 0;
 		}
-		char err[300];
-		snprintf(err, sizeof(err), "Error: UI element not found in accessibility tree: %.200s", q);
-		*out_result = strdup(err);
+		if (msg[0]) {
+			*out_result = strdup(msg);
+		} else {
+			char err[300];
+			snprintf(err, sizeof(err), "Error: UI element not found in accessibility tree: %.200s", q);
+			*out_result = strdup(err);
+		}
 		return -1;
 	}
 
@@ -329,18 +401,47 @@ static int tool_browser(const char *args, char **out_result)
 		} else {
 			snprintf(text, sizeof(text), "%s", raw);
 		}
+		if (!text[0]) {
+			*out_result = strdup("Error: usage: browser send [target |] <text>");
+			return -1;
+		}
 
-		char click_msg[160] = {0}, role[64] = {0};
+		char click_msg[512] = {0}, role[64] = {0};
 		if (target[0]) {
 			if (!firefox_core_click_element(&ops, target, 1, role, sizeof(role), click_msg, sizeof(click_msg))) {
-				char err[300];
-				snprintf(err, sizeof(err), "Error: UI element not found: %.200s", target);
-				*out_result = strdup(err);
+				if (click_msg[0]) {
+					*out_result = strdup(click_msg);
+				} else {
+					char err[300];
+					snprintf(err, sizeof(err), "Error: UI element not found: %.200s", target);
+					*out_result = strdup(err);
+				}
 				return -1;
 			}
 			if (strcmp(role, "entry") != 0 && strcmp(role, "combo box") != 0) usleep(160000);
 		}
-		firefox_core_ensure_entry_focused(&ops);
+
+		if (!ren_ff_is_browser_focused(NULL)) {
+			ren_ff_focus_browser(NULL);
+			usleep(40000);
+			if (!ren_ff_is_browser_focused(NULL)) {
+				*out_result = strdup("Error: browser window is not focused; refusing to type");
+				return -1;
+			}
+		}
+
+		ff_focused_input_t foc;
+		char ferr[512] = {0};
+		if (!firefox_core_ensure_editable_focused(&ops, &foc, ferr, sizeof(ferr))) {
+			*out_result = strdup(ferr[0] ? ferr : "Error: no editable input focused in browser");
+			return -1;
+		}
+
+		if (!ren_ff_is_browser_focused(NULL)) {
+			*out_result = strdup("Error: browser window lost focus before typing");
+			return -1;
+		}
+
 		char input_arg[600], *input_out = NULL;
 		snprintf(input_arg, sizeof(input_arg), "submit %s", text);
 		if (ren_call_tool("input", input_arg, &input_out) != 0) {
@@ -348,12 +449,12 @@ static int tool_browser(const char *args, char **out_result)
 			return -1;
 		}
 		free(input_out);
-		char out[512];
-		if (click_msg[0]) {
-			snprintf(out, sizeof(out), "%s -> typed+enter: %.120s", click_msg, text);
-		} else {
-			snprintf(out, sizeof(out), "typed+enter: %.120s", text);
-		}
+		char out[768];
+		snprintf(out, sizeof(out), "%s%styped+enter into [%s '%.64s']: %.120s",
+		         click_msg, click_msg[0] ? " -> " : "",
+		         foc.found ? foc.role : "input",
+		         foc.found ? foc.label : "",
+		         text);
 		*out_result = strdup(out);
 		return 0;
 	}
@@ -483,6 +584,6 @@ static char *ff_context_provider(void)
 
 XY_MODULE_API void xy_install(void)
 {
-	ren_register_tool("browser", "browser <inspect [filter] | read [offset|filter] | wait [ms|text] | tab <title_or_url_substring> | url <https://...> | search <query> | click <element_label> | send <element_label> | <text>>", tool_browser);
+	ren_register_tool("browser", "browser <inspect [filter] | read [offset|filter] | wait [ms|text] | tab <title_or_url_substring> | close [tab_query] | url <https://...> | search <query> | click <element_label> | send <element_label> | <text>>", tool_browser);
 	ren_register_context_provider(ff_context_provider);
 }

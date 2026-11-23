@@ -576,6 +576,25 @@ spawn_pw_record(pid_t *out_pid)
 	char target[256] = {0};
 	char target_arg[280] = {0};
 	jarvis_rc_get("pw_target", NULL, target, sizeof(target));
+	if (!target[0] || strcasecmp(target, "auto") == 0) {
+		target[0] = '\0';
+		FILE *sfp = popen("pactl list sources short 2>/dev/null", "r");
+		if (sfp) {
+			char sline[512];
+			while (fgets(sline, sizeof(sline), sfp)) {
+				char *tok = strtok(sline, " \t\r\n");
+				while (tok) {
+					if (strcmp(tok, "jarvis_aec_source") == 0) {
+						snprintf(target, sizeof(target), "jarvis_aec_source");
+						break;
+					}
+					tok = strtok(NULL, " \t\r\n");
+				}
+				if (target[0]) break;
+			}
+			pclose(sfp);
+		}
+	}
 	if (target[0])
 		snprintf(target_arg, sizeof(target_arg), "--target=%s", target);
 
@@ -974,9 +993,9 @@ load_wav_f32(const char *path, float **out_pcm, int *out_samples)
 static int
 compute_audio_ctx(int n_samples, int is_wake, int is_partial)
 {
-	int frames = (n_samples / 320) + (is_wake ? 48 : (is_partial ? 64 : 80));
+	int frames = (n_samples / 320) + (is_wake ? 24 : (is_partial ? 24 : 32));
 	int aligned = ((frames + 31) / 32) * 32;
-	int min_ctx = is_wake ? 384 : (is_partial ? 640 : 768);
+	int min_ctx = is_wake ? 128 : (is_partial ? 192 : 256);
 	if (aligned < min_ctx)
 		aligned = min_ctx;
 	if (aligned > 1500)
@@ -1507,13 +1526,23 @@ decode_try_submit(int64_t start_f, int64_t end_f, int64_t voiced_f,
 }
 
 static void
+decode_try_abort_partial(void)
+{
+	pthread_mutex_lock(&g_dec.mtx);
+	if (g_dec.busy && g_dec.is_partial) {
+		g_dec.abort_flag = 1;
+	}
+	pthread_mutex_unlock(&g_dec.mtx);
+}
+
+static void
 decode_force_submit_final(int64_t start_f, int64_t end_f, int64_t voiced_f,
                           const char *lang, const char *prompt, int max_tok)
 {
 	pthread_mutex_lock(&g_dec.mtx);
 	if (g_dec.busy) {
 		if (!g_dec.is_partial && g_dec.job_voiced_f >= voiced_f - 1 &&
-		    g_dec.job_end_f >= voiced_f + 20) {
+		    g_dec.job_end_f >= voiced_f + 12) {
 			pthread_mutex_unlock(&g_dec.mtx);
 			return;
 		}
@@ -1522,7 +1551,7 @@ decode_force_submit_final(int64_t start_f, int64_t end_f, int64_t voiced_f,
 			pthread_cond_wait(&g_dec.cond, &g_dec.mtx);
 	} else if (!g_dec.has_job && g_dec.has_result &&
 	           !g_dec.result_is_partial && g_dec.result_voiced_f >= voiced_f - 1 &&
-	           g_dec.result_end_f >= voiced_f + 20) {
+	           g_dec.result_end_f >= voiced_f + 12) {
 		pthread_mutex_unlock(&g_dec.mtx);
 		return;
 	}
@@ -2084,9 +2113,9 @@ handle_stream(int srv, int cli, const char *mode, const char *lang,
 		return;
 	}
 
-	/* Authoritative final pass covering last_voiced_f + 520ms tail (26 frames) */
+	/* Authoritative final pass covering last_voiced_f + 360ms tail (18 frames) */
 	{
-		int64_t end_f = last_voiced_f + 26;
+		int64_t end_f = last_voiced_f + 18;
 		decode_force_submit_final(speech_start_f, end_f, last_voiced_f, lang, cmd_prompt, 0);
 	}
 
@@ -2188,8 +2217,8 @@ handle_jarvis_wait_ex(int srv, int cli, struct whisper_context *ctx_wake, int n_
 		write_state_file(state_file, "jarvis-cmd", NULL, NULL);
 	}
 
-	int eff_silence_ms = operating_mode ? jarvis_rc_get_int("steer_silence_ms", 680) : cmd_silence_ms;
-	int min_silence_ms = operating_mode ? 480 : 640;
+	int eff_silence_ms = operating_mode ? jarvis_rc_get_int("steer_silence_ms", 620) : cmd_silence_ms;
+	int min_silence_ms = operating_mode ? 440 : 560;
 	if (eff_silence_ms < min_silence_ms)
 		eff_silence_ms = min_silence_ms;
 
@@ -2199,10 +2228,15 @@ handle_jarvis_wait_ex(int srv, int cli, struct whisper_context *ctx_wake, int n_
 	if (max_utter_ms > MAX_UTTER_FRAMES * FRAME_MS)
 		max_utter_ms = MAX_UTTER_FRAMES * FRAME_MS;
 	int64_t max_utter_frames = (int64_t)(max_utter_ms / FRAME_MS);
-	int spec_silence_f = operating_mode ? 14 : 20;
-	int spec_tail_f = operating_mode ? 14 : 20;
-	int final_tail_f = operating_mode ? 14 : 26;
-	int soft_limit_f = (eff_silence_ms / FRAME_MS) + (operating_mode ? 15 : 30);
+	int spec_silence_f = operating_mode ? 12 : 14;
+	int spec_tail_f = operating_mode ? 12 : 15;
+	int final_tail_f = operating_mode ? 12 : 18;
+	int soft_limit_f = (eff_silence_ms / FRAME_MS) + (operating_mode ? 10 : 18);
+	int spec_early_f = (eff_silence_ms * 7) / (10 * FRAME_MS);
+	if (spec_early_f < 28)
+		spec_early_f = 28;
+	if (spec_early_f > 45)
+		spec_early_f = 45;
 
 	while (running && !g_stop_req && !g_cancel_req) {
 		if (operating_mode) {
@@ -2495,7 +2529,7 @@ handle_jarvis_wait_ex(int srv, int cli, struct whisper_context *ctx_wake, int n_
 			 */
 			char active_tts_now[2048] = {0};
 			int tts_speaking_now = is_tts_currently_speaking(active_tts_now, sizeof(active_tts_now));
-			int cont_step_f = tts_speaking_now ? 16 : 18;
+			int cont_step_f = tts_speaking_now ? 14 : 16;
 			int pause_wake_check = (((silence_frames >= 8 && voiced_frames >= 10) ||
 			                         (silence_frames >= 12 && voiced_frames >= 5)) &&
 			                        !decoded_wake_paused &&
@@ -2755,7 +2789,7 @@ handle_jarvis_wait_ex(int srv, int cli, struct whisper_context *ctx_wake, int n_
 			    last_voiced_f > decoded_cmd_voiced_f + 12) {
 				pthread_mutex_lock(&g_dec.mtx);
 				int can_run = (!g_dec.busy && !g_dec.has_job &&
-				               (scan_f - g_dec.done_at_frame) >= 15);
+				               (scan_f - g_dec.done_at_frame) >= 12);
 				pthread_mutex_unlock(&g_dec.mtx);
 				if (can_run) {
 					int64_t end_f = last_voiced_f + 8;
@@ -2767,6 +2801,8 @@ handle_jarvis_wait_ex(int srv, int cli, struct whisper_context *ctx_wake, int n_
 			} else if ((silence_frames >= spec_silence_f || trailing_soft_frames >= (eff_silence_ms / FRAME_MS)) &&
 			           voiced_frames >= 8 &&
 			           (!decoded_cmd_is_final || last_voiced_f > decoded_cmd_voiced_f)) {
+				/* Preempt any stale partial decode so speculative final starts immediately */
+				decode_try_abort_partial();
 				/* Speculative full decode starts after spec_silence_f frames of silence
 				 * with a spec_tail_f tail so softer final words are included in full.
 				 */
@@ -2777,13 +2813,21 @@ handle_jarvis_wait_ex(int srv, int cli, struct whisper_context *ctx_wake, int n_
 				                  lang, eff_prompt, 0, 0);
 			}
 
+			int spec_final_ready = (!operating_mode && decoded_cmd_is_final &&
+			                        live_cmd[0] != '\0' &&
+			                        decoded_cmd_voiced_f >= last_voiced_f - 1 &&
+			                        decoded_cmd_end_f >= last_voiced_f + spec_tail_f &&
+			                        silence_frames >= spec_early_f);
+
 			/* Endpoint when:
-			 * 1. Full silence reaches eff_silence_ms (default 1500ms normal / 680ms steering), OR
-			 * 2. Energy has stayed below utter_start_db and >= 16.0 dB below speech peak
+			 * 1. Speculative final decode completed on matching speech + spec_early_f silence, OR
+			 * 2. Full silence reaches eff_silence_ms (default 900ms normal / 620ms steering), OR
+			 * 3. Energy has stayed below utter_start_db and >= 16.0 dB below speech peak
 			 *    for soft_limit_f so steady noise never hangs, OR
-			 * 3. Utterance reaches configurable max_utter_frames (default 60s, max 90s).
+			 * 4. Utterance reaches configurable max_utter_frames (default 60s, max 90s).
 			 */
-			if ((silence_frames * FRAME_MS) >= eff_silence_ms ||
+			if (spec_final_ready ||
+			    (silence_frames * FRAME_MS) >= eff_silence_ms ||
 			    (voiced_frames >= 8 && trailing_soft_frames >= soft_limit_f) ||
 			    cmd_len_f >= max_utter_frames) {
 				if (voiced_frames < 8 && live_cmd[0] == '\0') {
@@ -3053,9 +3097,9 @@ read_jarvis_runtime_cfg(char *lang, size_t lang_sz,
 	if (*out_conv_followup_ms < 0 || *out_conv_followup_ms > 3600000)
 		*out_conv_followup_ms = 9000;
 	if (out_cmd_silence_ms) {
-		int cs = jarvis_rc_get_int("cmd_silence_ms", 1500);
-		if (cs < 640)
-			cs = 640;
+		int cs = jarvis_rc_get_int("cmd_silence_ms", 900);
+		if (cs < 560)
+			cs = 560;
 		if (cs > 10000)
 			cs = 10000;
 		*out_cmd_silence_ms = cs;
@@ -3451,7 +3495,7 @@ run_inprocess_jarvis_turn(int srv, struct whisper_context *ctx_wake, int n_threa
 	snprintf(acting_pid, sizeof(acting_pid), "/tmp/jarvis-acting-%s.pid", u);
 
 	char lang[32], wm_surface[64];
-	int fcfg = 0, conv_followup_ms = 9000, cmd_silence_ms = 1500;
+	int fcfg = 0, conv_followup_ms = 9000, cmd_silence_ms = 900;
 	read_jarvis_runtime_cfg(lang, sizeof(lang), &fcfg, &conv_followup_ms, &cmd_silence_ms);
 	jarvis_rc_get("wm", "dwm", wm_surface, sizeof(wm_surface));
 

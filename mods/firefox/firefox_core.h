@@ -26,11 +26,19 @@
 #define FIREFOX_CORE_MAX_TABS 16
 #define FF_INSPECT_BUF_SZ     8192
 
-#define FF_ATSPI_STATE_BUSY     3
-#define FF_ATSPI_STATE_DEFUNCT  6
-#define FF_ATSPI_STATE_FOCUSED  12
-#define FF_ATSPI_STATE_SELECTED 23
-#define FF_ATSPI_STATE_SHOWING  25
+#define FF_ATSPI_STATE_BUSY        3
+#define FF_ATSPI_STATE_DEFUNCT     6
+#define FF_ATSPI_STATE_EDITABLE    7
+#define FF_ATSPI_STATE_ENABLED     8
+#define FF_ATSPI_STATE_FOCUSABLE  11
+#define FF_ATSPI_STATE_FOCUSED    12
+#define FF_ATSPI_STATE_MULTI_LINE 17
+#define FF_ATSPI_STATE_SELECTED   23
+#define FF_ATSPI_STATE_SENSITIVE  24
+#define FF_ATSPI_STATE_SHOWING    25
+#define FF_ATSPI_STATE_SINGLE_LINE 26
+#define FF_ATSPI_STATE_VISIBLE    30
+#define FF_ATSPI_SCROLL_ANYWHERE   6
 
 typedef struct {
 	int  index;
@@ -49,9 +57,19 @@ typedef struct {
 } ff_doc_state_t;
 
 typedef struct {
+	bool found;
+	bool editable;
+	char role[64];
+	char label[128];
+	int  cx;
+	int  cy;
+} ff_focused_input_t;
+
+typedef struct {
 	bool (*focus_browser)(void *ud);
 	bool (*is_browser_focused)(void *ud);
 	bool (*get_focused_geometry)(void *ud, int *x, int *y, int *w, int *h);
+	bool (*get_screen_bounds)(void *ud, int *sw, int *sh);
 	void (*click_xy)(void *ud, int x, int y, int btn);
 	int  (*should_abort)(void *ud);
 	void *ud;
@@ -291,11 +309,13 @@ typedef struct {
 	void            *(*get_component_iface)(void *);
 	ff_atspi_rect_t *(*comp_get_extents)(void *, int, void **);
 	int              (*comp_grab_focus)(void *, void **);
+	int              (*comp_scroll_to)(void *, int, void **);
 	void            *(*get_action_iface)(void *);
 	int              (*action_get_n)(void *, void **);
 	int              (*action_do)(void *, int, void **);
 	void            *(*get_state_set)(void *);
 	int              (*state_set_contains)(void *, int);
+	void            *(*g_ref)(void *);
 	void             (*g_unref)(void *);
 	void             (*g_free)(void *);
 	bool             ready;
@@ -328,11 +348,13 @@ static bool ff_ensure_atspi_loaded(void)
 	*(void **)&g_ff_atspi.get_component_iface = dlsym(h_atspi, "atspi_accessible_get_component_iface");
 	*(void **)&g_ff_atspi.comp_get_extents    = dlsym(h_atspi, "atspi_component_get_extents");
 	*(void **)&g_ff_atspi.comp_grab_focus     = dlsym(h_atspi, "atspi_component_grab_focus");
+	*(void **)&g_ff_atspi.comp_scroll_to      = dlsym(h_atspi, "atspi_component_scroll_to");
 	*(void **)&g_ff_atspi.get_action_iface    = dlsym(h_atspi, "atspi_accessible_get_action_iface");
 	*(void **)&g_ff_atspi.action_get_n        = dlsym(h_atspi, "atspi_action_get_n_actions");
 	*(void **)&g_ff_atspi.action_do           = dlsym(h_atspi, "atspi_action_do_action");
 	*(void **)&g_ff_atspi.get_state_set       = dlsym(h_atspi, "atspi_accessible_get_state_set");
 	*(void **)&g_ff_atspi.state_set_contains  = dlsym(h_atspi, "atspi_state_set_contains");
+	*(void **)&g_ff_atspi.g_ref               = dlsym(h_gobj, "g_object_ref");
 	*(void **)&g_ff_atspi.g_unref             = dlsym(h_gobj, "g_object_unref");
 	*(void **)&g_ff_atspi.g_free              = dlsym(h_glib, "g_free");
 
@@ -373,16 +395,40 @@ static bool ff_is_interactive_role(const char *role)
 	       strcmp(role, "table row") == 0;
 }
 
-static bool ff_get_node_center(void *node, const firefox_core_ops_t *ops, int *out_cx, int *out_cy)
+static __attribute__((unused)) bool ff_point_in_viewport(
+	int x, int y,
+	bool has_win, int wx, int wy, int ww, int wh,
+	bool has_scr, int sw, int sh)
 {
+	if (x < 0 || y < 0) return false;
+	if (has_win && ww > 0 && wh > 0) {
+		if (x < wx || x >= wx + ww || y < wy || y >= wy + wh) return false;
+	}
+	if (has_scr && sw > 0 && sh > 0) {
+		if (x >= sw || y >= sh) return false;
+	}
+	if (!has_win && !has_scr) {
+		if (x >= 16384 || y >= 16384) return false;
+	}
+	return true;
+}
+
+static bool ff_get_node_center_checked(
+	void *node, const firefox_core_ops_t *ops,
+	int *out_cx, int *out_cy, bool *out_in_vp)
+{
+	if (out_in_vp) *out_in_vp = false;
 	if (!node || !g_ff_atspi.get_component_iface || !g_ff_atspi.comp_get_extents) return false;
 	void *comp = g_ff_atspi.get_component_iface(node);
 	if (!comp) return false;
 	void *cerr = NULL;
 	ff_atspi_rect_t *r = NULL;
 	bool is_win_rel = false;
-	int wx = 0, wy = 33, ww = 1600, wh = 867;
-	if (ops && ops->get_focused_geometry && ops->get_focused_geometry(ops->ud, &wx, &wy, &ww, &wh)) {
+	int wx = 0, wy = 0, ww = 0, wh = 0;
+	bool has_win = (ops && ops->get_focused_geometry &&
+	                ops->get_focused_geometry(ops->ud, &wx, &wy, &ww, &wh) &&
+	                ww > 0 && wh > 0);
+	if (has_win) {
 		r = g_ff_atspi.comp_get_extents(comp, 1, &cerr);
 		is_win_rel = (r != NULL && r->width > 0 && r->height > 0);
 	}
@@ -409,12 +455,23 @@ static bool ff_get_node_center(void *node, const firefox_core_ops_t *ops, int *o
 		ry += wy;
 	}
 
-	bool valid = (rx >= 0 && ry >= 0 && rx < 3200 && ry < 1200);
-	if (valid) {
-		*out_cx = rx + rw / 2;
-		*out_cy = ry + rh / 2;
-	}
-	return valid;
+	int cx = rx + rw / 2;
+	int cy = ry + rh / 2;
+	int sw = 0, sh = 0;
+	bool has_scr = (ops && ops->get_screen_bounds &&
+	                ops->get_screen_bounds(ops->ud, &sw, &sh) &&
+	                sw > 0 && sh > 0);
+	bool in_vp = ff_point_in_viewport(cx, cy, has_win, wx, wy, ww, wh, has_scr, sw, sh);
+	if (out_cx) *out_cx = cx;
+	if (out_cy) *out_cy = cy;
+	if (out_in_vp) *out_in_vp = in_vp;
+	return true;
+}
+
+static bool ff_get_node_center(void *node, const firefox_core_ops_t *ops, int *out_cx, int *out_cy)
+{
+	bool in_vp = false;
+	return ff_get_node_center_checked(node, ops, out_cx, out_cy, &in_vp) && in_vp;
 }
 
 static void ff_clean_atspi_text(const char *raw, char *clean_txt, size_t clean_sz)
@@ -570,9 +627,14 @@ static void ff_walk_browser_node(
 			ff_emit_line(ctx, line);
 		} else if (!in_doc && !ctx->read_mode && strcmp(role, "page tab") == 0 && name && *name) {
 			int cx = 0, cy = 0;
+			bool in_vp = false;
 			char coord_buf[32] = {0};
-			if (ff_get_node_center(node, ctx->ops, &cx, &cy)) {
-				snprintf(coord_buf, sizeof(coord_buf), " @(%d,%d)", cx, cy);
+			if (ff_get_node_center_checked(node, ctx->ops, &cx, &cy, &in_vp)) {
+				if (in_vp) {
+					snprintf(coord_buf, sizeof(coord_buf), " @(%d,%d)", cx, cy);
+				} else {
+					snprintf(coord_buf, sizeof(coord_buf), " *OFF-SCREEN*");
+				}
 			}
 			bool is_sel = ff_node_has_state(node, FF_ATSPI_STATE_SELECTED);
 			char line[320];
@@ -581,7 +643,8 @@ static void ff_walk_browser_node(
 			ff_emit_line(ctx, line);
 			skip_children = true;
 		} else if (now_in_doc && !ctx->read_mode &&
-		           (ff_is_interactive_role(role) || strcmp(role, "heading") == 0)) {
+		           (ff_is_interactive_role(role) || strcmp(role, "heading") == 0 ||
+		            ff_node_has_state(node, FF_ATSPI_STATE_EDITABLE))) {
 			char *txt = NULL;
 			if ((!name || !*name) && g_ff_atspi.text_get_text) {
 				void *terr = NULL;
@@ -591,7 +654,8 @@ static void ff_walk_browser_node(
 			char clean_txt[180] = {0};
 			ff_clean_atspi_text(best_txt, clean_txt, sizeof(clean_txt));
 
-			bool is_input = (strcmp(role, "entry") == 0 || strcmp(role, "combo box") == 0);
+			bool is_editable = ff_node_has_state(node, FF_ATSPI_STATE_EDITABLE);
+			bool is_input = (strcmp(role, "entry") == 0 || strcmp(role, "combo box") == 0 || is_editable);
 			bool matches = true;
 			if (child_filter && *child_filter && !is_input) {
 				matches = ff_str_ci(clean_txt, child_filter) ||
@@ -599,12 +663,39 @@ static void ff_walk_browser_node(
 				          ff_str_ci(role, child_filter);
 			}
 
-			if (matches && clean_txt[0]) {
+			if (matches && (clean_txt[0] || is_input)) {
 				int cx = 0, cy = 0;
-				if (ff_get_node_center(node, ctx->ops, &cx, &cy)) {
-					char line[256];
-					snprintf(line, sizeof(line), "[%s @(%d,%d)] %.120s\n",
-					         role, cx, cy, clean_txt);
+				bool in_vp = false;
+				if (ff_get_node_center_checked(node, ctx->ops, &cx, &cy, &in_vp)) {
+					bool is_focused = ff_node_has_state(node, FF_ATSPI_STATE_FOCUSED);
+					if (!is_focused && is_input && n_children > 0) {
+						for (int ci = 0; ci < n_children && ci < 4; ci++) {
+							void *cerr = NULL;
+							void *ch = g_ff_atspi.get_child_at_index(node, ci, &cerr);
+							if (ch) {
+								if (ff_node_has_state(ch, FF_ATSPI_STATE_FOCUSED)) is_focused = true;
+								g_ff_atspi.g_unref(ch);
+								if (is_focused) break;
+							}
+						}
+					}
+					bool is_disabled = !ff_node_has_state(node, FF_ATSPI_STATE_ENABLED) ||
+					                   !ff_node_has_state(node, FF_ATSPI_STATE_SENSITIVE);
+					const char *disp_txt = clean_txt[0] ? clean_txt : "(unlabeled)";
+					char line[280];
+					if (in_vp) {
+						snprintf(line, sizeof(line), "[%s @(%d,%d)%s%s] %.120s\n",
+						         role, cx, cy,
+						         is_focused ? " *FOCUSED*" : "",
+						         is_disabled ? " *DISABLED*" : "",
+						         disp_txt);
+					} else {
+						snprintf(line, sizeof(line), "[%s *OFF-SCREEN*%s%s] %.120s\n",
+						         role,
+						         is_focused ? " *FOCUSED*" : "",
+						         is_disabled ? " *DISABLED*" : "",
+						         disp_txt);
+					}
 					ff_emit_line(ctx, line);
 					if (strcmp(role, "table row") == 0 ||
 					    strcmp(role, "button") == 0 ||
@@ -612,7 +703,8 @@ static void ff_walk_browser_node(
 					    strcmp(role, "toggle button") == 0 ||
 					    strcmp(role, "entry") == 0 ||
 					    strcmp(role, "heading") == 0 ||
-					    strcmp(role, "link") == 0) {
+					    strcmp(role, "link") == 0 ||
+					    is_editable) {
 						skip_children = true;
 					}
 				}
@@ -685,6 +777,8 @@ typedef struct {
 	int                       best_score;
 	int                       best_cx;
 	int                       best_cy;
+	bool                      best_in_vp;
+	void                     *best_node;
 	char                      best_role[64];
 	char                      best_label[128];
 	int                       visited;
@@ -784,22 +878,25 @@ static void ff_find_interactive_node(void *node, int depth, bool in_doc, bool in
 
 		const char *label = clean_name[0] ? clean_name : clean_txt;
 		int score = ff_score_atspi_match(role, label, now_in_doc, now_in_chat_list, in_msg_row, ctx->query);
-		if (score > ctx->best_score) {
+		if (score > 0) {
 			int cx = 0, cy = 0;
-			if (ff_get_node_center(node, ctx->ops, &cx, &cy)) {
-				ctx->best_score = score;
-				ctx->best_cx = cx;
-				ctx->best_cy = cy;
-				snprintf(ctx->best_role, sizeof(ctx->best_role), "%.63s", role);
-				snprintf(ctx->best_label, sizeof(ctx->best_label), "%.120s", label[0] ? label : role);
-				if ((strcmp(role, "entry") == 0 || strcmp(role, "combo box") == 0) &&
-				    g_ff_atspi.get_component_iface && g_ff_atspi.comp_grab_focus) {
-					void *comp = g_ff_atspi.get_component_iface(node);
-					if (comp) {
-						void *ferr = NULL;
-						g_ff_atspi.comp_grab_focus(comp, &ferr);
-						g_ff_atspi.g_unref(comp);
+			bool in_vp = false;
+			if (ff_get_node_center_checked(node, ctx->ops, &cx, &cy, &in_vp)) {
+				if (in_vp) score += 25;
+				if (score > ctx->best_score) {
+					ctx->best_score = score;
+					ctx->best_cx = cx;
+					ctx->best_cy = cy;
+					ctx->best_in_vp = in_vp;
+					if (ctx->best_node && g_ff_atspi.g_unref) {
+						g_ff_atspi.g_unref(ctx->best_node);
+						ctx->best_node = NULL;
 					}
+					if (g_ff_atspi.g_ref) {
+						ctx->best_node = g_ff_atspi.g_ref(node);
+					}
+					snprintf(ctx->best_role, sizeof(ctx->best_role), "%.63s", role);
+					snprintf(ctx->best_label, sizeof(ctx->best_label), "%.120s", label[0] ? label : role);
 				}
 			}
 		}
@@ -825,18 +922,24 @@ static void ff_find_interactive_node(void *node, int depth, bool in_doc, bool in
 }
 
 typedef struct {
-	const firefox_core_ops_t *ops;
-	bool                      any_entry_focused;
-	int                       best_cx;
-	int                       best_cy;
-	int                       best_score;
-	char                      best_label[128];
-	int                       visited;
-} ff_entry_focus_ctx_t;
+	char role[64];
+	char label[128];
+	int  cx;
+	int  cy;
+	bool multi_line;
+} ff_edit_cand_t;
 
-static void ff_walk_entry_focus(void *node, int depth, bool in_doc, ff_entry_focus_ctx_t *ctx)
+typedef struct {
+	const firefox_core_ops_t *ops;
+	ff_focused_input_t        focused;
+	ff_edit_cand_t            cands[16];
+	int                       n_cands;
+	int                       visited;
+} ff_input_probe_ctx_t;
+
+static void ff_walk_editable_inputs(void *node, int depth, bool in_doc, ff_input_probe_ctx_t *ctx)
 {
-	if (!node || depth > 24 || ctx->visited > 2800 || ctx->any_entry_focused) return;
+	if (!node || depth > 24 || ctx->visited > 2800 || ctx->focused.found) return;
 	ctx->visited++;
 
 	void *err = NULL;
@@ -855,88 +958,189 @@ static void ff_walk_entry_focus(void *node, int depth, bool in_doc, ff_entry_foc
 		now_in_doc = true;
 	}
 
-	if (now_in_doc && role && (strcmp(role, "entry") == 0 || strcmp(role, "combo box") == 0)) {
-		if (ff_node_has_state(node, FF_ATSPI_STATE_FOCUSED)) {
-			ctx->any_entry_focused = true;
-		} else {
-			int nc = g_ff_atspi.get_child_count(node, &err);
-			for (int i = 0; i < nc && i < 4; i++) {
-				void *ch = g_ff_atspi.get_child_at_index(node, i, &err);
-				if (ch) {
-					if (ff_node_has_state(ch, FF_ATSPI_STATE_FOCUSED)) ctx->any_entry_focused = true;
-					g_ff_atspi.g_unref(ch);
+	bool skip_children = false;
+	if (now_in_doc && role &&
+	    strcmp(role, "document web") != 0 && strcmp(role, "document frame") != 0 &&
+	    strcmp(role, "frame") != 0 && strcmp(role, "application") != 0) {
+		bool is_entry_role = (strcmp(role, "entry") == 0 || strcmp(role, "combo box") == 0);
+		bool is_editable = ff_node_has_state(node, FF_ATSPI_STATE_EDITABLE);
+		if ((is_entry_role || is_editable) &&
+		    ff_node_has_state(node, FF_ATSPI_STATE_ENABLED) &&
+		    ff_node_has_state(node, FF_ATSPI_STATE_SENSITIVE)) {
+			bool has_focus = ff_node_has_state(node, FF_ATSPI_STATE_FOCUSED);
+			if (!has_focus) {
+				int nc = g_ff_atspi.get_child_count(node, &err);
+				for (int i = 0; i < nc && i < 4; i++) {
+					void *cerr = NULL;
+					void *ch = g_ff_atspi.get_child_at_index(node, i, &cerr);
+					if (ch) {
+						if (ff_node_has_state(ch, FF_ATSPI_STATE_FOCUSED)) has_focus = true;
+						g_ff_atspi.g_unref(ch);
+						if (has_focus) break;
+					}
 				}
 			}
-		}
-		int cx = 0, cy = 0;
-		if (!ctx->any_entry_focused && ff_get_node_center(node, ctx->ops, &cx, &cy)) {
+
 			char clean_name[128] = {0};
 			ff_clean_atspi_text(name, clean_name, sizeof(clean_name));
-			int score = 20 + (cy / 20);
-			if (ff_str_ci(clean_name, "escrever") ||
-			    ff_str_ci(clean_name, "mensagem") ||
-			    ff_str_ci(clean_name, "message") ||
-			    ff_str_ci(clean_name, "reply") ||
-			    ff_str_ci(clean_name, "chat")) {
-				score += 100;
+			const char *disp = clean_name[0] ? clean_name : "(unlabeled)";
+			int cx = 0, cy = 0;
+			bool in_vp = false;
+			bool have_coords = ff_get_node_center_checked(node, ctx->ops, &cx, &cy, &in_vp);
+
+			if (has_focus) {
+				ctx->focused.found = true;
+				ctx->focused.editable = true;
+				snprintf(ctx->focused.role, sizeof(ctx->focused.role), "%.63s", role);
+				snprintf(ctx->focused.label, sizeof(ctx->focused.label), "%.127s", disp);
+				ctx->focused.cx = have_coords ? cx : 0;
+				ctx->focused.cy = have_coords ? cy : 0;
+			} else if (have_coords && in_vp && ctx->n_cands < 16) {
+				ff_edit_cand_t *c = &ctx->cands[ctx->n_cands++];
+				snprintf(c->role, sizeof(c->role), "%.63s", role);
+				snprintf(c->label, sizeof(c->label), "%.127s", disp);
+				c->cx = cx;
+				c->cy = cy;
+				c->multi_line = ff_node_has_state(node, FF_ATSPI_STATE_MULTI_LINE);
 			}
-			if (score > ctx->best_score) {
-				ctx->best_score = score;
-				ctx->best_cx = cx;
-				ctx->best_cy = cy;
-				snprintf(ctx->best_label, sizeof(ctx->best_label), "%s", clean_name);
-			}
+			skip_children = true;
 		}
 	}
 
 	if (role) g_ff_atspi.g_free(role);
 	if (name) g_ff_atspi.g_free(name);
-	if (ctx->any_entry_focused) return;
+	if (skip_children || ctx->focused.found) return;
 
 	err = NULL;
 	int n = g_ff_atspi.get_child_count(node, &err);
 	if (n > 100) n = 100;
-	for (int i = 0; i < n && !ctx->any_entry_focused; i++) {
+	for (int i = 0; i < n && !ctx->focused.found; i++) {
 		err = NULL;
 		void *ch = g_ff_atspi.get_child_at_index(node, i, &err);
 		if (ch) {
-			ff_walk_entry_focus(ch, depth + 1, now_in_doc, ctx);
+			ff_walk_editable_inputs(ch, depth + 1, now_in_doc, ctx);
 			g_ff_atspi.g_unref(ch);
 		}
 	}
 }
 
-static __attribute__((unused)) void firefox_core_ensure_entry_focused(const firefox_core_ops_t *ops)
+static void ff_probe_editable_inputs(const firefox_core_ops_t *ops, ff_input_probe_ctx_t *ctx)
 {
-	if (!ops || !ops->is_browser_focused || !ops->is_browser_focused(ops->ud)) return;
+	memset(ctx, 0, sizeof(*ctx));
+	ctx->ops = ops;
 	if (!ff_ensure_atspi_loaded()) return;
 	void *desktop = g_ff_atspi.get_desktop(0);
 	if (!desktop) return;
 
-	ff_entry_focus_ctx_t ctx;
-	memset(&ctx, 0, sizeof(ctx));
-	ctx.ops = ops;
-
 	void *err = NULL;
 	int n_apps = g_ff_atspi.get_child_count(desktop, &err);
-	for (int i = 0; i < n_apps && !ctx.any_entry_focused; i++) {
+	for (int i = 0; i < n_apps && !ctx->focused.found; i++) {
 		err = NULL;
 		void *app = g_ff_atspi.get_child_at_index(desktop, i, &err);
 		if (!app) continue;
 		err = NULL;
 		char *aname = g_ff_atspi.get_name(app, &err);
 		if (ff_is_browser_name(aname)) {
-			ff_walk_entry_focus(app, 0, false, &ctx);
+			ff_walk_editable_inputs(app, 0, false, ctx);
 		}
 		if (aname) g_ff_atspi.g_free(aname);
 		g_ff_atspi.g_unref(app);
 	}
 	g_ff_atspi.g_unref(desktop);
+}
 
-	if (!ctx.any_entry_focused && ctx.best_score > 0 && ops->click_xy) {
-		ops->click_xy(ops->ud, ctx.best_cx, ctx.best_cy, 1);
-		usleep(80000);
+static __attribute__((unused)) bool firefox_core_get_focused_input(
+	const firefox_core_ops_t *ops, ff_focused_input_t *out_info)
+{
+	if (out_info) memset(out_info, 0, sizeof(*out_info));
+	ff_input_probe_ctx_t ctx;
+	ff_probe_editable_inputs(ops, &ctx);
+	if (ctx.focused.found && out_info) *out_info = ctx.focused;
+	return ctx.focused.found;
+}
+
+static __attribute__((unused)) bool firefox_core_ensure_editable_focused(
+	const firefox_core_ops_t *ops,
+	ff_focused_input_t *out_info,
+	char *out_err, size_t err_sz)
+{
+	if (out_info) memset(out_info, 0, sizeof(*out_info));
+	if (out_err && err_sz > 0) out_err[0] = '\0';
+
+	if (ops && ops->is_browser_focused && !ops->is_browser_focused(ops->ud)) {
+		if (ops->focus_browser) ops->focus_browser(ops->ud);
+		usleep(40000);
+		if (!ops->is_browser_focused(ops->ud)) {
+			if (out_err && err_sz > 0) {
+				snprintf(out_err, err_sz, "Error: browser window is not focused");
+			}
+			return false;
+		}
 	}
+
+	ff_input_probe_ctx_t ctx;
+	ff_probe_editable_inputs(ops, &ctx);
+	if (ctx.focused.found) {
+		if (out_info) *out_info = ctx.focused;
+		return true;
+	}
+
+	if (ctx.n_cands == 0) {
+		if (out_err && err_sz > 0) {
+			snprintf(out_err, err_sz, "Error: no visible editable input found on page");
+		}
+		return false;
+	}
+
+	int chosen = -1;
+	if (ctx.n_cands == 1) {
+		chosen = 0;
+	} else {
+		int multi_idx = -1, n_multi = 0;
+		for (int i = 0; i < ctx.n_cands; i++) {
+			if (ctx.cands[i].multi_line) {
+				multi_idx = i;
+				n_multi++;
+			}
+		}
+		if (n_multi == 1) chosen = multi_idx;
+	}
+
+	if (chosen >= 0) {
+		const ff_edit_cand_t *c = &ctx.cands[chosen];
+		if (ops && ops->click_xy) {
+			ops->click_xy(ops->ud, c->cx, c->cy, 1);
+			usleep(80000);
+		}
+		if (out_info) {
+			out_info->found = true;
+			out_info->editable = true;
+			snprintf(out_info->role, sizeof(out_info->role), "%s", c->role);
+			snprintf(out_info->label, sizeof(out_info->label), "%s", c->label);
+			out_info->cx = c->cx;
+			out_info->cy = c->cy;
+		}
+		return true;
+	}
+
+	if (out_err && err_sz > 0) {
+		size_t off = (size_t)snprintf(
+			out_err, err_sz,
+			"Error: no input focused and %d editable inputs visible (", ctx.n_cands);
+		for (int i = 0; i < ctx.n_cands && i < 4 && off + 48 < err_sz; i++) {
+			off += (size_t)snprintf(
+				out_err + off, err_sz - off,
+				"%s[%s '%.32s']", i > 0 ? ", " : "",
+				ctx.cands[i].role, ctx.cands[i].label);
+		}
+		snprintf(out_err + off, err_sz - off, "); click or specify target first");
+	}
+	return false;
+}
+
+static __attribute__((unused)) void firefox_core_ensure_entry_focused(const firefox_core_ops_t *ops)
+{
+	firefox_core_ensure_editable_focused(ops, NULL, NULL, 0);
 }
 
 static __attribute__((unused)) bool firefox_core_click_element(
@@ -973,11 +1177,87 @@ static __attribute__((unused)) bool firefox_core_click_element(
 	}
 	g_ff_atspi.g_unref(desktop);
 
-	if (ctx.best_score <= 0) return false;
+	if (ctx.best_score <= 0) {
+		if (ctx.best_node && g_ff_atspi.g_unref) g_ff_atspi.g_unref(ctx.best_node);
+		return false;
+	}
 
 	if (out_role && role_sz > 0) {
 		snprintf(out_role, role_sz, "%s", ctx.best_role);
 	}
+
+	if (!ctx.best_in_vp) {
+		if (ctx.best_node && g_ff_atspi.get_component_iface && g_ff_atspi.comp_scroll_to) {
+			void *comp = g_ff_atspi.get_component_iface(ctx.best_node);
+			if (comp) {
+				void *serr = NULL;
+				g_ff_atspi.comp_scroll_to(comp, FF_ATSPI_SCROLL_ANYWHERE, &serr);
+				g_ff_atspi.g_unref(comp);
+				usleep(180000);
+				int ncx = 0, ncy = 0;
+				bool nin_vp = false;
+				if (ff_get_node_center_checked(ctx.best_node, ops, &ncx, &ncy, &nin_vp) && nin_vp) {
+					ctx.best_cx = ncx;
+					ctx.best_cy = ncy;
+					ctx.best_in_vp = true;
+				}
+			}
+		}
+		if (!ctx.best_in_vp && ctx.best_node && g_ff_atspi.get_action_iface && g_ff_atspi.action_do) {
+			void *act = g_ff_atspi.get_action_iface(ctx.best_node);
+			if (act) {
+				void *nerr = NULL;
+				int na = g_ff_atspi.action_get_n ? g_ff_atspi.action_get_n(act, &nerr) : 1;
+				bool did = false;
+				if (na > 0) {
+					void *aerr = NULL;
+					did = (g_ff_atspi.action_do(act, 0, &aerr) != 0);
+				}
+				g_ff_atspi.g_unref(act);
+				if (did) {
+					usleep(90000);
+					if (out_msg && out_sz > 0) {
+						snprintf(out_msg, out_sz, "activated [%s] '%.64s' via native action",
+						         ctx.best_role, ctx.best_label);
+					}
+					if (ctx.best_node && g_ff_atspi.g_unref) g_ff_atspi.g_unref(ctx.best_node);
+					return true;
+				}
+			}
+		}
+		if (!ctx.best_in_vp) {
+			if (out_msg && out_sz > 0) {
+				snprintf(out_msg, out_sz,
+				         "Error: element [%s] '%.64s' is off-screen (outside viewport); scroll or filter first",
+				         ctx.best_role, ctx.best_label);
+			}
+			if (ctx.best_node && g_ff_atspi.g_unref) g_ff_atspi.g_unref(ctx.best_node);
+			return false;
+		}
+	}
+
+	if (ops && ops->is_browser_focused && !ops->is_browser_focused(ops->ud)) {
+		if (ops->focus_browser) ops->focus_browser(ops->ud);
+		usleep(40000);
+		if (!ops->is_browser_focused(ops->ud)) {
+			if (out_msg && out_sz > 0) {
+				snprintf(out_msg, out_sz, "Error: browser window lost focus before click");
+			}
+			if (ctx.best_node && g_ff_atspi.g_unref) g_ff_atspi.g_unref(ctx.best_node);
+			return false;
+		}
+	}
+
+	if ((strcmp(ctx.best_role, "entry") == 0 || strcmp(ctx.best_role, "combo box") == 0) &&
+	    ctx.best_node && g_ff_atspi.get_component_iface && g_ff_atspi.comp_grab_focus) {
+		void *comp = g_ff_atspi.get_component_iface(ctx.best_node);
+		if (comp) {
+			void *ferr = NULL;
+			g_ff_atspi.comp_grab_focus(comp, &ferr);
+			g_ff_atspi.g_unref(comp);
+		}
+	}
+
 	if (ops && ops->click_xy) {
 		ops->click_xy(ops->ud, ctx.best_cx, ctx.best_cy, btn);
 	}
@@ -986,6 +1266,7 @@ static __attribute__((unused)) bool firefox_core_click_element(
 		snprintf(out_msg, out_sz, "clicked [%s] '%.64s' at (%d,%d)",
 		         ctx.best_role, ctx.best_label, ctx.best_cx, ctx.best_cy);
 	}
+	if (ctx.best_node && g_ff_atspi.g_unref) g_ff_atspi.g_unref(ctx.best_node);
 	return true;
 }
 
@@ -1411,9 +1692,10 @@ static __attribute__((unused)) int firefox_core_wait_loaded(
 	if (out_doc) memset(out_doc, 0, sizeof(*out_doc));
 	if (out_reason && reason_sz > 0) snprintf(out_reason, reason_sz, "timeout");
 
-	const int step_ms = 120;
+	const int step_ms = 80;
 	int elapsed = 0;
 	bool saw_busy = false;
+	bool saw_target_doc = false;
 	int idle_same_ticks = 0;
 
 	while (elapsed <= timeout_ms) {
@@ -1442,8 +1724,8 @@ static __attribute__((unused)) int firefox_core_wait_loaded(
 				bool url_changed = (prev_url && *prev_url && strcmp(doc.url, prev_url) != 0);
 				if (!url_changed && !saw_busy) {
 					idle_same_ticks++;
-					/* For in-page clicks that neither navigate nor trigger BUSY, settle after ~360ms */
-					if (idle_same_ticks < 3) target_ok = false;
+					/* For in-page clicks that neither navigate nor trigger BUSY, settle after ~160ms */
+					if (idle_same_ticks < 2) target_ok = false;
 				}
 			}
 
@@ -1456,14 +1738,28 @@ static __attribute__((unused)) int firefox_core_wait_loaded(
 				}
 				target_ok = false;
 			} else if (target_ok) {
-				if (out_reason && reason_sz > 0) snprintf(out_reason, reason_sz, "loaded");
-				return 1;
+				saw_target_doc = true;
+				char snap[FF_INSPECT_BUF_SZ] = {0};
+				bool has_body = false;
+				if (firefox_core_read_a11y(ops, NULL, 0, NULL, 0, snap, sizeof(snap))) {
+					const char *nl = strchr(snap, '\n');
+					has_body = (nl && nl[1] != '\0');
+				}
+				if (has_body) {
+					if (out_reason && reason_sz > 0) snprintf(out_reason, reason_sz, "loaded");
+					return 1;
+				}
 			}
 		}
 
 		if (elapsed >= timeout_ms) break;
 		usleep((useconds_t)step_ms * 1000U);
 		elapsed += step_ms;
+	}
+
+	if (!wait_text && saw_target_doc) {
+		if (out_reason && reason_sz > 0) snprintf(out_reason, reason_sz, "loaded (minimal)");
+		return 1;
 	}
 
 	return 0;

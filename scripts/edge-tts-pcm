@@ -3,7 +3,7 @@ import sys
 import os
 import asyncio
 import subprocess
-import tempfile
+import struct
 
 try:
     import edge_tts
@@ -18,27 +18,67 @@ except ImportError:
     sys.stderr.write("edge-tts not found. Install via: pip install edge-tts\n")
     sys.exit(1)
 
-async def synth(text, voice, out_fd):
-    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tf:
-        tmp_mp3 = tf.name
+async def synth_pcm_bytes(text, voice):
+    comm = edge_tts.Communicate(text, voice)
+    mp3 = bytearray()
+    async for chunk in comm.stream():
+        if chunk.get("type") == "audio":
+            data = chunk.get("data")
+            if data:
+                mp3.extend(data)
+    if not mp3:
+        return b""
+    cmd = ["ffmpeg", "-loglevel", "quiet", "-i", "pipe:0", "-f", "s16le", "-ar", "24000", "-ac", "1", "pipe:1"]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    out, _ = proc.communicate(input=bytes(mp3))
+    if proc.returncode != 0:
+        return b""
+    return out or b""
+
+def serve_loop():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    out_buf = sys.stdout.buffer
     try:
-        comm = edge_tts.Communicate(text, voice)
-        await comm.save(tmp_mp3)
-        cmd = ["ffmpeg", "-loglevel", "quiet", "-y", "-i", tmp_mp3, "-f", "s16le", "-ar", "24000", "-ac", "1", "pipe:1"]
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
-        out = proc.stdout.read()
-        proc.wait()
-        os.write(out_fd, out)
+        while True:
+            line = sys.stdin.readline()
+            if not line:
+                break
+            line = line.rstrip("\r\n")
+            if not line:
+                continue
+            if line == "QUIT" or line.startswith("QUIT\t"):
+                break
+            if "\t" in line:
+                voice, text = line.split("\t", 1)
+            else:
+                voice, text = "pt-PT-RaquelNeural", line
+            voice = voice.strip() or "pt-PT-RaquelNeural"
+            text = text.strip()
+            pcm = b""
+            if text:
+                try:
+                    pcm = loop.run_until_complete(synth_pcm_bytes(text, voice))
+                except Exception:
+                    pcm = b""
+            out_buf.write(struct.pack("<I", len(pcm)))
+            if pcm:
+                out_buf.write(pcm)
+            out_buf.flush()
     finally:
-        if os.path.exists(tmp_mp3):
-            os.remove(tmp_mp3)
+        loop.close()
 
 def main():
+    if len(sys.argv) >= 2 and sys.argv[1] == "--serve":
+        serve_loop()
+        return
     if len(sys.argv) < 2:
         sys.exit(1)
     text = sys.argv[1]
     voice = sys.argv[2] if len(sys.argv) > 2 else "pt-PT-RaquelNeural"
-    asyncio.run(synth(text, voice, sys.stdout.fileno()))
+    pcm = asyncio.run(synth_pcm_bytes(text, voice))
+    if pcm:
+        os.write(sys.stdout.fileno(), pcm)
 
 if __name__ == "__main__":
     main()

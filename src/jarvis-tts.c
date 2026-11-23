@@ -21,6 +21,7 @@
 #include <malloc.h>
 #include <math.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -188,11 +189,24 @@ static const cp_id_t PIPER_VOCAB[] = {
  * ------------------------------------------------------------------------- */
 
 #define MAX_TTS_QUEUE 32
+#define TTS_CACHE_SLOTS 32
+#define TTS_CACHE_MAX_TEXT 96
+#define TTS_CACHE_MAX_BYTES (24000 * 2 * 4)
+#define EDGE_TTS_TIMEOUT_MS 3800
 
 typedef struct {
 	char text[512];
 	char voice[64];
 } tts_segment_t;
+
+typedef struct {
+	char     voice[64];
+	char     text[TTS_CACHE_MAX_TEXT];
+	int16_t *pcm;
+	size_t   n_samples;
+	int      sample_rate;
+	uint64_t last_used;
+} tts_cache_entry_t;
 
 static struct {
 	pthread_mutex_t mtx;
@@ -208,6 +222,17 @@ static struct {
 	bool            busy_speaking;
 	uint64_t        cancel_gen;
 	pid_t           player_pid;
+	pid_t           draining_pid;
+
+	/* Persistent edge-tts-pcm --serve coprocess */
+	pid_t           edge_pid;
+	int             edge_in_fd;
+	int             edge_out_fd;
+	bool            edge_busy;
+
+	/* Short-phrase PCM LRU cache */
+	tts_cache_entry_t cache[TTS_CACHE_SLOTS];
+	uint64_t          cache_tick;
 
 	/* Lazy dlopen handles & symbols (NULL when unloaded) */
 	void           *espeak_dl;
@@ -231,7 +256,11 @@ static struct {
 	.mtx = PTHREAD_MUTEX_INITIALIZER,
 	.cond = PTHREAD_COND_INITIALIZER,
 	.done_cond = PTHREAD_COND_INITIALIZER,
-	.player_pid = -1
+	.player_pid = -1,
+	.draining_pid = -1,
+	.edge_pid = -1,
+	.edge_in_fd = -1,
+	.edge_out_fd = -1
 };
 
 /* ---------------------------------------------------------------------------
@@ -794,7 +823,199 @@ static void ort_release_status(void *st)
 	}
 }
 
-static void tts_engine_unload(void)
+static void tts_cache_clear_locked(void)
+{
+	for (size_t i = 0; i < TTS_CACHE_SLOTS; i++) {
+		free(g_tts.cache[i].pcm);
+		g_tts.cache[i].pcm = NULL;
+		g_tts.cache[i].n_samples = 0;
+		g_tts.cache[i].sample_rate = 0;
+		g_tts.cache[i].voice[0] = '\0';
+		g_tts.cache[i].text[0] = '\0';
+		g_tts.cache[i].last_used = 0;
+	}
+}
+
+static int16_t *tts_cache_lookup(const char *voice, const char *text, size_t *out_samples, int *out_rate)
+{
+	if (!voice || !text || !*text || strlen(text) >= TTS_CACHE_MAX_TEXT) return NULL;
+	int16_t *copy = NULL;
+	pthread_mutex_lock(&g_tts.mtx);
+	for (size_t i = 0; i < TTS_CACHE_SLOTS; i++) {
+		tts_cache_entry_t *e = &g_tts.cache[i];
+		if (e->pcm && e->n_samples > 0 &&
+		    strcmp(e->voice, voice) == 0 && strcmp(e->text, text) == 0) {
+			size_t bytes = e->n_samples * sizeof(int16_t);
+			copy = (int16_t *)malloc(bytes);
+			if (copy) {
+				memcpy(copy, e->pcm, bytes);
+				*out_samples = e->n_samples;
+				*out_rate = e->sample_rate;
+				e->last_used = ++g_tts.cache_tick;
+			}
+			break;
+		}
+	}
+	pthread_mutex_unlock(&g_tts.mtx);
+	return copy;
+}
+
+static void tts_cache_store(const char *voice, const char *text, const int16_t *pcm, size_t n_samples, int sample_rate)
+{
+	if (!voice || !*voice || !text || !*text || !pcm || n_samples == 0) return;
+	if (strlen(text) >= TTS_CACHE_MAX_TEXT) return;
+	size_t bytes = n_samples * sizeof(int16_t);
+	if (bytes > TTS_CACHE_MAX_BYTES) return;
+
+	int16_t *dup = (int16_t *)malloc(bytes);
+	if (!dup) return;
+	memcpy(dup, pcm, bytes);
+
+	pthread_mutex_lock(&g_tts.mtx);
+	size_t victim = 0;
+	uint64_t oldest = UINT64_MAX;
+	for (size_t i = 0; i < TTS_CACHE_SLOTS; i++) {
+		tts_cache_entry_t *e = &g_tts.cache[i];
+		if (e->pcm && strcmp(e->voice, voice) == 0 && strcmp(e->text, text) == 0) {
+			victim = i;
+			break;
+		}
+		if (!e->pcm) {
+			victim = i;
+			break;
+		}
+		if (e->last_used < oldest) {
+			oldest = e->last_used;
+			victim = i;
+		}
+	}
+	free(g_tts.cache[victim].pcm);
+	g_tts.cache[victim].pcm = dup;
+	g_tts.cache[victim].n_samples = n_samples;
+	g_tts.cache[victim].sample_rate = sample_rate;
+	g_tts.cache[victim].last_used = ++g_tts.cache_tick;
+	snprintf(g_tts.cache[victim].voice, sizeof(g_tts.cache[victim].voice), "%s", voice);
+	snprintf(g_tts.cache[victim].text, sizeof(g_tts.cache[victim].text), "%s", text);
+	pthread_mutex_unlock(&g_tts.mtx);
+}
+
+static void close_edge_worker_locked(bool kill_immediate)
+{
+	if (g_tts.edge_in_fd >= 0) {
+		close(g_tts.edge_in_fd);
+		g_tts.edge_in_fd = -1;
+	}
+	if (g_tts.edge_out_fd >= 0) {
+		close(g_tts.edge_out_fd);
+		g_tts.edge_out_fd = -1;
+	}
+	pid_t pid = g_tts.edge_pid;
+	g_tts.edge_pid = -1;
+	g_tts.edge_busy = false;
+	if (pid > 1) {
+		if (kill_immediate) {
+			kill(pid, SIGKILL);
+		} else {
+			kill(pid, SIGTERM);
+		}
+		pthread_mutex_unlock(&g_tts.mtx);
+		int st = 0;
+		while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+		pthread_mutex_lock(&g_tts.mtx);
+	}
+}
+
+static bool resolve_edge_bin_and_python(char *bin_out, size_t bin_sz, char *py_out, size_t py_sz)
+{
+	const char *env_bin = getenv("JARVIS_EDGE_TTS_BIN");
+	const char *home = getenv("HOME");
+	bin_out[0] = '\0';
+	py_out[0] = '\0';
+
+	if (env_bin && *env_bin && access(env_bin, X_OK) == 0) {
+		snprintf(bin_out, bin_sz, "%s", env_bin);
+	} else if (home && *home) {
+		snprintf(bin_out, bin_sz, "%s/.local/bin/edge-tts-pcm", home);
+		if (access(bin_out, X_OK) != 0)
+			snprintf(bin_out, bin_sz, "edge-tts-pcm");
+	} else {
+		snprintf(bin_out, bin_sz, "edge-tts-pcm");
+	}
+
+	if (home && *home && !env_bin) {
+		static const char *const venvs[] = {
+			"%s/.local/share/dwm-voice/venv/bin/python",
+			"%s/.venv/bin/python",
+			NULL
+		};
+		for (size_t i = 0; venvs[i]; i++) {
+			snprintf(py_out, py_sz, venvs[i], home);
+			if (access(py_out, X_OK) == 0) {
+				return true;
+			}
+		}
+		py_out[0] = '\0';
+	}
+	return bin_out[0] != '\0';
+}
+
+static bool ensure_edge_worker_locked(void)
+{
+	if (g_tts.edge_pid > 1 && g_tts.edge_in_fd >= 0 && g_tts.edge_out_fd >= 0) {
+		int st = 0;
+		pid_t w = waitpid(g_tts.edge_pid, &st, WNOHANG);
+		if (w == 0) return true;
+		close_edge_worker_locked(false);
+	}
+
+	char bin_path[512], py_path[512];
+	if (!resolve_edge_bin_and_python(bin_path, sizeof(bin_path), py_path, sizeof(py_path)))
+		return false;
+
+	int in_p[2], out_p[2];
+	if (pipe(in_p) < 0) return false;
+	if (pipe(out_p) < 0) {
+		close(in_p[0]);
+		close(in_p[1]);
+		return false;
+	}
+	fcntl(in_p[1], F_SETFD, FD_CLOEXEC);
+	fcntl(out_p[0], F_SETFD, FD_CLOEXEC);
+
+	pid_t pid = fork();
+	if (pid == 0) {
+		close(in_p[1]);
+		close(out_p[0]);
+		dup2(in_p[0], STDIN_FILENO);
+		dup2(out_p[1], STDOUT_FILENO);
+		if (in_p[0] > STDERR_FILENO) close(in_p[0]);
+		if (out_p[1] > STDERR_FILENO) close(out_p[1]);
+		int devnull = open("/dev/null", O_WRONLY);
+		if (devnull >= 0) {
+			dup2(devnull, STDERR_FILENO);
+			if (devnull > STDERR_FILENO) close(devnull);
+		}
+		if (py_path[0]) {
+			execl(py_path, py_path, bin_path, "--serve", (char *)NULL);
+		}
+		execlp(bin_path, bin_path, "--serve", (char *)NULL);
+		_exit(127);
+	}
+	close(in_p[0]);
+	close(out_p[1]);
+	if (pid < 0) {
+		close(in_p[1]);
+		close(out_p[0]);
+		return false;
+	}
+	g_tts.edge_pid = pid;
+	g_tts.edge_in_fd = in_p[1];
+	g_tts.edge_out_fd = out_p[0];
+	g_tts.edge_busy = false;
+	return true;
+}
+
+static void tts_onnx_unload_unlocked(void)
 {
 	if (g_tts.kokoro_style) {
 		free(g_tts.kokoro_style);
@@ -831,10 +1052,20 @@ static void tts_engine_unload(void)
 	malloc_trim(0);
 }
 
+static void tts_engine_unload(void)
+{
+	tts_cache_clear_locked();
+	close_edge_worker_locked(false);
+	tts_onnx_unload_unlocked();
+}
+
 static bool tts_engine_ensure_loaded(const char *voice)
 {
 	if (voice && (strncmp(voice, "edge:", 5) == 0 || strcasecmp(voice, "raquel") == 0 || strcasecmp(voice, "duarte") == 0)) {
-		return true;
+		pthread_mutex_lock(&g_tts.mtx);
+		bool ok = ensure_edge_worker_locked();
+		pthread_mutex_unlock(&g_tts.mtx);
+		return ok;
 	}
 	const char *home = getenv("HOME");
 	if (!home || !*home) return false;
@@ -885,14 +1116,14 @@ static bool tts_engine_ensure_loaded(const char *voice)
 		g_tts.espeak_TextToPhonemesTerm = (espeak_TextToPhonemesTerm_fn)dlsym(g_tts.espeak_dl, "espeak_TextToPhonemesWithTerminator");
 		g_tts.espeak_Terminate = (espeak_Terminate_fn)dlsym(g_tts.espeak_dl, "espeak_Terminate");
 		if (!g_tts.espeak_Init || !g_tts.espeak_SetVoice || !g_tts.espeak_TextToPhonemesTerm) {
-			tts_engine_unload();
+			tts_onnx_unload_unlocked();
 			return false;
 		}
 		char def_lang[32];
 		resolve_default_lang(def_lang, sizeof(def_lang));
 		if (g_tts.espeak_Init(0x02 /* AUDIO_OUTPUT_SYNCHRONOUS */, 0, NULL, 0) <= 0 ||
 		    !select_espeak_voice(def_lang)) {
-			tts_engine_unload();
+			tts_onnx_unload_unlocked();
 			return false;
 		}
 	}
@@ -912,12 +1143,12 @@ static bool tts_engine_ensure_loaded(const char *voice)
 			close(saved_stderr);
 		}
 		if (!g_tts.ort_dl) {
-			tts_engine_unload();
+			tts_onnx_unload_unlocked();
 			return false;
 		}
 		OrtGetApiBase_fn get_base = (OrtGetApiBase_fn)dlsym(g_tts.ort_dl, "OrtGetApiBase");
 		if (!get_base || !get_base()) {
-			tts_engine_unload();
+			tts_onnx_unload_unlocked();
 			return false;
 		}
 		const OrtApiBase_t *base = get_base();
@@ -943,7 +1174,7 @@ static bool tts_engine_ensure_loaded(const char *voice)
 		    !g_tts.ort_vtbl[ORT_IDX_ReleaseValue] ||
 		    !g_tts.ort_vtbl[ORT_IDX_ReleaseTensorTypeAndShape] ||
 		    !g_tts.ort_vtbl[ORT_IDX_ReleaseSessionOptions]) {
-			tts_engine_unload();
+			tts_onnx_unload_unlocked();
 			return false;
 		}
 
@@ -960,9 +1191,9 @@ static bool tts_engine_ensure_loaded(const char *voice)
 			dup2(saved_err2, STDERR_FILENO);
 			close(saved_err2);
 		}
-		if (st) { ort_release_status(st); tts_engine_unload(); return false; }
+		if (st) { ort_release_status(st); tts_onnx_unload_unlocked(); return false; }
 		st = create_mi(1 /* OrtArenaAllocator */, 0 /* OrtMemTypeDefault */, &g_tts.ort_mem_info);
-		if (st) { ort_release_status(st); tts_engine_unload(); return false; }
+		if (st) { ort_release_status(st); tts_onnx_unload_unlocked(); return false; }
 	}
 
 	/* 3. Load or switch ONNX model session if needed */
@@ -1088,19 +1319,22 @@ static void resolve_espeak_lang(const char *voice, bool is_piper, char *out_lang
 	}
 }
 
-static int16_t *synthesize_edge_tts(const char *seg_text, const char *voice, size_t *out_samples, int *out_rate)
+static bool is_edge_voice_name(const char *voice)
 {
-	*out_samples = 0;
-	*out_rate = 24000;
-	if (!seg_text || !*seg_text) return NULL;
+	return voice && (strncmp(voice, "edge:", 5) == 0 ||
+	                 strcasecmp(voice, "raquel") == 0 ||
+	                 strcasecmp(voice, "duarte") == 0);
+}
 
+static const char *resolve_edge_voice(const char *voice, bool *out_is_pt)
+{
 	char def_lang[32];
 	resolve_default_lang(def_lang, sizeof(def_lang));
 	const char *ev = (strncasecmp(def_lang, "pt", 2) == 0)
 		? "pt-PT-RaquelNeural"
 		: "en-GB-RyanNeural";
 	if (voice) {
-		if (strncmp(voice, "edge:", 5) == 0) {
+		if (strncmp(voice, "edge:", 5) == 0 && voice[5]) {
 			ev = voice + 5;
 		} else if (strcasecmp(voice, "duarte") == 0) {
 			ev = "pt-PT-DuarteNeural";
@@ -1108,76 +1342,225 @@ static int16_t *synthesize_edge_tts(const char *seg_text, const char *voice, siz
 			ev = "pt-PT-RaquelNeural";
 		}
 	}
-
-	char safe_text[1024];
-	size_t j = 0;
-	for (size_t i = 0; seg_text[i] && j + 2 < sizeof(safe_text); i++) {
-		if (seg_text[i] == '"' || seg_text[i] == '$' || seg_text[i] == '`' || seg_text[i] == '\\') {
-			safe_text[j++] = ' ';
-		} else {
-			safe_text[j++] = seg_text[i];
-		}
-	}
-	safe_text[j] = '\0';
-
-	const char *home = getenv("HOME");
-	char bin_path[512];
-	if (home && *home)
-		snprintf(bin_path, sizeof(bin_path), "%s/.local/bin/edge-tts-pcm", home);
-	else
-		snprintf(bin_path, sizeof(bin_path), "edge-tts-pcm");
-	if (access(bin_path, X_OK) != 0)
-		snprintf(bin_path, sizeof(bin_path), "edge-tts-pcm");
-
-	char cmd[2048];
-	snprintf(cmd, sizeof(cmd), "%s \"%s\" \"%s\" 2>/dev/null",
-	         bin_path, safe_text, ev);
-
-	FILE *fp = popen(cmd, "r");
-	if (!fp) return NULL;
-
-	size_t cap = 24000 * 2;
-	uint8_t *buf = (uint8_t *)malloc(cap);
-	if (!buf) {
-		pclose(fp);
-		return NULL;
-	}
-	size_t total = 0;
-	size_t n;
-	while ((n = fread(buf + total, 1, 4096, fp)) > 0) {
-		total += n;
-		if (total + 4096 > cap) {
-			cap *= 2;
-			uint8_t *nb = (uint8_t *)realloc(buf, cap);
-			if (!nb) {
-				free(buf);
-				pclose(fp);
-				return NULL;
-			}
-			buf = nb;
-		}
-	}
-	pclose(fp);
-
-	if (total == 0) {
-		free(buf);
-		return NULL;
-	}
-
-	*out_samples = total / sizeof(int16_t);
-	return (int16_t *)buf;
+	if (out_is_pt)
+		*out_is_pt = (strncasecmp(ev, "pt", 2) == 0) || (strncasecmp(def_lang, "pt", 2) == 0 && strncasecmp(ev, "en", 2) != 0);
+	return ev;
 }
 
-static int16_t *synthesize_segment_pcm(const char *seg_text, const char *voice, size_t *out_samples, int *out_rate)
+static int resolve_edge_timeout_ms(void)
+{
+	const char *env = getenv("JARVIS_EDGE_TTS_TIMEOUT_MS");
+	if (env && *env) {
+		int v = atoi(env);
+		if (v >= 50 && v <= 30000) return v;
+	}
+	return EDGE_TTS_TIMEOUT_MS;
+}
+
+static long monotonic_ms_now(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (long)ts.tv_sec * 1000L + (long)(ts.tv_nsec / 1000000L);
+}
+
+static bool write_all_edge(int fd, const void *buf, size_t len)
+{
+	const uint8_t *p = (const uint8_t *)buf;
+	size_t off = 0;
+	while (off < len) {
+		ssize_t w = write(fd, p + off, len - off);
+		if (w <= 0) {
+			if (w < 0 && errno == EINTR) continue;
+			return false;
+		}
+		off += (size_t)w;
+	}
+	return true;
+}
+
+static int read_exact_edge_timeout(int fd, void *buf, size_t len, int timeout_ms, uint64_t my_gen)
+{
+	uint8_t *p = (uint8_t *)buf;
+	size_t got = 0;
+	long deadline = monotonic_ms_now() + (long)timeout_ms;
+
+	while (got < len) {
+		if (my_gen != 0) {
+			pthread_mutex_lock(&g_tts.mtx);
+			bool canceled = (g_tts.cancel_gen != my_gen);
+			pthread_mutex_unlock(&g_tts.mtx);
+			if (canceled) return -2;
+		}
+
+		long rem = deadline - monotonic_ms_now();
+		if (rem <= 0) return -3;
+
+		struct pollfd pfd;
+		pfd.fd = fd;
+		pfd.events = POLLIN;
+		pfd.revents = 0;
+		int slice = (rem > 50) ? 50 : (int)rem;
+		int pr = poll(&pfd, 1, slice);
+		if (pr < 0) {
+			if (errno == EINTR) continue;
+			return -1;
+		}
+		if (pr == 0) continue;
+
+		if (pfd.revents & (POLLIN | POLLHUP)) {
+			ssize_t r = read(fd, p + got, len - got);
+			if (r < 0) {
+				if (errno == EINTR || errno == EAGAIN) continue;
+				return -1;
+			}
+			if (r == 0) return -1;
+			got += (size_t)r;
+		} else if (pfd.revents & (POLLERR | POLLNVAL)) {
+			return -1;
+		}
+	}
+	return 0;
+}
+
+static void resolve_edge_fallback_voice(bool is_pt, char *out_voice, size_t out_sz)
+{
+	const char *home = getenv("HOME");
+	if (is_pt) {
+		if (home && *home) {
+			char p[512];
+			snprintf(p, sizeof(p), "%s/.local/share/piper/pt_PT-tugao-medium.onnx", home);
+			if (access(p, R_OK) == 0) {
+				snprintf(out_voice, out_sz, "piper:pt_PT-tugao-medium");
+				return;
+			}
+			snprintf(p, sizeof(p), "%s/.local/share/piper/pt_PT-miro.onnx", home);
+			if (access(p, R_OK) == 0) {
+				snprintf(out_voice, out_sz, "piper:pt_PT-miro");
+				return;
+			}
+		}
+		snprintf(out_voice, out_sz, "pm_tuga");
+		return;
+	}
+	if (home && *home) {
+		char p[512];
+		snprintf(p, sizeof(p), "%s/.local/share/piper/en_GB-northern_english_male-medium.onnx", home);
+		if (access(p, R_OK) == 0) {
+			snprintf(out_voice, out_sz, "piper:gb");
+			return;
+		}
+	}
+	snprintf(out_voice, out_sz, "bm_daniel");
+}
+
+static int16_t *synthesize_edge_tts(const char *seg_text, const char *voice, size_t *out_samples, int *out_rate, uint64_t my_gen)
 {
 	*out_samples = 0;
 	*out_rate = KOKORO_SAMPLE_RATE;
 	if (!seg_text || !*seg_text) return NULL;
 
-	if (voice && (strncmp(voice, "edge:", 5) == 0 || strcasecmp(voice, "raquel") == 0 || strcasecmp(voice, "duarte") == 0)) {
-		return synthesize_edge_tts(seg_text, voice, out_samples, out_rate);
-	}
+	const char *ev = resolve_edge_voice(voice, NULL);
 
+	char safe_text[1024];
+	size_t j = 0;
+	for (size_t i = 0; seg_text[i] && j + 1 < sizeof(safe_text); i++) {
+		char c = seg_text[i];
+		safe_text[j++] = (c == '\t' || c == '\r' || c == '\n') ? ' ' : c;
+	}
+	safe_text[j] = '\0';
+	trim_trailing(safe_text);
+	const char *sp = safe_text;
+	while (*sp && isspace((unsigned char)*sp)) sp++;
+	if (!*sp) return NULL;
+
+	char req[1200];
+	int req_len = snprintf(req, sizeof(req), "%s\t%s\n", ev, sp);
+	if (req_len <= 0 || (size_t)req_len >= sizeof(req)) return NULL;
+
+	int timeout_ms = resolve_edge_timeout_ms();
+
+	for (int attempt = 0; attempt < 2; attempt++) {
+		pthread_mutex_lock(&g_tts.mtx);
+		if (my_gen != 0 && g_tts.cancel_gen != my_gen) {
+			pthread_mutex_unlock(&g_tts.mtx);
+			return NULL;
+		}
+		if (!ensure_edge_worker_locked()) {
+			pthread_mutex_unlock(&g_tts.mtx);
+			return NULL;
+		}
+		int in_fd = g_tts.edge_in_fd;
+		int out_fd = g_tts.edge_out_fd;
+		bool wrote = write_all_edge(in_fd, req, (size_t)req_len);
+		if (!wrote) {
+			close_edge_worker_locked(true);
+			pthread_mutex_unlock(&g_tts.mtx);
+			continue;
+		}
+		g_tts.edge_busy = true;
+		pthread_mutex_unlock(&g_tts.mtx);
+
+		uint8_t hdr[4];
+		int rc = read_exact_edge_timeout(out_fd, hdr, sizeof(hdr), timeout_ms, my_gen);
+		if (rc != 0) {
+			pthread_mutex_lock(&g_tts.mtx);
+			g_tts.edge_busy = false;
+			close_edge_worker_locked(true);
+			bool canceled = (my_gen != 0 && g_tts.cancel_gen != my_gen);
+			pthread_mutex_unlock(&g_tts.mtx);
+			if (canceled || rc == -2 || rc == -3) return NULL;
+			continue;
+		}
+
+		uint32_t pcm_len = (uint32_t)hdr[0] |
+		                   ((uint32_t)hdr[1] << 8) |
+		                   ((uint32_t)hdr[2] << 16) |
+		                   ((uint32_t)hdr[3] << 24);
+		if (pcm_len == 0 || pcm_len > (32U * 1024U * 1024U) || (pcm_len % sizeof(int16_t)) != 0) {
+			pthread_mutex_lock(&g_tts.mtx);
+			g_tts.edge_busy = false;
+			if (pcm_len > (32U * 1024U * 1024U) || (pcm_len % sizeof(int16_t)) != 0) {
+				close_edge_worker_locked(true);
+			}
+			pthread_mutex_unlock(&g_tts.mtx);
+			return NULL;
+		}
+
+		uint8_t *pcm_buf = (uint8_t *)malloc(pcm_len);
+		if (!pcm_buf) {
+			pthread_mutex_lock(&g_tts.mtx);
+			g_tts.edge_busy = false;
+			close_edge_worker_locked(true);
+			pthread_mutex_unlock(&g_tts.mtx);
+			return NULL;
+		}
+
+		rc = read_exact_edge_timeout(out_fd, pcm_buf, pcm_len, timeout_ms, my_gen);
+		pthread_mutex_lock(&g_tts.mtx);
+		g_tts.edge_busy = false;
+		if (rc != 0) {
+			free(pcm_buf);
+			close_edge_worker_locked(true);
+			bool canceled = (my_gen != 0 && g_tts.cancel_gen != my_gen);
+			pthread_mutex_unlock(&g_tts.mtx);
+			if (canceled || rc == -2 || rc == -3) return NULL;
+			continue;
+		}
+		pthread_mutex_unlock(&g_tts.mtx);
+
+		*out_samples = pcm_len / sizeof(int16_t);
+		*out_rate = KOKORO_SAMPLE_RATE;
+		return (int16_t *)pcm_buf;
+	}
+	return NULL;
+}
+
+static int16_t *synthesize_onnx_pcm(const char *seg_text, const char *voice, size_t *out_samples, int *out_rate)
+{
+	*out_samples = 0;
+	*out_rate = KOKORO_SAMPLE_RATE;
+	if (!seg_text || !*seg_text) return NULL;
 	if (!tts_engine_ensure_loaded(voice)) return NULL;
 
 	char espeak_lang[32];
@@ -1329,6 +1712,42 @@ static int16_t *synthesize_segment_pcm(const char *seg_text, const char *voice, 
 	return pcm16;
 }
 
+static int16_t *synthesize_segment_pcm(const char *seg_text, const char *voice, size_t *out_samples, int *out_rate, uint64_t my_gen)
+{
+	*out_samples = 0;
+	*out_rate = KOKORO_SAMPLE_RATE;
+	if (!seg_text || !*seg_text) return NULL;
+
+	int16_t *cached = tts_cache_lookup(voice, seg_text, out_samples, out_rate);
+	if (cached) return cached;
+
+	if (is_edge_voice_name(voice)) {
+		bool is_pt = false;
+		(void)resolve_edge_voice(voice, &is_pt);
+		int16_t *pcm = synthesize_edge_tts(seg_text, voice, out_samples, out_rate, my_gen);
+		if (pcm && *out_samples > 0) {
+			tts_cache_store(voice, seg_text, pcm, *out_samples, *out_rate);
+			return pcm;
+		}
+		if (my_gen != 0) {
+			pthread_mutex_lock(&g_tts.mtx);
+			bool canceled = (g_tts.cancel_gen != my_gen);
+			pthread_mutex_unlock(&g_tts.mtx);
+			if (canceled) return NULL;
+		}
+		/* Local neural ONNX fallback when Edge TTS fails or times out (never cached under edge: key) */
+		char fb_voice[64];
+		resolve_edge_fallback_voice(is_pt, fb_voice, sizeof(fb_voice));
+		return synthesize_onnx_pcm(seg_text, fb_voice, out_samples, out_rate);
+	}
+
+	int16_t *pcm = synthesize_onnx_pcm(seg_text, voice, out_samples, out_rate);
+	if (pcm && *out_samples > 0) {
+		tts_cache_store(voice, seg_text, pcm, *out_samples, *out_rate);
+	}
+	return pcm;
+}
+
 /* ---------------------------------------------------------------------------
  * Persistent PipeWire Playback Stream & Instant SIGKILL Preemption
  * ------------------------------------------------------------------------- */
@@ -1336,7 +1755,28 @@ static int16_t *synthesize_segment_pcm(const char *seg_text, const char *voice, 
 static int      g_pw_pipe_fd = -1;
 static int      g_pw_rate    = 0;
 
-static void close_persistent_player_locked(bool kill_immediate)
+static bool reap_draining_player_locked(bool block)
+{
+	pid_t dpid = g_tts.draining_pid;
+	if (dpid <= 1) {
+		g_tts.draining_pid = -1;
+		return true;
+	}
+	int st = 0;
+	pid_t w = waitpid(dpid, &st, WNOHANG);
+	if (w == dpid || (w < 0 && errno == ECHILD)) {
+		if (g_tts.draining_pid == dpid) g_tts.draining_pid = -1;
+		return true;
+	}
+	if (!block) return false;
+	pthread_mutex_unlock(&g_tts.mtx);
+	while (waitpid(dpid, &st, 0) < 0 && errno == EINTR) {}
+	pthread_mutex_lock(&g_tts.mtx);
+	if (g_tts.draining_pid == dpid) g_tts.draining_pid = -1;
+	return true;
+}
+
+static void close_persistent_player_locked(bool wait_for_drain)
 {
 	if (g_pw_pipe_fd >= 0) {
 		close(g_pw_pipe_fd);
@@ -1345,15 +1785,18 @@ static void close_persistent_player_locked(bool kill_immediate)
 	pid_t pid = g_tts.player_pid;
 	g_tts.player_pid = -1;
 	g_pw_rate = 0;
-	if (pid > 1) {
-		if (kill_immediate) {
-			kill(pid, SIGKILL);
-		}
-		pthread_mutex_unlock(&g_tts.mtx);
-		int st = 0;
-		waitpid(pid, &st, 0);
-		pthread_mutex_lock(&g_tts.mtx);
+	if (pid <= 1) return;
+
+	if (!wait_for_drain) {
+		reap_draining_player_locked(true);
+		g_tts.draining_pid = pid;
+		return;
 	}
+	reap_draining_player_locked(true);
+	pthread_mutex_unlock(&g_tts.mtx);
+	int st = 0;
+	while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+	pthread_mutex_lock(&g_tts.mtx);
 }
 
 static int ensure_persistent_player_locked(int sample_rate)
@@ -1368,8 +1811,9 @@ static int ensure_persistent_player_locked(int sample_rate)
 		g_pw_pipe_fd = -1;
 		g_tts.player_pid = -1;
 	} else if (g_tts.player_pid > 1 || g_pw_pipe_fd >= 0) {
-		close_persistent_player_locked(false);
+		close_persistent_player_locked(true);
 	}
+	reap_draining_player_locked(true);
 
 	int pfd[2];
 	if (pipe(pfd) < 0) return -1;
@@ -1407,7 +1851,7 @@ static int ensure_persistent_player_locked(int sample_rate)
 }
 
 /* ---------------------------------------------------------------------------
- * Background TTS Worker Thread (60s Idle Auto-Unload -> 0 KB RAM)
+ * Background TTS Worker Thread (600s Idle Auto-Unload -> 0 KB RAM)
  * ------------------------------------------------------------------------- */
 
 static void *tts_worker_fn(void *arg)
@@ -1422,26 +1866,38 @@ static void *tts_worker_fn(void *arg)
 	pthread_mutex_lock(&g_tts.mtx);
 	for (;;) {
 		while (g_tts.q_count == 0 && !prefetched_pcm) {
-			/* Close the persistent pw-cat pipe once the segment queue drains so
-			 * waitpid() drains the final audio buffer cleanly before clearing state.
+			/* Close write-end of active pw-cat pipe without blocking so if another
+			 * LLM clause arrives during PipeWire drain we immediately synthesize it in
+			 * parallel while audio finishes playing!
 			 */
 			if (g_tts.player_pid > 1 || g_pw_pipe_fd >= 0) {
 				close_persistent_player_locked(false);
-				notify_tts_state("idle");
 			}
-			if (mic_muted) {
-				pthread_mutex_unlock(&g_tts.mtx);
-				usleep(120000);
-				write_tts_active_state(NULL, false);
-				set_mic_mute(false);
-				mic_muted = false;
-				pthread_mutex_lock(&g_tts.mtx);
-				if (g_tts.q_count > 0) break;
-			} else if (g_tts.busy_speaking) {
-				write_tts_active_state(NULL, false);
+			if (g_tts.draining_pid > 1 && !reap_draining_player_locked(false)) {
+				struct timespec drain_ts;
+				clock_gettime(CLOCK_REALTIME, &drain_ts);
+				drain_ts.tv_nsec += 25000000L;
+				if (drain_ts.tv_nsec >= 1000000000L) {
+					drain_ts.tv_sec += 1;
+					drain_ts.tv_nsec -= 1000000000L;
+				}
+				pthread_cond_timedwait(&g_tts.cond, &g_tts.mtx, &drain_ts);
+				continue;
 			}
+			bool was_active = g_tts.busy_speaking || mic_muted;
 			g_tts.busy_speaking = false;
-			pthread_cond_broadcast(&g_tts.done_cond);
+			if (was_active) {
+				write_tts_active_state(NULL, false);
+				mic_muted = false;
+				pthread_cond_broadcast(&g_tts.done_cond);
+				pthread_mutex_unlock(&g_tts.mtx);
+				set_mic_mute(false);
+				notify_tts_state("idle");
+				pthread_mutex_lock(&g_tts.mtx);
+				if (g_tts.q_count > 0 || prefetched_pcm) break;
+			} else {
+				pthread_cond_broadcast(&g_tts.done_cond);
+			}
 
 			/* If TTS was disabled, unload immediately without waiting */
 			if (!is_tts_enabled()) {
@@ -1499,7 +1955,7 @@ static void *tts_worker_fn(void *arg)
 			g_tts.busy_speaking = true;
 			pthread_mutex_unlock(&g_tts.mtx);
 
-			pcm = synthesize_segment_pcm(seg.text, seg.voice, &n_samples, &sample_rate);
+			pcm = synthesize_segment_pcm(seg.text, seg.voice, &n_samples, &sample_rate, my_gen);
 		}
 
 		if (pcm && n_samples > 0) {
@@ -1547,7 +2003,7 @@ static void *tts_worker_fn(void *arg)
 
 				if (has_next && strcmp(next_seg.text, "__WARMUP__") != 0) {
 					prefetched_pcm = synthesize_segment_pcm(next_seg.text, next_seg.voice,
-					                                        &prefetched_samples, &prefetched_rate);
+					                                        &prefetched_samples, &prefetched_rate, my_gen);
 					prefetched_gen = my_gen;
 				}
 			}
@@ -1738,15 +2194,20 @@ jarvis_tts_interrupt(int dummy)
 		close(g_pw_pipe_fd);
 		g_pw_pipe_fd = -1;
 	}
-	pid_t pid = g_tts.player_pid;
-	if (pid > 1) {
-		kill(pid, SIGKILL);
+	if (g_tts.player_pid > 1) {
+		kill(g_tts.player_pid, SIGKILL);
+	}
+	if (g_tts.draining_pid > 1) {
+		kill(g_tts.draining_pid, SIGKILL);
+	}
+	if (g_tts.edge_busy && g_tts.edge_pid > 1) {
+		kill(g_tts.edge_pid, SIGKILL);
 	}
 	write_tts_active_state(NULL, false);
-	notify_tts_state("idle");
 	pthread_cond_broadcast(&g_tts.cond);
 	pthread_cond_broadcast(&g_tts.done_cond);
 	pthread_mutex_unlock(&g_tts.mtx);
+	notify_tts_state("idle");
 	return 0;
 }
 

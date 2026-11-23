@@ -73,7 +73,16 @@ static void test_firefox_core_url_read_and_interrupt(void)
 	assert(strcmp(reason, "interrupted") == 0);
 	assert(abort_ticks == 1);
 
-	printf("  [PASS] URL match, offset pagination, and cooperative wait abort passed!\n");
+	/* 4. Viewport bounds clipping (prevents clicking off-screen scrolled elements) */
+	assert(ff_point_in_viewport(400, 400, true, 0, 33, 1596, 863, true, 1600, 900));
+	assert(!ff_point_in_viewport(400, 1086, true, 0, 33, 1596, 863, true, 1600, 900));
+	assert(!ff_point_in_viewport(400, 1166, true, 0, 33, 1596, 863, true, 1600, 900));
+	assert(!ff_point_in_viewport(400, 10, true, 0, 33, 1596, 863, true, 1600, 900));
+	assert(!ff_point_in_viewport(311, 400, true, 800, 33, 796, 863, true, 1600, 900));
+	assert(ff_point_in_viewport(1100, 400, true, 800, 33, 796, 863, true, 1600, 900));
+	assert(!ff_point_in_viewport(-5, 100, false, 0, 0, 0, 0, true, 1600, 900));
+
+	printf("  [PASS] URL match, offset pagination, cooperative wait abort, and viewport bounds passed!\n");
 }
 
 static void test_load_all_ren_modules(void)
@@ -126,10 +135,40 @@ static void test_load_all_ren_modules(void)
 	free(out);
 	out = NULL;
 
+	/* Verify ren-x11 focused window reports screen bounds when focused window exists */
+	rc = ren_call_tool("x11_windows", "focused", &out);
+	assert(rc == 0 && out != NULL);
+	if (strstr(out, "\"w\":0") == NULL) {
+		assert(strstr(out, "\"sw\":") != NULL && strstr(out, "\"sh\":") != NULL);
+	}
+	free(out);
+	out = NULL;
+
 	/* Verify ren-firefox rejects nonexistent tab cleanly without side effects */
 	rc = ren_call_tool("browser", "tab __nonexistent_jarvis_tab_xyz__", &out);
 	assert(rc != 0);
 	assert(out != NULL && strstr(out, "no open browser tab matching") != NULL);
+	free(out);
+	out = NULL;
+
+	rc = ren_call_tool("browser", "close __nonexistent_jarvis_tab_xyz__", &out);
+	assert(rc != 0);
+	assert(out != NULL &&
+	       (strstr(out, "no open browser tab matching") != NULL ||
+	        strstr(out, "no focused browser window to close tab") != NULL));
+	free(out);
+	out = NULL;
+
+	/* Verify ren-firefox send rejects empty text and nonexistent target cleanly */
+	rc = ren_call_tool("browser", "send target_only |   ", &out);
+	assert(rc != 0);
+	assert(out != NULL && strstr(out, "usage:") != NULL);
+	free(out);
+	out = NULL;
+
+	rc = ren_call_tool("browser", "send __nonexistent_target_xyz__ | hello", &out);
+	assert(rc != 0);
+	assert(out != NULL && strstr(out, "not found") != NULL);
 	free(out);
 	out = NULL;
 
