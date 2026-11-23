@@ -10,18 +10,30 @@
  */
 
 #include <ctype.h>
-#include <dlfcn.h>
-#include <glob.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 #include <sys/stat.h>
 #include <time.h>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#define strcasecmp  _stricmp
+#define strncasecmp _strnicmp
+static inline void ff_sleep_ms(int ms) { if (ms > 0) Sleep((DWORD)ms); }
+#else
+#include <dlfcn.h>
+#include <glob.h>
+#include <strings.h>
 #include <unistd.h>
+static inline void ff_sleep_ms(int ms) { if (ms > 0) usleep((useconds_t)ms * 1000U); }
+#endif
 
 #define FIREFOX_CORE_MAX_TABS 16
 #define FF_INSPECT_BUF_SZ     8192
@@ -82,7 +94,16 @@ static time_t        g_ff_tabs_mtime = 0;
 static bool ff_str_ci(const char *haystack, const char *needle)
 {
 	if (!haystack || !needle || !*needle) return false;
-	return strcasestr(haystack, needle) != NULL;
+	size_t nlen = strlen(needle);
+	for (const char *h = haystack; *h; h++) {
+		size_t i = 0;
+		while (i < nlen && h[i] &&
+		       tolower((unsigned char)h[i]) == tolower((unsigned char)needle[i])) {
+			i++;
+		}
+		if (i == nlen) return true;
+	}
+	return false;
 }
 
 static bool ff_is_browser_name(const char *name)
@@ -92,6 +113,8 @@ static bool ff_is_browser_name(const char *name)
 	       ff_str_ci(name, "Chromium") ||
 	       ff_str_ci(name, "Chrome") ||
 	       ff_str_ci(name, "Brave") ||
+	       ff_str_ci(name, "Safari") ||
+	       ff_str_ci(name, "Edge") ||
 	       ff_str_ci(name, "qutebrowser");
 }
 
@@ -195,18 +218,52 @@ static char *firefox_core_decompress_mozlz4(const char *path, size_t *out_len)
 static __attribute__((unused)) size_t firefox_core_populate_tabs(firefox_tab_t *out_tabs, size_t max_tabs)
 {
 	if (!out_tabs || max_tabs == 0) return 0;
-	const char *home = getenv("HOME");
-	if (!home || !*home) return 0;
-
-	const char *pats[2] = {
-		"%s/snap/firefox/common/.mozilla/firefox/*.default*/sessionstore-backups/recovery.jsonlz4",
-		"%s/.mozilla/firefox/*.default*/sessionstore-backups/recovery.jsonlz4"
-	};
 
 	char best_path[512] = {0};
 	time_t best_mtime = 0;
 
-	for (int i = 0; i < 2; i++) {
+#ifdef _WIN32
+	const char *appdata = getenv("APPDATA");
+	if (appdata && *appdata) {
+		char search_pat[512];
+		snprintf(search_pat, sizeof(search_pat), "%s\\Mozilla\\Firefox\\Profiles\\*", appdata);
+		WIN32_FIND_DATAA ffd;
+		HANDLE hFind = FindFirstFileA(search_pat, &ffd);
+		if (hFind != INVALID_HANDLE_VALUE) {
+			do {
+				if ((ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+				    strcmp(ffd.cFileName, ".") != 0 && strcmp(ffd.cFileName, "..") != 0) {
+					char cand[512];
+					struct stat st;
+					snprintf(cand, sizeof(cand), "%s\\Mozilla\\Firefox\\Profiles\\%s\\sessionstore-backups\\recovery.jsonlz4",
+					         appdata, ffd.cFileName);
+					if (stat(cand, &st) == 0 && st.st_mtime > best_mtime) {
+						best_mtime = st.st_mtime;
+						snprintf(best_path, sizeof(best_path), "%s", cand);
+					}
+				}
+			} while (FindNextFileA(hFind, &ffd));
+			FindClose(hFind);
+		}
+	}
+#else
+	const char *home = getenv("HOME");
+	if (!home || !*home) return 0;
+
+#ifdef __APPLE__
+	const char *pats[1] = {
+		"%s/Library/Application Support/Firefox/Profiles/*/sessionstore-backups/recovery.jsonlz4"
+	};
+	int n_pats = 1;
+#else
+	const char *pats[2] = {
+		"%s/snap/firefox/common/.mozilla/firefox/*.default*/sessionstore-backups/recovery.jsonlz4",
+		"%s/.mozilla/firefox/*.default*/sessionstore-backups/recovery.jsonlz4"
+	};
+	int n_pats = 2;
+#endif
+
+	for (int i = 0; i < n_pats; i++) {
 		char pat[512];
 		snprintf(pat, sizeof(pat), pats[i], home);
 		glob_t gl;
@@ -221,6 +278,7 @@ static __attribute__((unused)) size_t firefox_core_populate_tabs(firefox_tab_t *
 			globfree(&gl);
 		}
 	}
+#endif
 
 	if (!best_path[0]) return 0;
 	if (best_mtime == g_ff_tabs_mtime && g_ff_tabs_count > 0) {
@@ -329,6 +387,7 @@ static bool ff_ensure_atspi_loaded(void)
 	if (g_ff_atspi.tried) return g_ff_atspi.ready;
 	g_ff_atspi.tried = true;
 
+#ifdef __linux__
 	void *h_atspi = dlopen("libatspi.so.0", RTLD_LAZY | RTLD_LOCAL);
 	void *h_gobj  = dlopen("libgobject-2.0.so.0", RTLD_LAZY | RTLD_LOCAL);
 	void *h_glib  = dlopen("libglib-2.0.so.0", RTLD_LAZY | RTLD_LOCAL);
@@ -366,6 +425,9 @@ static bool ff_ensure_atspi_loaded(void)
 	g_ff_atspi.init();
 	g_ff_atspi.ready = true;
 	return true;
+#else
+	return false;
+#endif
 }
 
 static bool ff_node_has_state(void *node, int state_id)
@@ -1069,7 +1131,7 @@ static __attribute__((unused)) bool firefox_core_ensure_editable_focused(
 
 	if (ops && ops->is_browser_focused && !ops->is_browser_focused(ops->ud)) {
 		if (ops->focus_browser) ops->focus_browser(ops->ud);
-		usleep(40000);
+		ff_sleep_ms(40);
 		if (!ops->is_browser_focused(ops->ud)) {
 			if (out_err && err_sz > 0) {
 				snprintf(out_err, err_sz, "Error: browser window is not focused");
@@ -1110,7 +1172,7 @@ static __attribute__((unused)) bool firefox_core_ensure_editable_focused(
 		const ff_edit_cand_t *c = &ctx.cands[chosen];
 		if (ops && ops->click_xy) {
 			ops->click_xy(ops->ud, c->cx, c->cy, 1);
-			usleep(80000);
+			ff_sleep_ms(80);
 		}
 		if (out_info) {
 			out_info->found = true;
@@ -1193,7 +1255,7 @@ static __attribute__((unused)) bool firefox_core_click_element(
 				void *serr = NULL;
 				g_ff_atspi.comp_scroll_to(comp, FF_ATSPI_SCROLL_ANYWHERE, &serr);
 				g_ff_atspi.g_unref(comp);
-				usleep(180000);
+				ff_sleep_ms(180);
 				int ncx = 0, ncy = 0;
 				bool nin_vp = false;
 				if (ff_get_node_center_checked(ctx.best_node, ops, &ncx, &ncy, &nin_vp) && nin_vp) {
@@ -1215,7 +1277,7 @@ static __attribute__((unused)) bool firefox_core_click_element(
 				}
 				g_ff_atspi.g_unref(act);
 				if (did) {
-					usleep(90000);
+					ff_sleep_ms(90);
 					if (out_msg && out_sz > 0) {
 						snprintf(out_msg, out_sz, "activated [%s] '%.64s' via native action",
 						         ctx.best_role, ctx.best_label);
@@ -1238,7 +1300,7 @@ static __attribute__((unused)) bool firefox_core_click_element(
 
 	if (ops && ops->is_browser_focused && !ops->is_browser_focused(ops->ud)) {
 		if (ops->focus_browser) ops->focus_browser(ops->ud);
-		usleep(40000);
+		ff_sleep_ms(40);
 		if (!ops->is_browser_focused(ops->ud)) {
 			if (out_msg && out_sz > 0) {
 				snprintf(out_msg, out_sz, "Error: browser window lost focus before click");
@@ -1261,7 +1323,7 @@ static __attribute__((unused)) bool firefox_core_click_element(
 	if (ops && ops->click_xy) {
 		ops->click_xy(ops->ud, ctx.best_cx, ctx.best_cy, btn);
 	}
-	usleep(90000);
+	ff_sleep_ms(90);
 	if (out_msg && out_sz > 0) {
 		snprintf(out_msg, out_sz, "clicked [%s] '%.64s' at (%d,%d)",
 		         ctx.best_role, ctx.best_label, ctx.best_cx, ctx.best_cy);
@@ -1453,7 +1515,7 @@ static void ff_walk_page_tab(void *node, int depth, ff_tab_switch_ctx_t *ctx)
 				if (switched) {
 					ctx->active_matches = true;
 					snprintf(ctx->matched_title, sizeof(ctx->matched_title), "%.120s", name);
-					usleep(160000);
+					ff_sleep_ms(160);
 				} else {
 					int cx = 0, cy = 0;
 					if (ff_get_node_center(node, ctx->ops, &cx, &cy)) {
@@ -1523,13 +1585,13 @@ static __attribute__((unused)) bool firefox_core_switch_tab(
 		}
 		if (ctx.found_other && ops && ops->click_xy) {
 			ops->click_xy(ops->ud, ctx.other_cx, ctx.other_cy, 1);
-			usleep(140000);
+			ff_sleep_ms(140);
 			if (out_tab_title && title_sz > 0) {
 				snprintf(out_tab_title, title_sz, "%s", ctx.matched_title);
 			}
 			return true;
 		}
-		usleep(45000);
+		ff_sleep_ms(45);
 	}
 	return false;
 }
@@ -1753,7 +1815,7 @@ static __attribute__((unused)) int firefox_core_wait_loaded(
 		}
 
 		if (elapsed >= timeout_ms) break;
-		usleep((useconds_t)step_ms * 1000U);
+		ff_sleep_ms(step_ms);
 		elapsed += step_ms;
 	}
 

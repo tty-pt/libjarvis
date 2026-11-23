@@ -1,0 +1,33 @@
+#ifndef JARVIS_DESKTOP_AX_CORE_H
+#define JARVIS_DESKTOP_AX_CORE_H
+
+#include <stdbool.h>
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+bool ax_core_read_window(const a11y_win_ctx_t *win, bool inspect_mode,
+                         const char *filter, char *out, size_t out_sz);
+
+bool ax_core_click(const a11y_win_ctx_t *win, const a11y_ops_t *ops,
+                   const char *query, int btn, char *out_msg, size_t out_sz);
+
+bool ax_core_focus(const a11y_win_ctx_t *win, const a11y_ops_t *ops,
+                   const char *query, char *out_msg, size_t out_sz);
+
+bool ax_core_prepare_input(const a11y_win_ctx_t *win, const a11y_ops_t *ops,
+                           const char *target, bool is_terminal,
+                           char *out_role, size_t role_sz,
+                           char *out_label, size_t label_sz,
+                           char *out_err, size_t err_sz);
+
+bool ax_core_set(const a11y_win_ctx_t *win, const a11y_ops_t *ops,
+                 const char *query, const char *value, char *out_msg, size_t out_sz);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* JARVIS_DESKTOP_AX_CORE_H */

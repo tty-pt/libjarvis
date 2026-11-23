@@ -3,27 +3,40 @@
 
 /**
  * @file desktop-core.h
- * @brief Self-contained POSIX/Linux desktop, /proc, .desktop, tmux, and MPRIS helpers.
+ * @brief Self-contained cross-platform desktop, process, app discovery, tmux, and media helpers.
  *
  * ZERO libjarvis, libren, libX11, or WM link dependencies!
  */
 
-#if !defined(__wasm__) && !defined(_WIN32)
+#if !defined(__wasm__)
 #include <ctype.h>
-#include <dirent.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 #include <sys/stat.h>
-#include <sys/statvfs.h>
 #include <sys/types.h>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <io.h>
+#define dc_strcasecmp  _stricmp
+#define dc_strtok_r    strtok_s
+#else
+#include <dirent.h>
+#include <fcntl.h>
+#include <strings.h>
+#include <sys/statvfs.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#define dc_strcasecmp  strcasecmp
+#define dc_strtok_r    strtok_r
+#endif
 
 static __attribute__((unused)) void desktop_core_trim_trailing(char *s)
 {
@@ -38,7 +51,16 @@ static __attribute__((unused)) void desktop_core_trim_trailing(char *s)
 static __attribute__((unused)) bool desktop_core_str_contains_ci(const char *haystack, const char *needle)
 {
 	if (!haystack || !needle || !*needle) return false;
-	return strcasestr(haystack, needle) != NULL;
+	size_t nlen = strlen(needle);
+	for (const char *h = haystack; *h; h++) {
+		size_t i = 0;
+		while (i < nlen && h[i] &&
+		       tolower((unsigned char)h[i]) == tolower((unsigned char)needle[i])) {
+			i++;
+		}
+		if (i == nlen) return true;
+	}
+	return false;
 }
 
 static __attribute__((unused)) void desktop_core_run_cmd_capture(const char *cmd, char *out, size_t out_sz)
@@ -46,17 +68,42 @@ static __attribute__((unused)) void desktop_core_run_cmd_capture(const char *cmd
 	if (!out || out_sz == 0) return;
 	out[0] = '\0';
 	if (!cmd || !*cmd) return;
+#ifdef _WIN32
+	FILE *fp = _popen(cmd, "r");
+#else
 	FILE *fp = popen(cmd, "r");
+#endif
 	if (!fp) return;
 	size_t rd = fread(out, 1, out_sz - 1, fp);
 	out[rd] = '\0';
 	desktop_core_trim_trailing(out);
+#ifdef _WIN32
+	_pclose(fp);
+#else
 	pclose(fp);
+#endif
 }
 
 static __attribute__((unused)) pid_t desktop_core_spawn_detached_sh(const char *cmd)
 {
 	if (!cmd || !*cmd) return -1;
+#ifdef _WIN32
+	char full[2048];
+	snprintf(full, sizeof(full), "cmd.exe /c %s", cmd);
+	STARTUPINFOA si;
+	PROCESS_INFORMATION pi;
+	memset(&si, 0, sizeof(si));
+	si.cb = sizeof(si);
+	memset(&pi, 0, sizeof(pi));
+	if (!CreateProcessA(NULL, full, NULL, NULL, FALSE,
+	                    DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
+	                    NULL, NULL, &si, &pi)) {
+		return -1;
+	}
+	CloseHandle(pi.hThread);
+	CloseHandle(pi.hProcess);
+	return 0;
+#else
 	pid_t pid = fork();
 	if (pid < 0) return -1;
 	if (pid == 0) {
@@ -78,11 +125,42 @@ static __attribute__((unused)) pid_t desktop_core_spawn_detached_sh(const char *
 	int st = 0;
 	while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
 	return 0;
+#endif
 }
 
 static __attribute__((unused)) pid_t desktop_core_spawn_detached_argv(char *const argv[])
 {
 	if (!argv || !argv[0]) return -1;
+#ifdef _WIN32
+	char cmdline[2048];
+	size_t off = 0;
+	cmdline[0] = '\0';
+	for (size_t i = 0; argv[i] && off + 4 < sizeof(cmdline); i++) {
+		if (i > 0) cmdline[off++] = ' ';
+		const char *a = argv[i];
+		bool quote = (!*a || strchr(a, ' ') || strchr(a, '\t') || strchr(a, '"'));
+		if (quote && off + 1 < sizeof(cmdline)) cmdline[off++] = '"';
+		for (const char *p = a; *p && off + 2 < sizeof(cmdline); p++) {
+			if (*p == '"') cmdline[off++] = '\\';
+			cmdline[off++] = *p;
+		}
+		if (quote && off + 1 < sizeof(cmdline)) cmdline[off++] = '"';
+		cmdline[off] = '\0';
+	}
+	STARTUPINFOA si;
+	PROCESS_INFORMATION pi;
+	memset(&si, 0, sizeof(si));
+	si.cb = sizeof(si);
+	memset(&pi, 0, sizeof(pi));
+	if (!CreateProcessA(NULL, cmdline, NULL, NULL, FALSE,
+	                    DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
+	                    NULL, NULL, &si, &pi)) {
+		return -1;
+	}
+	CloseHandle(pi.hThread);
+	CloseHandle(pi.hProcess);
+	return 1;
+#else
 	int pfd[2];
 	if (pipe(pfd) < 0) return -1;
 	fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
@@ -133,6 +211,7 @@ static __attribute__((unused)) pid_t desktop_core_spawn_detached_argv(char *cons
 	close(pfd[0]);
 
 	return (n == 0) ? 1 : -1;
+#endif
 }
 
 static __attribute__((unused)) void desktop_core_url_encode(const char *src, char *dst, size_t dst_sz)
@@ -182,6 +261,7 @@ static __attribute__((unused)) void desktop_core_json_escape(const char *src, ch
 
 static __attribute__((unused)) size_t desktop_core_get_child_pids(unsigned long pid, unsigned long *out_pids, size_t max_pids)
 {
+#ifdef __linux__
 	if (!pid || !out_pids || max_pids == 0) return 0;
 	char path[128];
 	snprintf(path, sizeof(path), "/proc/%lu/task/%lu/children", pid, pid);
@@ -191,19 +271,24 @@ static __attribute__((unused)) size_t desktop_core_get_child_pids(unsigned long 
 	size_t count = 0;
 	if (fgets(buf, sizeof(buf), fp)) {
 		char *saveptr = NULL;
-		for (char *tok = strtok_r(buf, " \t\n", &saveptr); tok && count < max_pids; tok = strtok_r(NULL, " \t\n", &saveptr)) {
+		for (char *tok = dc_strtok_r(buf, " \t\n", &saveptr); tok && count < max_pids; tok = dc_strtok_r(NULL, " \t\n", &saveptr)) {
 			unsigned long cp = strtoul(tok, NULL, 10);
 			if (cp > 0) out_pids[count++] = cp;
 		}
 	}
 	fclose(fp);
 	return count;
+#else
+	(void)pid; (void)out_pids; (void)max_pids;
+	return 0;
+#endif
 }
 
 static __attribute__((unused)) void desktop_core_read_proc_comm(unsigned long pid, char *out, size_t out_sz)
 {
 	if (!out || out_sz == 0) return;
 	out[0] = '\0';
+#ifdef __linux__
 	if (!pid) return;
 	char path[128];
 	snprintf(path, sizeof(path), "/proc/%lu/comm", pid);
@@ -213,12 +298,16 @@ static __attribute__((unused)) void desktop_core_read_proc_comm(unsigned long pi
 		desktop_core_trim_trailing(out);
 	}
 	fclose(fp);
+#else
+	(void)pid;
+#endif
 }
 
 static __attribute__((unused)) void desktop_core_read_proc_cmdline(unsigned long pid, char *out, size_t out_sz)
 {
 	if (!out || out_sz == 0) return;
 	out[0] = '\0';
+#ifdef __linux__
 	if (!pid) return;
 	char path[128];
 	snprintf(path, sizeof(path), "/proc/%lu/cmdline", pid);
@@ -231,6 +320,9 @@ static __attribute__((unused)) void desktop_core_read_proc_cmdline(unsigned long
 	}
 	out[rd] = '\0';
 	desktop_core_trim_trailing(out);
+#else
+	(void)pid;
+#endif
 }
 
 static __attribute__((unused)) bool desktop_core_is_shell_name(const char *comm)
@@ -243,12 +335,19 @@ static __attribute__((unused)) bool desktop_core_is_shell_name(const char *comm)
 
 static __attribute__((unused)) void desktop_core_resolve_pid_cwd_fg(unsigned long pid, char *out_cwd, size_t cwd_sz, char *out_fg, size_t fg_sz)
 {
+#ifdef _WIN32
+	const char *home = getenv("USERPROFILE");
+	if (!home || !*home) home = getenv("HOME");
+	if (!home || !*home) home = ".";
+#else
 	const char *home = getenv("HOME");
 	if (!home || !*home) home = "/tmp";
+#endif
 	if (out_cwd && cwd_sz > 0) snprintf(out_cwd, cwd_sz, "%s", home);
 	if (out_fg && fg_sz > 0) out_fg[0] = '\0';
 	if (!pid) return;
 
+#ifdef __linux__
 	unsigned long sh_pids[16];
 	size_t n_sh = desktop_core_get_child_pids(pid, sh_pids, 16);
 	unsigned long sh_pid = n_sh > 0 ? sh_pids[n_sh - 1] : pid;
@@ -270,10 +369,17 @@ static __attribute__((unused)) void desktop_core_resolve_pid_cwd_fg(unsigned lon
 			desktop_core_read_proc_comm(target_p, out_fg, fg_sz);
 		}
 	}
+#elif defined(__APPLE__)
+	char cmd[128], buf[512];
+	snprintf(cmd, sizeof(cmd), "lsof -a -d cwd -Fn -p %lu 2>/dev/null | sed -n 's/^n//p' | head -n1", pid);
+	desktop_core_run_cmd_capture(cmd, buf, sizeof(buf));
+	if (buf[0] && out_cwd && cwd_sz > 0) snprintf(out_cwd, cwd_sz, "%s", buf);
+#endif
 }
 
 static __attribute__((unused)) bool desktop_core_is_idle_shell_pid(unsigned long pid)
 {
+#ifdef __linux__
 	if (!pid) return false;
 	unsigned long sh_pids[16];
 	size_t n_sh = desktop_core_get_child_pids(pid, sh_pids, 16);
@@ -290,7 +396,7 @@ static __attribute__((unused)) bool desktop_core_is_idle_shell_pid(unsigned long
 		tmux_out, sizeof(tmux_out));
 	if (tmux_out[0]) {
 		char *save_line = NULL;
-		for (char *line = strtok_r(tmux_out, "\n", &save_line); line; line = strtok_r(NULL, "\n", &save_line)) {
+		for (char *line = dc_strtok_r(tmux_out, "\n", &save_line); line; line = dc_strtok_r(NULL, "\n", &save_line)) {
 			char *t1 = strchr(line, '\t');
 			char *t2 = t1 ? strchr(t1 + 1, '\t') : NULL;
 			if (!t1 || !t2) continue;
@@ -308,11 +414,15 @@ static __attribute__((unused)) bool desktop_core_is_idle_shell_pid(unsigned long
 			}
 		}
 	}
+#else
+	(void)pid;
+#endif
 	return false;
 }
 
 static __attribute__((unused)) bool desktop_core_is_ssh_pid(unsigned long pid)
 {
+#ifdef __linux__
 	if (!pid) return false;
 	unsigned long sh_pids[16];
 	size_t n_sh = desktop_core_get_child_pids(pid, sh_pids, 16);
@@ -324,8 +434,11 @@ static __attribute__((unused)) bool desktop_core_is_ssh_pid(unsigned long pid)
 	for (size_t i = 0; i < n_sub; i++) {
 		char comm[64];
 		desktop_core_read_proc_comm(sub_pids[i], comm, sizeof(comm));
-		if (strcasecmp(comm, "ssh") == 0) return true;
+		if (dc_strcasecmp(comm, "ssh") == 0) return true;
 	}
+#else
+	(void)pid;
+#endif
 	return false;
 }
 
@@ -335,6 +448,26 @@ static __attribute__((unused)) void desktop_core_populate_system_health(char *ou
 	out[0] = '\0';
 	int pos = 0;
 
+#ifdef _WIN32
+	ULARGE_INTEGER avail_b, total_b, free_b;
+	if (GetDiskFreeSpaceExA("C:\\", &avail_b, &total_b, &free_b) && total_b.QuadPart > 0) {
+		double total_gb = (double)total_b.QuadPart / (1024.0 * 1024.0 * 1024.0);
+		double free_gb  = (double)avail_b.QuadPart / (1024.0 * 1024.0 * 1024.0);
+		int used_pct = (int)(100.0 * (1.0 - (free_gb / (total_gb > 0.1 ? total_gb : 0.1))) + 0.5);
+		pos += snprintf(out + pos, (size_t)pos < out_sz ? out_sz - (size_t)pos : 0,
+		                "Disk C:: %.1f GB free / %.0f GB (%d%% used)", free_gb, total_gb, used_pct);
+	}
+	MEMORYSTATUSEX ms;
+	ms.dwLength = sizeof(ms);
+	if (GlobalMemoryStatusEx(&ms) && ms.ullTotalPhys > 0) {
+		double tot_g = (double)ms.ullTotalPhys / (1024.0 * 1024.0 * 1024.0);
+		double avail_g = (double)ms.ullAvailPhys / (1024.0 * 1024.0 * 1024.0);
+		double used_g = tot_g - avail_g;
+		pos += snprintf(out + pos, (size_t)pos < out_sz ? out_sz - (size_t)pos : 0,
+		                "%sRAM: %.1f GB used / %.1f GB (%.1f GB free)",
+		                pos > 0 ? " | " : "", used_g, tot_g, avail_g);
+	}
+#else
 	struct statvfs st;
 	if (statvfs("/", &st) == 0 && st.f_blocks > 0) {
 		double total_gb = ((double)st.f_blocks * (double)st.f_frsize) / (1024.0 * 1024.0 * 1024.0);
@@ -374,6 +507,14 @@ static __attribute__((unused)) void desktop_core_populate_system_health(char *ou
 		}
 		fclose(lf);
 	}
+#elif defined(__APPLE__)
+	char up_buf[256];
+	desktop_core_run_cmd_capture("uptime 2>/dev/null", up_buf, sizeof(up_buf));
+	if (up_buf[0]) {
+		pos += snprintf(out + pos, (size_t)pos < out_sz ? out_sz - (size_t)pos : 0,
+		                "%s%s", pos > 0 ? " | " : "", up_buf);
+	}
+#endif
 #endif
 }
 
@@ -390,11 +531,23 @@ static bool                     g_dc_apps_loaded = false;
 
 static __attribute__((unused)) void desktop_core_scan_desktop_dir(const char *dir_path)
 {
+#ifndef _WIN32
 	DIR *d = opendir(dir_path);
 	if (!d) return;
 	struct dirent *ent;
 	while ((ent = readdir(d)) != NULL && g_dc_app_count < DESKTOP_CORE_MAX_CACHED_APPS) {
 		size_t nlen = strlen(ent->d_name);
+#ifdef __APPLE__
+		if (nlen > 4 && strcmp(ent->d_name + nlen - 4, ".app") == 0) {
+			desktop_core_app_entry_t *ae = &g_dc_apps[g_dc_app_count++];
+			size_t b = nlen - 4;
+			if (b >= sizeof(ae->phrase)) b = sizeof(ae->phrase) - 1;
+			for (size_t i = 0; i < b; i++) ae->phrase[i] = (char)tolower((unsigned char)ent->d_name[i]);
+			ae->phrase[b] = '\0';
+			snprintf(ae->exec_cmd, sizeof(ae->exec_cmd), "open -a \"%s/%s\"", dir_path, ent->d_name);
+			continue;
+		}
+#endif
 		if (nlen <= 8 || strcmp(ent->d_name + nlen - 8, ".desktop") != 0) continue;
 
 		char full[512];
@@ -448,12 +601,25 @@ static __attribute__((unused)) void desktop_core_scan_desktop_dir(const char *di
 		snprintf(ae->exec_cmd, sizeof(ae->exec_cmd), "%s", clean_exec);
 	}
 	closedir(d);
+#else
+	(void)dir_path;
+#endif
 }
 
 static __attribute__((unused)) void desktop_core_ensure_apps_loaded(void)
 {
 	if (g_dc_apps_loaded) return;
 	g_dc_apps_loaded = true;
+#ifdef __APPLE__
+	const char *home = getenv("HOME");
+	if (home && *home) {
+		char user_apps[512];
+		snprintf(user_apps, sizeof(user_apps), "%s/Applications", home);
+		desktop_core_scan_desktop_dir(user_apps);
+	}
+	desktop_core_scan_desktop_dir("/Applications");
+	desktop_core_scan_desktop_dir("/System/Applications");
+#elif !defined(_WIN32)
 	const char *home = getenv("HOME");
 	if (home && *home) {
 		char user_apps[512];
@@ -462,6 +628,7 @@ static __attribute__((unused)) void desktop_core_ensure_apps_loaded(void)
 	}
 	desktop_core_scan_desktop_dir("/usr/share/applications");
 	desktop_core_scan_desktop_dir("/var/lib/snapd/desktop/applications");
+#endif
 }
 
 static __attribute__((unused)) bool desktop_core_is_exec_available(const char *cmd)
@@ -479,6 +646,16 @@ static __attribute__((unused)) bool desktop_core_is_exec_available(const char *c
 	tok[n] = '\0';
 	if (!tok[0]) return false;
 
+#ifdef _WIN32
+	if (strchr(tok, '/') != NULL || strchr(tok, '\\') != NULL) {
+		DWORD attr = GetFileAttributesA(tok);
+		return (attr != INVALID_FILE_ATTRIBUTES) && !(attr & FILE_ATTRIBUTE_DIRECTORY);
+	}
+	char found_path[512];
+	if (SearchPathA(NULL, tok, ".exe", (DWORD)sizeof(found_path), found_path, NULL) > 0) return true;
+	if (SearchPathA(NULL, tok, NULL, (DWORD)sizeof(found_path), found_path, NULL) > 0) return true;
+	return false;
+#else
 	if (strchr(tok, '/') != NULL) {
 		struct stat st;
 		return stat(tok, &st) == 0 && !S_ISDIR(st.st_mode) && access(tok, X_OK) == 0;
@@ -491,7 +668,7 @@ static __attribute__((unused)) bool desktop_core_is_exec_available(const char *c
 
 	bool found = false;
 	char *saveptr = NULL;
-	for (char *dir = strtok_r(path_copy, ":", &saveptr); dir; dir = strtok_r(NULL, ":", &saveptr)) {
+	for (char *dir = dc_strtok_r(path_copy, ":", &saveptr); dir; dir = dc_strtok_r(NULL, ":", &saveptr)) {
 		if (!*dir) continue;
 		char cand[512];
 		snprintf(cand, sizeof(cand), "%s/%s", dir, tok);
@@ -503,6 +680,7 @@ static __attribute__((unused)) bool desktop_core_is_exec_available(const char *c
 	}
 	free(path_copy);
 	return found;
+#endif
 }
 
 static __attribute__((unused)) bool desktop_core_resolve_known_app(
@@ -528,7 +706,7 @@ static __attribute__((unused)) bool desktop_core_resolve_known_app(
 
 	desktop_core_ensure_apps_loaded();
 	for (size_t i = 0; i < g_dc_app_count; i++) {
-		if (strcasecmp(g_dc_apps[i].phrase, id) == 0) {
+		if (dc_strcasecmp(g_dc_apps[i].phrase, id) == 0) {
 			snprintf(out_cmd, out_sz, "%s", g_dc_apps[i].exec_cmd);
 			return true;
 		}
@@ -559,6 +737,7 @@ static __attribute__((unused)) bool desktop_core_resolve_known_app(
 static __attribute__((unused)) bool desktop_core_mpris_control(const char *action)
 {
 	if (!action || !*action) return false;
+#if defined(__linux__)
 	char cmd[512], out[256];
 	snprintf(cmd, sizeof(cmd),
 		"for bus in $(gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus "
@@ -568,12 +747,17 @@ static __attribute__((unused)) bool desktop_core_mpris_control(const char *actio
 		action);
 	desktop_core_run_cmd_capture(cmd, out, sizeof(out));
 	return strstr(out, "OK") != NULL;
+#else
+	(void)action;
+	return false;
+#endif
 }
 
 static __attribute__((unused)) bool desktop_core_is_terminal_class(const char *wm_class)
 {
 	static const char *const TERMS[] = {
-		"st-256color", "st", "xterm", "alacritty", "kitty", "foot", "wezterm", "urxvt", "ghostty", NULL
+		"st-256color", "st", "xterm", "alacritty", "kitty", "foot", "wezterm", "urxvt", "ghostty",
+		"Terminal", "iTerm2", "WindowsTerminal", "ConsoleWindowClass", "mintty", NULL
 	};
 	if (!wm_class || !*wm_class) return false;
 	for (size_t i = 0; TERMS[i]; i++) {
@@ -588,6 +772,54 @@ static __attribute__((unused)) int desktop_core_exec_capture(char *const argv[],
 	out[0] = '\0';
 	if (!argv || !argv[0]) return -1;
 
+#ifdef _WIN32
+	char cmdline[2048];
+	size_t off = 0;
+	cmdline[0] = '\0';
+	for (size_t i = 0; argv[i] && off + 4 < sizeof(cmdline); i++) {
+		if (i > 0) cmdline[off++] = ' ';
+		const char *a = argv[i];
+		bool quote = (!*a || strchr(a, ' ') || strchr(a, '\t') || strchr(a, '"'));
+		if (quote && off + 1 < sizeof(cmdline)) cmdline[off++] = '"';
+		for (const char *p = a; *p && off + 2 < sizeof(cmdline); p++) {
+			if (*p == '"') cmdline[off++] = '\\';
+			cmdline[off++] = *p;
+		}
+		if (quote && off + 1 < sizeof(cmdline)) cmdline[off++] = '"';
+		cmdline[off] = '\0';
+	}
+	SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+	HANDLE r_pipe = NULL, w_pipe = NULL;
+	if (!CreatePipe(&r_pipe, &w_pipe, &sa, 0)) return -1;
+	SetHandleInformation(r_pipe, HANDLE_FLAG_INHERIT, 0);
+	STARTUPINFOA si;
+	PROCESS_INFORMATION pi;
+	memset(&si, 0, sizeof(si));
+	si.cb = sizeof(si);
+	si.dwFlags = STARTF_USESTDHANDLES;
+	si.hStdOutput = w_pipe;
+	si.hStdError = w_pipe;
+	si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+	memset(&pi, 0, sizeof(pi));
+	BOOL ok = CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+	CloseHandle(w_pipe);
+	if (!ok) { CloseHandle(r_pipe); return -1; }
+	CloseHandle(pi.hThread);
+	size_t pos = 0;
+	while (pos + 1 < out_sz) {
+		DWORD rd = 0;
+		if (!ReadFile(r_pipe, out + pos, (DWORD)(out_sz - 1 - pos), &rd, NULL) || rd == 0) break;
+		pos += rd;
+	}
+	out[pos] = '\0';
+	CloseHandle(r_pipe);
+	WaitForSingleObject(pi.hProcess, INFINITE);
+	DWORD ec = 1;
+	GetExitCodeProcess(pi.hProcess, &ec);
+	CloseHandle(pi.hProcess);
+	desktop_core_trim_trailing(out);
+	return ec == 0 ? 0 : -1;
+#else
 	int pfd[2];
 	if (pipe(pfd) < 0) return -1;
 	(void)fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
@@ -630,6 +862,7 @@ static __attribute__((unused)) int desktop_core_exec_capture(char *const argv[],
 	while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
 	desktop_core_trim_trailing(out);
 	return (WIFEXITED(st) && WEXITSTATUS(st) == 0) ? 0 : -1;
+#endif
 }
 
 static __attribute__((unused)) bool desktop_core_pid_is_descendant(unsigned long root_pid, unsigned long candidate_pid)
@@ -656,6 +889,7 @@ static __attribute__((unused)) bool desktop_core_pid_is_descendant(unsigned long
 static __attribute__((unused)) bool desktop_core_find_tmux_target(
 	unsigned long focused_pid, char *out_target, size_t target_sz)
 {
+#ifndef _WIN32
 	if (!out_target || target_sz == 0) return false;
 	out_target[0] = '\0';
 
@@ -666,7 +900,7 @@ static __attribute__((unused)) bool desktop_core_find_tmux_target(
 	if (desktop_core_exec_capture(argv_clients, buf, sizeof(buf)) == 0 && buf[0]) {
 		char fallback[128] = {0};
 		char *save_line = NULL;
-		for (char *line = strtok_r(buf, "\n", &save_line); line; line = strtok_r(NULL, "\n", &save_line)) {
+		for (char *line = dc_strtok_r(buf, "\n", &save_line); line; line = dc_strtok_r(NULL, "\n", &save_line)) {
 			char *t1 = strchr(line, '\t');
 			char *t2 = t1 ? strchr(t1 + 1, '\t') : NULL;
 			if (!t1 || !t2) continue;
@@ -695,7 +929,7 @@ static __attribute__((unused)) bool desktop_core_find_tmux_target(
 	};
 	if (desktop_core_exec_capture(argv_panes, buf, sizeof(buf)) == 0 && buf[0]) {
 		char *save_line = NULL;
-		for (char *line = strtok_r(buf, "\n", &save_line); line; line = strtok_r(NULL, "\n", &save_line)) {
+		for (char *line = dc_strtok_r(buf, "\n", &save_line); line; line = dc_strtok_r(NULL, "\n", &save_line)) {
 			char *t1 = strchr(line, '\t');
 			char *t2 = t1 ? strchr(t1 + 1, '\t') : NULL;
 			char *t3 = t2 ? strchr(t2 + 1, '\t') : NULL;
@@ -714,12 +948,16 @@ static __attribute__((unused)) bool desktop_core_find_tmux_target(
 			}
 		}
 	}
+#else
+	(void)focused_pid; (void)out_target; (void)target_sz;
+#endif
 	return false;
 }
 
 static __attribute__((unused)) bool desktop_core_capture_tmux_target(
 	const char *target, int lines, char *out, size_t out_sz)
 {
+#ifndef _WIN32
 	if (!out || out_sz == 0) return false;
 	out[0] = '\0';
 	if (!target || !*target) return false;
@@ -731,7 +969,11 @@ static __attribute__((unused)) bool desktop_core_capture_tmux_target(
 	snprintf(start_arg, sizeof(start_arg), "-%d", lines);
 	char *const argv[] = { "tmux", "capture-pane", "-p", "-t", target_copy, "-S", start_arg, NULL };
 	return desktop_core_exec_capture(argv, out, out_sz) == 0 && out[0] != '\0';
+#else
+	(void)target; (void)lines; (void)out; (void)out_sz;
+	return false;
+#endif
 }
 
-#endif /* !__wasm__ && !_WIN32 */
+#endif /* !__wasm__ */
 #endif /* TTYPT_DESKTOP_CORE_H */

@@ -1,10 +1,29 @@
 #include "jarvis-internal.h"
-#include <strings.h>
 
 #ifndef __wasm__
-#include <pwd.h>
-#include <unistd.h>
+#include "jarvis-platform.h"
 #endif
+
+static int j_strcasecmp(const char *a, const char *b)
+{
+	if (!a || !b) return (a == b) ? 0 : (a ? 1 : -1);
+	for (;; a++, b++) {
+		int ca = tolower((unsigned char)*a);
+		int cb = tolower((unsigned char)*b);
+		if (ca != cb || ca == 0) return ca - cb;
+	}
+}
+
+static int j_strncasecmp(const char *a, const char *b, size_t n)
+{
+	if (!a || !b) return (a == b) ? 0 : (a ? 1 : -1);
+	for (size_t i = 0; i < n; i++) {
+		int ca = tolower((unsigned char)a[i]);
+		int cb = tolower((unsigned char)b[i]);
+		if (ca != cb || ca == 0) return ca - cb;
+	}
+	return 0;
+}
 
 /* ---------------------------------------------------------------------------
  * Streaming TTS Answer Prefix & Clause Extractor
@@ -226,15 +245,31 @@ static void resolve_jarvisrc_path(char *out, size_t out_sz, bool for_write)
 		snprintf(out, out_sz, "%s", env_rc);
 		return;
 	}
+	char hbuf[512] = {0};
 	const char *home = getenv("HOME");
+#ifndef __wasm__
+	if (!home || !*home) {
+		stl_home_dir(hbuf, sizeof(hbuf));
+		home = hbuf[0] ? hbuf : ".";
+	}
+#else
 	if (!home || !*home) home = "/tmp";
+#endif
 	snprintf(out, out_sz, "%s/.jarvisrc", home);
 #ifndef __wasm__
-	if (!for_write && access(out, R_OK) != 0) {
+	if (!for_write && !jarvis_plat_is_readable(out)) {
 		char alt[512];
 		snprintf(alt, sizeof(alt), "%s/.config/jarvis/jarvisrc", home);
-		if (access(alt, R_OK) == 0) {
+		if (jarvis_plat_is_readable(alt)) {
 			snprintf(out, out_sz, "%s", alt);
+			return;
+		}
+		char cdir[512];
+		if (stl_config_dir("jarvis", cdir, sizeof(cdir)) && cdir[0]) {
+			snprintf(alt, sizeof(alt), "%s/jarvisrc", cdir);
+			if (jarvis_plat_is_readable(alt)) {
+				snprintf(out, out_sz, "%s", alt);
+			}
 		}
 	}
 #else
@@ -245,8 +280,15 @@ static void resolve_jarvisrc_path(char *out, size_t out_sz, bool for_write)
 static void expand_tilde_path(const char *val, char *out, size_t out_sz)
 {
 	if (!val || !out || out_sz == 0) return;
-	if (val[0] == '~' && (val[1] == '/' || val[1] == '\0')) {
+	if (val[0] == '~' && (val[1] == '/' || val[1] == '\\' || val[1] == '\0')) {
+		char hbuf[512] = {0};
 		const char *home = getenv("HOME");
+#ifndef __wasm__
+		if (!home || !*home) {
+			stl_home_dir(hbuf, sizeof(hbuf));
+			home = hbuf[0] ? hbuf : NULL;
+		}
+#endif
 		if (home && *home) {
 			snprintf(out, out_sz, "%s%s", home, val + 1);
 			return;
@@ -282,7 +324,7 @@ bool jarvis_rc_get(const char *key, const char *fallback, char *out, size_t out_
 		char *k = p;
 		size_t kl = strlen(k);
 		while (kl > 0 && isspace((unsigned char)k[kl - 1])) k[--kl] = '\0';
-		if (strcasecmp(k, key) != 0) continue;
+		if (j_strcasecmp(k, key) != 0) continue;
 
 		char *v = eq + 1;
 		while (*v && isspace((unsigned char)*v)) v++;
@@ -310,10 +352,10 @@ int jarvis_rc_get_int(const char *key, int fallback)
 	if (!jarvis_rc_get(key, NULL, buf, sizeof(buf)) || !buf[0]) {
 		return fallback;
 	}
-	if (strcasecmp(buf, "true") == 0 || strcasecmp(buf, "yes") == 0 || strcasecmp(buf, "on") == 0) {
+	if (j_strcasecmp(buf, "true") == 0 || j_strcasecmp(buf, "yes") == 0 || j_strcasecmp(buf, "on") == 0) {
 		return 1;
 	}
-	if (strcasecmp(buf, "false") == 0 || strcasecmp(buf, "no") == 0 || strcasecmp(buf, "off") == 0) {
+	if (j_strcasecmp(buf, "false") == 0 || j_strcasecmp(buf, "no") == 0 || j_strcasecmp(buf, "off") == 0) {
 		return 0;
 	}
 	return atoi(buf);
@@ -343,7 +385,7 @@ bool jarvis_rc_set(const char *key, const char *value)
 					*eq = '\0';
 					size_t kl = strlen(p);
 					while (kl > 0 && isspace((unsigned char)p[kl - 1])) p[--kl] = '\0';
-					if (strcasecmp(p, key) == 0) {
+					if (j_strcasecmp(p, key) == 0) {
 						snprintf(lines[n_lines], sizeof(lines[0]), "%s = %s\n", key, value);
 						replaced = true;
 					}
@@ -365,6 +407,9 @@ bool jarvis_rc_set(const char *key, const char *value)
 		fputs(lines[i], out);
 	}
 	fclose(out);
+#ifdef _WIN32
+	remove(rc_path);
+#endif
 	return rename(tmp_path, rc_path) == 0;
 #else
 	(void)key;
@@ -400,7 +445,7 @@ bool jarvis_rc_unset(const char *key)
 				*eq = '\0';
 				size_t kl = strlen(p);
 				while (kl > 0 && isspace((unsigned char)p[kl - 1])) p[--kl] = '\0';
-				if (strcasecmp(p, key) == 0) {
+				if (j_strcasecmp(p, key) == 0) {
 					match = true;
 					removed = true;
 				}
@@ -421,6 +466,9 @@ bool jarvis_rc_unset(const char *key)
 		fputs(lines[i], out);
 	}
 	fclose(out);
+#ifdef _WIN32
+	remove(rc_path);
+#endif
 	return rename(tmp_path, rc_path) == 0;
 #else
 	(void)key;
@@ -453,45 +501,37 @@ static bool normalize_lang_tag(const char *raw, char *out, size_t out_sz)
 static bool resolve_kbd_layout_lang(char *out, size_t out_sz)
 {
 #ifndef __wasm__
-	char ubuf[64] = {0};
-	const char *u = getenv("USER");
-	if (!u || !*u) {
-		struct passwd pw, *res = NULL;
-		char pbuf[512];
-		if (getpwuid_r(getuid(), &pw, pbuf, sizeof(pbuf), &res) == 0 && res && res->pw_name && res->pw_name[0]) {
-			snprintf(ubuf, sizeof(ubuf), "%s", res->pw_name);
-			u = ubuf;
-		} else {
-			u = "user";
-		}
-	}
-	char path[256], buf[32] = {0};
-	snprintf(path, sizeof(path), "/tmp/dwm-kbd-%s.state", u);
-	FILE *fp = fopen(path, "r");
-	if (!fp) return false;
-	bool ok = false;
-	if (fgets(buf, sizeof(buf), fp)) {
-		char code[8] = {0};
-		size_t ci = 0;
-		for (size_t i = 0; buf[i] && ci < 2; i++) {
-			if (isalpha((unsigned char)buf[i])) {
-				code[ci++] = (char)tolower((unsigned char)buf[i]);
+	char path[512], buf[32] = {0};
+	if (jarvis_plat_state_path("dwm-kbd", ".state", path, sizeof(path)) == 0) {
+		FILE *fp = fopen(path, "r");
+		if (fp) {
+			bool ok = false;
+			if (fgets(buf, sizeof(buf), fp)) {
+				char code[8] = {0};
+				size_t ci = 0;
+				for (size_t i = 0; buf[i] && ci < 2; i++) {
+					if (isalpha((unsigned char)buf[i])) {
+						code[ci++] = (char)tolower((unsigned char)buf[i]);
+					}
+				}
+				code[ci] = '\0';
+				if (strcmp(code, "us") == 0 || strcmp(code, "gb") == 0 || strcmp(code, "uk") == 0) {
+					snprintf(out, out_sz, "en");
+					ok = true;
+				} else if (strcmp(code, "br") == 0) {
+					snprintf(out, out_sz, "pt-br");
+					ok = true;
+				} else if (ci == 2) {
+					snprintf(out, out_sz, "%s", code);
+					ok = true;
+				}
 			}
-		}
-		code[ci] = '\0';
-		if (strcmp(code, "us") == 0 || strcmp(code, "gb") == 0 || strcmp(code, "uk") == 0) {
-			snprintf(out, out_sz, "en");
-			ok = true;
-		} else if (strcmp(code, "br") == 0) {
-			snprintf(out, out_sz, "pt-br");
-			ok = true;
-		} else if (ci == 2) {
-			snprintf(out, out_sz, "%s", code);
-			ok = true;
+			fclose(fp);
+			if (ok) return true;
 		}
 	}
-	fclose(fp);
-	return ok;
+	jarvis_plat_kbd_lang(out, out_sz);
+	return out[0] != '\0';
 #else
 	(void)out;
 	(void)out_sz;
@@ -559,7 +599,7 @@ void jarvis_resolve_wake_word(const jarvis_ontology_t *ont, char *out, size_t ou
 
 	char rc_wake[64] = {0};
 	if (jarvis_rc_get("wake_word", NULL, rc_wake, sizeof(rc_wake)) &&
-	    rc_wake[0] && strcasecmp(rc_wake, "auto") != 0) {
+	    rc_wake[0] && j_strcasecmp(rc_wake, "auto") != 0) {
 		snprintf(out, out_sz, "%s", rc_wake);
 		return;
 	}
@@ -587,14 +627,14 @@ void jarvis_resolve_tts_voice(const jarvis_ontology_t *ont, char *out, size_t ou
 	out[0] = '\0';
 
 	const char *env_v = getenv("JARVIS_VOICE");
-	if (env_v && *env_v && strcasecmp(env_v, "auto") != 0) {
+	if (env_v && *env_v && j_strcasecmp(env_v, "auto") != 0) {
 		snprintf(out, out_sz, "%s", env_v);
 		return;
 	}
 
 	char rc_v[64] = {0};
 	if (jarvis_rc_get("tts_voice", NULL, rc_v, sizeof(rc_v)) &&
-	    rc_v[0] && strcasecmp(rc_v, "auto") != 0) {
+	    rc_v[0] && j_strcasecmp(rc_v, "auto") != 0) {
 		snprintf(out, out_sz, "%s", rc_v);
 		return;
 	}
@@ -635,7 +675,7 @@ static bool str_contains_ci(const char *hay, const char *needle)
 	if (!hay || !needle || !*needle) return false;
 	size_t nlen = strlen(needle);
 	for (const char *p = hay; *p; p++) {
-		if (strncasecmp(p, needle, nlen) == 0) return true;
+		if (j_strncasecmp(p, needle, nlen) == 0) return true;
 	}
 	return false;
 }
@@ -646,14 +686,14 @@ void jarvis_resolve_wm(char *out, size_t out_sz)
 	out[0] = '\0';
 
 	const char *env_wm = getenv("JARVIS_WM");
-	if (env_wm && *env_wm && strcasecmp(env_wm, "auto") != 0) {
+	if (env_wm && *env_wm && j_strcasecmp(env_wm, "auto") != 0) {
 		snprintf(out, out_sz, "%s", env_wm);
 		return;
 	}
 
 	char rc_wm[64] = {0};
 	if (jarvis_rc_get("wm", NULL, rc_wm, sizeof(rc_wm)) &&
-	    rc_wm[0] && strcasecmp(rc_wm, "auto") != 0) {
+	    rc_wm[0] && j_strcasecmp(rc_wm, "auto") != 0) {
 		snprintf(out, out_sz, "%s", rc_wm);
 		return;
 	}
@@ -686,14 +726,11 @@ void jarvis_resolve_wm(char *out, size_t out_sz)
 	}
 
 #ifndef __wasm__
-	const char *u = getenv("USER");
-	if (u && *u) {
-		char pid_p[256];
-		snprintf(pid_p, sizeof(pid_p), "/tmp/dwm-bar-%s.pid", u);
-		if (access(pid_p, R_OK) == 0) {
-			snprintf(out, out_sz, "dwm");
-			return;
-		}
+	char pid_p[512];
+	if (jarvis_plat_state_path("dwm-bar", ".pid", pid_p, sizeof(pid_p)) == 0 &&
+	    jarvis_plat_is_readable(pid_p)) {
+		snprintf(out, out_sz, "dwm");
+		return;
 	}
 #endif
 
@@ -703,5 +740,11 @@ void jarvis_resolve_wm(char *out, size_t out_sz)
 		return;
 	}
 
+#ifdef __APPLE__
+	snprintf(out, out_sz, "macos");
+#elif defined(_WIN32)
+	snprintf(out, out_sz, "win32");
+#else
 	snprintf(out, out_sz, "desktop");
+#endif
 }

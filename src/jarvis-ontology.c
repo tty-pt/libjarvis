@@ -712,6 +712,7 @@ jarvis_ontology_t *jarvis_ontology_create_for_lang(const char *json_path, const 
 		if (ont) return ont;
 	}
 	const char *home = getenv("HOME");
+	if (!home || !*home) home = getenv("USERPROFILE");
 	if (home && *home) {
 		char home_cfg[512];
 		snprintf(home_cfg, sizeof(home_cfg), "%s/.config/jarvis/ontology.json", home);
@@ -722,6 +723,22 @@ jarvis_ontology_t *jarvis_ontology_create_for_lang(const char *json_path, const 
 		ont = try_load_ontology_file_for_lang(home_cfg, lang);
 		if (ont) return ont;
 	}
+#ifdef _WIN32
+	const char *appdata = getenv("APPDATA");
+	if (appdata && *appdata) {
+		char win_cfg[512];
+		snprintf(win_cfg, sizeof(win_cfg), "%s\\jarvis\\ontology.json", appdata);
+		jarvis_ontology_t *ont = try_load_ontology_file_for_lang(win_cfg, lang);
+		if (ont) return ont;
+	}
+	const char *lappdata = getenv("LOCALAPPDATA");
+	if (lappdata && *lappdata) {
+		char win_cfg[512];
+		snprintf(win_cfg, sizeof(win_cfg), "%s\\jarvis\\ontology.json", lappdata);
+		jarvis_ontology_t *ont = try_load_ontology_file_for_lang(win_cfg, lang);
+		if (ont) return ont;
+	}
+#endif
 	static const char *const fallback_paths[] = {
 		"data/ontology.json",
 		"../data/ontology.json",

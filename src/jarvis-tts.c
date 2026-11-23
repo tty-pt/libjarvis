@@ -12,32 +12,71 @@
 
 #define _GNU_SOURCE
 #include "jarvis-tts.h"
+#include "jarvis-audio.h"
+#include "jarvis-platform.h"
 
-#include <arpa/inet.h>
+#include <ttypt/stele.h>
+#include "jarvis-thread.h"
+
 #include <ctype.h>
-#include <dlfcn.h>
 #include <errno.h>
-#include <fcntl.h>
-#include <malloc.h>
 #include <math.h>
-#include <netinet/in.h>
-#include <poll.h>
-#include <pthread.h>
-#include <pwd.h>
-#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/time.h>
 #include <sys/types.h>
-#include <sys/wait.h>
 #include <time.h>
+
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <io.h>
+#ifndef strcasecmp
+#define strcasecmp _stricmp
+#endif
+#ifndef strncasecmp
+#define strncasecmp _strnicmp
+#endif
+#else
+#include <strings.h>
 #include <unistd.h>
+#endif
+
+static int tts_fd_close(int fd)
+{
+#ifdef _WIN32
+	return _close(fd);
+#else
+	return close(fd);
+#endif
+}
+
+static ssize_t tts_fd_read(int fd, void *buf, size_t n)
+{
+#ifdef _WIN32
+	return (ssize_t)_read(fd, buf, (unsigned int)n);
+#else
+	return read(fd, buf, n);
+#endif
+}
+
+static ssize_t tts_fd_write(int fd, const void *buf, size_t n)
+{
+#ifdef _WIN32
+	return (ssize_t)_write(fd, buf, (unsigned int)n);
+#else
+	return write(fd, buf, n);
+#endif
+}
 
 /* ---------------------------------------------------------------------------
  * Minimal ABI Definitions for libespeak-ng.so.1 & libonnxruntime.so.1.23
@@ -222,13 +261,12 @@ static struct {
 	bool            worker_running;
 	bool            busy_speaking;
 	uint64_t        cancel_gen;
-	pid_t           player_pid;
-	pid_t           draining_pid;
+	jarvis_audio_play_t *player;
+	jarvis_audio_play_t *draining_player;
 
 	/* Persistent edge-tts-pcm --serve coprocess */
-	pid_t           edge_pid;
-	int             edge_in_fd;
-	int             edge_out_fd;
+	stl_proc_t      edge_proc;
+	bool            has_edge;
 	bool            edge_busy;
 
 	/* Short-phrase PCM LRU cache */
@@ -258,11 +296,10 @@ static struct {
 	.cond = PTHREAD_COND_INITIALIZER,
 	.done_cond = PTHREAD_COND_INITIALIZER,
 	.cancel_gen = 1,
-	.player_pid = -1,
-	.draining_pid = -1,
-	.edge_pid = -1,
-	.edge_in_fd = -1,
-	.edge_out_fd = -1
+	.player = NULL,
+	.draining_player = NULL,
+	.edge_proc = { .stdin_fd = -1, .stdout_fd = -1, .stderr_fd = -1 },
+	.has_edge = false
 };
 
 /* ---------------------------------------------------------------------------
@@ -276,19 +313,35 @@ static void trim_trailing(char *s)
 	while (l > 0 && isspace((unsigned char)s[l - 1])) s[--l] = '\0';
 }
 
+static const char *tts_home_dir(char *buf, size_t cap)
+{
+	const char *home = getenv("HOME");
+	if (home && *home) return home;
+	stl_home_dir(buf, cap);
+	return buf[0] ? buf : NULL;
+}
+
 static bool rc_lookup(const char *key, char *out, size_t out_sz)
 {
 	if (!out || out_sz == 0) return false;
 	out[0] = '\0';
 	const char *env_rc = getenv("JARVISRC");
-	const char *home = getenv("HOME");
-	char rc_path[512];
+	char hbuf[512] = {0};
+	const char *home = tts_home_dir(hbuf, sizeof(hbuf));
+	char rc_path[1024];
 	if (env_rc && *env_rc) {
 		snprintf(rc_path, sizeof(rc_path), "%s", env_rc);
 	} else if (home && *home) {
 		snprintf(rc_path, sizeof(rc_path), "%s/.jarvisrc", home);
-		if (access(rc_path, R_OK) != 0)
+		if (!jarvis_plat_is_readable(rc_path)) {
 			snprintf(rc_path, sizeof(rc_path), "%s/.config/jarvis/jarvisrc", home);
+			if (!jarvis_plat_is_readable(rc_path)) {
+				char cdir[512];
+				if (stl_config_dir("jarvis", cdir, sizeof(cdir)) && cdir[0]) {
+					snprintf(rc_path, sizeof(rc_path), "%s/jarvisrc", cdir);
+				}
+			}
+		}
 	} else {
 		return false;
 	}
@@ -400,21 +453,31 @@ static void resolve_default_lang(char *out, size_t out_sz)
 
 static void resolve_local_voice(const char *def_lang, char *out_voice, size_t out_sz)
 {
-	const char *home = getenv("HOME");
+	char hbuf[512] = {0};
+	const char *home = tts_home_dir(hbuf, sizeof(hbuf));
 	bool is_pt = (def_lang && strncmp(def_lang, "pt", 2) == 0);
 	if (is_pt) {
 		if (home && *home) {
 			char p[512];
 			snprintf(p, sizeof(p), "%s/.local/share/piper/pt_PT-tugao-medium.onnx", home);
-			if (access(p, R_OK) == 0) {
+			if (jarvis_plat_is_readable(p)) {
 				snprintf(out_voice, out_sz, "piper:pt_PT-tugao-medium");
 				return;
 			}
 			snprintf(p, sizeof(p), "%s/.local/share/piper/pt_PT-miro.onnx", home);
-			if (access(p, R_OK) == 0) {
+			if (jarvis_plat_is_readable(p)) {
 				snprintf(out_voice, out_sz, "piper:pt_PT-miro");
 				return;
 			}
+		}
+		char dp[512];
+		if (jarvis_plat_data_file("piper", "pt_PT-tugao-medium.onnx", dp, sizeof(dp)) == 0 && jarvis_plat_is_readable(dp)) {
+			snprintf(out_voice, out_sz, "piper:pt_PT-tugao-medium");
+			return;
+		}
+		if (jarvis_plat_data_file("piper", "pt_PT-miro.onnx", dp, sizeof(dp)) == 0 && jarvis_plat_is_readable(dp)) {
+			snprintf(out_voice, out_sz, "piper:pt_PT-miro");
+			return;
 		}
 		snprintf(out_voice, out_sz, "pm_tuga");
 		return;
@@ -423,13 +486,25 @@ static void resolve_local_voice(const char *def_lang, char *out_voice, size_t ou
 		char p[512];
 		if (def_lang && strcmp(def_lang, "en-us") == 0) {
 			snprintf(p, sizeof(p), "%s/.local/share/piper/en_US-lessac-high.onnx", home);
-			if (access(p, R_OK) == 0) {
+			if (jarvis_plat_is_readable(p)) {
 				snprintf(out_voice, out_sz, "piper:us");
 				return;
 			}
 		}
 		snprintf(p, sizeof(p), "%s/.local/share/piper/en_GB-northern_english_male-medium.onnx", home);
-		if (access(p, R_OK) == 0) {
+		if (jarvis_plat_is_readable(p)) {
+			snprintf(out_voice, out_sz, "piper:gb");
+			return;
+		}
+	}
+	{
+		char dp[512];
+		if (def_lang && strcmp(def_lang, "en-us") == 0 &&
+		    jarvis_plat_data_file("piper", "en_US-lessac-high.onnx", dp, sizeof(dp)) == 0 && jarvis_plat_is_readable(dp)) {
+			snprintf(out_voice, out_sz, "piper:us");
+			return;
+		}
+		if (jarvis_plat_data_file("piper", "en_GB-northern_english_male-medium.onnx", dp, sizeof(dp)) == 0 && jarvis_plat_is_readable(dp)) {
 			snprintf(out_voice, out_sz, "piper:gb");
 			return;
 		}
@@ -485,33 +560,18 @@ void jarvis_tts_resolve_voice(char *out, size_t out_sz)
 
 static void set_mic_mute(bool muted)
 {
-	/* Never mute the user's microphone source during TTS synthesis or playback so
-	 * barge-in commands and speech while Jarvis is talking are always captured!
-	 * Self-speech echo is suppressed via /tmp/jarvis-tts-active-$USER.state in jarvisd.
-	 */
 	(void)muted;
 }
 
 static void write_tts_active_state(const char *text, bool active)
 {
 	static char s_accum[2048] = {0};
-	char ubuf[64] = {0};
-	const char *u = getenv("USER");
-	if (!u || !*u) {
-		struct passwd pw, *res = NULL;
-		char pbuf[512];
-		if (getpwuid_r(getuid(), &pw, pbuf, sizeof(pbuf), &res) == 0 && res && res->pw_name && res->pw_name[0]) {
-			snprintf(ubuf, sizeof(ubuf), "%s", res->pw_name);
-			u = ubuf;
-		} else {
-			u = "user";
-		}
-	}
-	char path[256], tmp[280];
-	snprintf(path, sizeof(path), "/tmp/jarvis-tts-active-%s.state", u);
+	char path[512], tmp[528];
+	if (jarvis_plat_state_path("jarvis-tts-active", ".state", path, sizeof(path)) != 0)
+		return;
 	if (!active) {
 		s_accum[0] = '\0';
-		unlink(path);
+		remove(path);
 		return;
 	}
 	if (text && *text) {
@@ -539,23 +599,14 @@ static void write_tts_active_state(const char *text, bool active)
 	if (fp) {
 		fprintf(fp, "%s\n", s_accum[0] ? s_accum : "1");
 		fclose(fp);
+#ifdef _WIN32
+		remove(path);
+#endif
 		rename(tmp, path);
 	}
 }
 
 /* Notify jarvisd of TTS state changes (speaking/idle) via TCP control socket */
-
-static void
-write_all(int fd, const char *buf, size_t len)
-{
-	while (len > 0) {
-		ssize_t w = write(fd, buf, len);
-		if (w <= 0)
-			break;
-		buf += w;
-		len -= (size_t)w;
-	}
-}
 
 static int resolve_daemon_port(void)
 {
@@ -574,12 +625,12 @@ static int resolve_daemon_port(void)
 
 static void notify_tts_state(const char *state)
 {
+	stl_sock_init();
 	int port = resolve_daemon_port();
-	int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-	if (fd < 0) return;
+	stl_socket_t fd = stl_sock_create(AF_INET, SOCK_STREAM, 0);
+	if (fd == STL_INVALID_SOCKET) return;
 
-	struct timeval tv = { .tv_sec = 0, .tv_usec = 200000 };
-	setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+	(void)stl_sock_set_timeout(fd, 200, 200);
 
 	struct sockaddr_in addr;
 	memset(&addr, 0, sizeof(addr));
@@ -587,15 +638,15 @@ static void notify_tts_state(const char *state)
 	addr.sin_port = htons((uint16_t)port);
 	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
-	if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-		close(fd);
+	if (stl_sock_connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		stl_sock_close(fd);
 		return;
 	}
 
 	char msg[128];
 	snprintf(msg, sizeof(msg), "TTS_STATE|%s\n", state);
-	write_all(fd, msg, strlen(msg));
-	close(fd);
+	jarvis_plat_write_sock_all(fd, msg, strlen(msg));
+	stl_sock_close(fd);
 }
 
 static void clean_speech_text(const char *src, char *dst, size_t dst_sz)
@@ -1022,56 +1073,67 @@ static void tts_cache_store(const char *voice, const char *text, const int16_t *
 
 static void close_edge_worker_locked(bool kill_immediate)
 {
-	if (g_tts.edge_in_fd >= 0) {
-		close(g_tts.edge_in_fd);
-		g_tts.edge_in_fd = -1;
-	}
-	if (g_tts.edge_out_fd >= 0) {
-		close(g_tts.edge_out_fd);
-		g_tts.edge_out_fd = -1;
-	}
-	pid_t pid = g_tts.edge_pid;
-	g_tts.edge_pid = -1;
+	stl_proc_t proc = g_tts.edge_proc;
+	bool active = g_tts.has_edge;
+	memset(&g_tts.edge_proc, 0, sizeof(g_tts.edge_proc));
+	g_tts.edge_proc.stdin_fd = -1;
+	g_tts.edge_proc.stdout_fd = -1;
+	g_tts.edge_proc.stderr_fd = -1;
+	g_tts.has_edge = false;
 	g_tts.edge_busy = false;
-	if (pid > 1) {
-		if (kill_immediate) {
-			kill(pid, SIGKILL);
-		} else {
-			kill(pid, SIGTERM);
-		}
-		pthread_mutex_unlock(&g_tts.mtx);
-		int st = 0;
-		while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
-		pthread_mutex_lock(&g_tts.mtx);
-	}
+	if (!active) return;
+
+	if (proc.stdin_fd >= 0) { tts_fd_close(proc.stdin_fd); proc.stdin_fd = -1; }
+	if (proc.stdout_fd >= 0) { tts_fd_close(proc.stdout_fd); proc.stdout_fd = -1; }
+	stl_proc_kill(&proc, kill_immediate ? 1 : 0);
+	pthread_mutex_unlock(&g_tts.mtx);
+	int ec = 0;
+	stl_proc_wait(&proc, &ec, -1);
+	stl_proc_close(&proc);
+	pthread_mutex_lock(&g_tts.mtx);
 }
 
 static bool resolve_edge_bin_and_python(char *bin_out, size_t bin_sz, char *py_out, size_t py_sz)
 {
 	const char *env_bin = getenv("JARVIS_EDGE_TTS_BIN");
-	const char *home = getenv("HOME");
+	char hbuf[512] = {0};
+	const char *home = tts_home_dir(hbuf, sizeof(hbuf));
 	bin_out[0] = '\0';
 	py_out[0] = '\0';
 
-	if (env_bin && *env_bin && access(env_bin, X_OK) == 0) {
+	if (env_bin && *env_bin && jarvis_plat_is_exec(env_bin)) {
 		snprintf(bin_out, bin_sz, "%s", env_bin);
 	} else if (home && *home) {
+#ifdef _WIN32
+		snprintf(bin_out, bin_sz, "%s\\.local\\bin\\edge-tts-pcm.exe", home);
+		if (!jarvis_plat_is_exec(bin_out)) {
+			snprintf(bin_out, bin_sz, "%s/.local/bin/edge-tts-pcm", home);
+		}
+#else
 		snprintf(bin_out, bin_sz, "%s/.local/bin/edge-tts-pcm", home);
-		if (access(bin_out, X_OK) != 0)
-			snprintf(bin_out, bin_sz, "edge-tts-pcm");
+#endif
+		if (!jarvis_plat_is_exec(bin_out)) {
+			if (jarvis_plat_find_in_path("edge-tts-pcm", bin_out, bin_sz) != 0)
+				snprintf(bin_out, bin_sz, "edge-tts-pcm");
+		}
 	} else {
 		snprintf(bin_out, bin_sz, "edge-tts-pcm");
 	}
 
 	if (home && *home && !env_bin) {
 		static const char *const venvs[] = {
+#ifdef _WIN32
+			"%s/.local/share/dwm-voice/venv/Scripts/python.exe",
+			"%s/.venv/Scripts/python.exe",
+#else
 			"%s/.local/share/dwm-voice/venv/bin/python",
 			"%s/.venv/bin/python",
+#endif
 			NULL
 		};
 		for (size_t i = 0; venvs[i]; i++) {
 			snprintf(py_out, py_sz, venvs[i], home);
-			if (access(py_out, X_OK) == 0) {
+			if (jarvis_plat_is_exec(py_out)) {
 				return true;
 			}
 		}
@@ -1082,10 +1144,10 @@ static bool resolve_edge_bin_and_python(char *bin_out, size_t bin_sz, char *py_o
 
 static bool ensure_edge_worker_locked(void)
 {
-	if (g_tts.edge_pid > 1 && g_tts.edge_in_fd >= 0 && g_tts.edge_out_fd >= 0) {
-		int st = 0;
-		pid_t w = waitpid(g_tts.edge_pid, &st, WNOHANG);
-		if (w == 0) return true;
+	if (g_tts.has_edge && g_tts.edge_proc.stdin_fd >= 0 && g_tts.edge_proc.stdout_fd >= 0) {
+		int ec = 0;
+		int wr = stl_proc_wait(&g_tts.edge_proc, &ec, 0);
+		if (wr == 1) return true;
 		close_edge_worker_locked(false);
 	}
 
@@ -1093,40 +1155,21 @@ static bool ensure_edge_worker_locked(void)
 	if (!resolve_edge_bin_and_python(bin_path, sizeof(bin_path), py_path, sizeof(py_path)))
 		return false;
 
-	int in_p[2], out_p[2];
-	if (pipe(in_p) < 0) return false;
-	if (pipe(out_p) < 0) {
-		close(in_p[0]);
-		close(in_p[1]);
-		return false;
+	stl_proc_t proc;
+	int spawned = -1;
+	if (py_path[0]) {
+		const char *argv_py[] = { py_path, bin_path, "--serve", NULL };
+		spawned = stl_spawn(argv_py, STL_SPAWN_STDIN | STL_SPAWN_STDOUT | STL_SPAWN_NEW_GROUP, &proc);
 	}
-	fcntl(in_p[1], F_SETFD, FD_CLOEXEC);
-	fcntl(out_p[0], F_SETFD, FD_CLOEXEC);
+	if (spawned < 0) {
+		const char *argv_bin[] = { bin_path, "--serve", NULL };
+		spawned = stl_spawn(argv_bin, STL_SPAWN_STDIN | STL_SPAWN_STDOUT | STL_SPAWN_NEW_GROUP, &proc);
+	}
+	if (spawned < 0)
+		return false;
 
-	pid_t pid = fork();
-	if (pid == 0) {
-		close(in_p[1]);
-		close(out_p[0]);
-		dup2(in_p[0], STDIN_FILENO);
-		dup2(out_p[1], STDOUT_FILENO);
-		if (in_p[0] > STDERR_FILENO) close(in_p[0]);
-		if (out_p[1] > STDERR_FILENO) close(out_p[1]);
-		if (py_path[0]) {
-			execl(py_path, py_path, bin_path, "--serve", (char *)NULL);
-		}
-		execlp(bin_path, bin_path, "--serve", (char *)NULL);
-		_exit(127);
-	}
-	close(in_p[0]);
-	close(out_p[1]);
-	if (pid < 0) {
-		close(in_p[1]);
-		close(out_p[0]);
-		return false;
-	}
-	g_tts.edge_pid = pid;
-	g_tts.edge_in_fd = in_p[1];
-	g_tts.edge_out_fd = out_p[0];
+	g_tts.edge_proc = proc;
+	g_tts.has_edge = true;
 	g_tts.edge_busy = false;
 	return true;
 }
@@ -1153,26 +1196,49 @@ static void tts_onnx_unload_unlocked(void)
 	g_tts.loaded_voice[0] = '\0';
 
 	if (g_tts.ort_dl) {
-		dlclose(g_tts.ort_dl);
+		stl_dlclose(g_tts.ort_dl);
 		g_tts.ort_dl = NULL;
 	}
 	if (g_tts.espeak_dl) {
 		if (g_tts.espeak_Terminate) g_tts.espeak_Terminate();
-		dlclose(g_tts.espeak_dl);
+		stl_dlclose(g_tts.espeak_dl);
 		g_tts.espeak_dl = NULL;
 		g_tts.espeak_Init = NULL;
 		g_tts.espeak_SetVoice = NULL;
 		g_tts.espeak_TextToPhonemesTerm = NULL;
 		g_tts.espeak_Terminate = NULL;
 	}
+#ifdef __GLIBC__
 	malloc_trim(0);
+#endif
 }
+
+static bool reap_draining_player_locked(bool block);
+static void close_persistent_player_locked(bool wait_for_drain);
 
 static void tts_engine_unload(void)
 {
 	tts_cache_clear_locked();
+	close_persistent_player_locked(true);
+	reap_draining_player_locked(true);
 	close_edge_worker_locked(false);
 	tts_onnx_unload_unlocked();
+}
+
+static void resolve_tts_data_path(const char *home, const char *subdir, const char *file,
+                                  char *out, size_t cap)
+{
+	if (home && *home) {
+		snprintf(out, cap, "%s/.local/share/%s/%s", home, subdir, file);
+		if (jarvis_plat_is_readable(out))
+			return;
+	}
+	if (jarvis_plat_data_file(subdir, file, out, cap) == 0 && jarvis_plat_is_readable(out))
+		return;
+	if (home && *home)
+		snprintf(out, cap, "%s/.local/share/%s/%s", home, subdir, file);
+	else
+		out[0] = '\0';
 }
 
 static bool tts_engine_ensure_loaded(const char *voice)
@@ -1183,25 +1249,27 @@ static bool tts_engine_ensure_loaded(const char *voice)
 		pthread_mutex_unlock(&g_tts.mtx);
 		return ok;
 	}
-	const char *home = getenv("HOME");
-	if (!home || !*home) return false;
+	char hbuf[512] = {0};
+	const char *home = tts_home_dir(hbuf, sizeof(hbuf));
 
 	bool want_piper = (strncmp(voice, "piper:", 6) == 0);
 	bool want_kokoro_pt = false;
 	char model_path[512];
 	char voices_bin[512];
-	snprintf(voices_bin, sizeof(voices_bin), "%s/.local/share/kokoro/voices-v1.0.bin", home);
+	resolve_tts_data_path(home, "kokoro", "voices-v1.0.bin", voices_bin, sizeof(voices_bin));
 
 	if (want_piper) {
 		const char *p_name = voice + 6;
 		if (strcmp(p_name, "us") == 0) {
-			snprintf(model_path, sizeof(model_path), "%s/.local/share/piper/en_US-lessac-high.onnx", home);
+			resolve_tts_data_path(home, "piper", "en_US-lessac-high.onnx", model_path, sizeof(model_path));
 		} else if (strcmp(p_name, "gb") == 0 || !*p_name) {
-			snprintf(model_path, sizeof(model_path), "%s/.local/share/piper/en_GB-northern_english_male-medium.onnx", home);
+			resolve_tts_data_path(home, "piper", "en_GB-northern_english_male-medium.onnx", model_path, sizeof(model_path));
 		} else if (strstr(p_name, ".onnx")) {
-			snprintf(model_path, sizeof(model_path), "%s/.local/share/piper/%s", home, p_name);
+			resolve_tts_data_path(home, "piper", p_name, model_path, sizeof(model_path));
 		} else {
-			snprintf(model_path, sizeof(model_path), "%s/.local/share/piper/%s.onnx", home, p_name);
+			char fname[128];
+			snprintf(fname, sizeof(fname), "%s.onnx", p_name);
+			resolve_tts_data_path(home, "piper", fname, model_path, sizeof(model_path));
 		}
 	} else {
 		char def_lang[32];
@@ -1209,28 +1277,28 @@ static bool tts_engine_ensure_loaded(const char *voice)
 		bool is_pt_voice = (voice && *voice)
 			? (tolower((unsigned char)voice[0]) == 'p')
 			: (strncasecmp(def_lang, "pt", 2) == 0);
-		snprintf(model_path, sizeof(model_path), "%s/.local/share/kokoro/kokoro-pt-pt.onnx", home);
-		if (is_pt_voice && access(model_path, R_OK) == 0 && access(voices_bin, R_OK) == 0) {
+		resolve_tts_data_path(home, "kokoro", "kokoro-pt-pt.onnx", model_path, sizeof(model_path));
+		if (is_pt_voice && jarvis_plat_is_readable(model_path) && jarvis_plat_is_readable(voices_bin)) {
 			want_kokoro_pt = true;
 		} else {
-			snprintf(model_path, sizeof(model_path), "%s/.local/share/kokoro/kokoro-v1.0.int8.onnx", home);
-			if (access(model_path, R_OK) != 0 || access(voices_bin, R_OK) != 0) {
+			resolve_tts_data_path(home, "kokoro", "kokoro-v1.0.int8.onnx", model_path, sizeof(model_path));
+			if (!jarvis_plat_is_readable(model_path) || !jarvis_plat_is_readable(voices_bin)) {
 				want_piper = true;
-				snprintf(model_path, sizeof(model_path), "%s/.local/share/piper/en_GB-northern_english_male-medium.onnx", home);
+				resolve_tts_data_path(home, "piper", "en_GB-northern_english_male-medium.onnx", model_path, sizeof(model_path));
 			}
 		}
 	}
 
-	if (access(model_path, R_OK) != 0) return false;
+	if (!jarvis_plat_is_readable(model_path)) return false;
 
-	/* 1. Lazy dlopen libespeak-ng.so.1 */
+	/* 1. Lazy dlopen espeak-ng */
 	if (!g_tts.espeak_dl) {
-		g_tts.espeak_dl = dlopen("libespeak-ng.so.1", RTLD_LAZY | RTLD_LOCAL);
+		g_tts.espeak_dl = stl_dlopen(jarvis_plat_espeak_lib_name(), 0);
 		if (!g_tts.espeak_dl) return false;
-		g_tts.espeak_Init = (espeak_Init_fn)dlsym(g_tts.espeak_dl, "espeak_Initialize");
-		g_tts.espeak_SetVoice = (espeak_SetVoice_fn)dlsym(g_tts.espeak_dl, "espeak_SetVoiceByName");
-		g_tts.espeak_TextToPhonemesTerm = (espeak_TextToPhonemesTerm_fn)dlsym(g_tts.espeak_dl, "espeak_TextToPhonemesWithTerminator");
-		g_tts.espeak_Terminate = (espeak_Terminate_fn)dlsym(g_tts.espeak_dl, "espeak_Terminate");
+		g_tts.espeak_Init = (espeak_Init_fn)stl_dlsym(g_tts.espeak_dl, "espeak_Initialize");
+		g_tts.espeak_SetVoice = (espeak_SetVoice_fn)stl_dlsym(g_tts.espeak_dl, "espeak_SetVoiceByName");
+		g_tts.espeak_TextToPhonemesTerm = (espeak_TextToPhonemesTerm_fn)stl_dlsym(g_tts.espeak_dl, "espeak_TextToPhonemesWithTerminator");
+		g_tts.espeak_Terminate = (espeak_Terminate_fn)stl_dlsym(g_tts.espeak_dl, "espeak_Terminate");
 		if (!g_tts.espeak_Init || !g_tts.espeak_SetVoice || !g_tts.espeak_TextToPhonemesTerm) {
 			tts_onnx_unload_unlocked();
 			return false;
@@ -1244,25 +1312,18 @@ static bool tts_engine_ensure_loaded(const char *voice)
 		}
 	}
 
-	/* 2. Lazy dlopen libonnxruntime.so.1.23 (suppress stderr duplicate ONNX schema chatter) */
+	/* 2. Lazy dlopen onnxruntime (suppress stderr duplicate ONNX schema chatter) */
 	if (!g_tts.ort_dl) {
-		int saved_stderr = dup(STDERR_FILENO);
-		int devnull = open("/dev/null", O_WRONLY);
-		if (devnull >= 0) {
-			dup2(devnull, STDERR_FILENO);
-			close(devnull);
-		}
-		g_tts.ort_dl = dlopen("libonnxruntime.so.1.23", RTLD_LAZY | RTLD_LOCAL);
-		if (!g_tts.ort_dl) g_tts.ort_dl = dlopen("libonnxruntime.so", RTLD_LAZY | RTLD_LOCAL);
-		if (saved_stderr >= 0) {
-			dup2(saved_stderr, STDERR_FILENO);
-			close(saved_stderr);
-		}
+		int saved_stderr = -1;
+		jarvis_plat_suppress_stderr_begin(&saved_stderr);
+		g_tts.ort_dl = stl_dlopen(jarvis_plat_ort_lib_name(0), 0);
+		if (!g_tts.ort_dl) g_tts.ort_dl = stl_dlopen(jarvis_plat_ort_lib_name(1), 0);
+		jarvis_plat_suppress_stderr_end(saved_stderr);
 		if (!g_tts.ort_dl) {
 			tts_onnx_unload_unlocked();
 			return false;
 		}
-		OrtGetApiBase_fn get_base = (OrtGetApiBase_fn)dlsym(g_tts.ort_dl, "OrtGetApiBase");
+		OrtGetApiBase_fn get_base = (OrtGetApiBase_fn)stl_dlsym(g_tts.ort_dl, "OrtGetApiBase");
 		if (!get_base || !get_base()) {
 			tts_onnx_unload_unlocked();
 			return false;
@@ -1296,17 +1357,10 @@ static bool tts_engine_ensure_loaded(const char *voice)
 
 		ort_CreateEnv_fn create_env = (ort_CreateEnv_fn)g_tts.ort_vtbl[ORT_IDX_CreateEnv];
 		ort_CreateCpuMemoryInfo_fn create_mi = (ort_CreateCpuMemoryInfo_fn)g_tts.ort_vtbl[ORT_IDX_CreateCpuMemoryInfo];
-		int saved_err2 = dup(STDERR_FILENO);
-		int devnull2 = open("/dev/null", O_WRONLY);
-		if (devnull2 >= 0) {
-			dup2(devnull2, STDERR_FILENO);
-			close(devnull2);
-		}
+		int saved_err2 = -1;
+		jarvis_plat_suppress_stderr_begin(&saved_err2);
 		void *st = create_env(3 /* ORT_LOGGING_LEVEL_ERROR */, "jarvis-tts", &g_tts.ort_env);
-		if (saved_err2 >= 0) {
-			dup2(saved_err2, STDERR_FILENO);
-			close(saved_err2);
-		}
+		jarvis_plat_suppress_stderr_end(saved_err2);
 		if (st) { ort_release_status(st); tts_onnx_unload_unlocked(); return false; }
 		st = create_mi(1 /* OrtArenaAllocator */, 0 /* OrtMemTypeDefault */, &g_tts.ort_mem_info);
 		if (st) { ort_release_status(st); tts_onnx_unload_unlocked(); return false; }
@@ -1475,9 +1529,7 @@ static int resolve_edge_timeout_ms(void)
 
 static long monotonic_ms_now(void)
 {
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (long)ts.tv_sec * 1000L + (long)(ts.tv_nsec / 1000000L);
+	return (long)stl_now_ms();
 }
 
 static bool write_all_edge(int fd, const void *buf, size_t len)
@@ -1485,9 +1537,11 @@ static bool write_all_edge(int fd, const void *buf, size_t len)
 	const uint8_t *p = (const uint8_t *)buf;
 	size_t off = 0;
 	while (off < len) {
-		ssize_t w = write(fd, p + off, len - off);
+		ssize_t w = tts_fd_write(fd, p + off, len - off);
 		if (w <= 0) {
+#ifndef _WIN32
 			if (w < 0 && errno == EINTR) continue;
+#endif
 			return false;
 		}
 		off += (size_t)w;
@@ -1512,12 +1566,29 @@ static int read_exact_edge_timeout(int fd, void *buf, size_t len, int timeout_ms
 		long rem = deadline - monotonic_ms_now();
 		if (rem <= 0) return -3;
 
+		int slice = (rem > 50) ? 50 : (int)rem;
+#ifdef _WIN32
+		HANDLE h = (HANDLE)_get_osfhandle(fd);
+		if (h == INVALID_HANDLE_VALUE) return -1;
+		DWORD avail = 0;
+		if (!PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL)) {
+			return -1;
+		}
+		if (avail == 0) {
+			stl_sleep_ms(slice > 5 ? 5 : (unsigned)slice);
+			continue;
+		}
+		size_t want = len - got;
+		if (want > (size_t)avail) want = (size_t)avail;
+		ssize_t r = tts_fd_read(fd, p + got, want);
+		if (r <= 0) return -1;
+		got += (size_t)r;
+#else
 		struct pollfd pfd;
 		pfd.fd = fd;
 		pfd.events = POLLIN;
 		pfd.revents = 0;
-		int slice = (rem > 50) ? 50 : (int)rem;
-		int pr = poll(&pfd, 1, slice);
+		int pr = stl_poll(&pfd, 1, slice);
 		if (pr < 0) {
 			if (errno == EINTR) continue;
 			return -1;
@@ -1525,7 +1596,7 @@ static int read_exact_edge_timeout(int fd, void *buf, size_t len, int timeout_ms
 		if (pr == 0) continue;
 
 		if (pfd.revents & (POLLIN | POLLHUP)) {
-			ssize_t r = read(fd, p + got, len - got);
+			ssize_t r = tts_fd_read(fd, p + got, len - got);
 			if (r < 0) {
 				if (errno == EINTR || errno == EAGAIN) continue;
 				return -1;
@@ -1535,6 +1606,7 @@ static int read_exact_edge_timeout(int fd, void *buf, size_t len, int timeout_ms
 		} else if (pfd.revents & (POLLERR | POLLNVAL)) {
 			return -1;
 		}
+#endif
 	}
 	return 0;
 }
@@ -1631,8 +1703,8 @@ static int16_t *synthesize_edge_tts(const char *seg_text, const char *voice, siz
 			pthread_mutex_unlock(&g_tts.mtx);
 			return NULL;
 		}
-		int in_fd = g_tts.edge_in_fd;
-		int out_fd = g_tts.edge_out_fd;
+		int in_fd = g_tts.edge_proc.stdin_fd;
+		int out_fd = g_tts.edge_proc.stdout_fd;
 		bool wrote = write_all_edge(in_fd, req, (size_t)req_len);
 		if (!wrote) {
 			close_edge_worker_locked(true);
@@ -1870,33 +1942,17 @@ static int16_t *synthesize_espeak_cli_pcm(const char *seg_text, const char *lang
 	char es_voice[32];
 	normalize_espeak_voice(lang_hint, es_voice, sizeof(es_voice));
 
-	int pfd[2];
-	if (pipe(pfd) < 0) return NULL;
-	fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
-
-	pid_t pid = fork();
-	if (pid == 0) {
-		close(pfd[0]);
-		dup2(pfd[1], STDOUT_FILENO);
-		if (pfd[1] > STDERR_FILENO) close(pfd[1]);
-		int devnull = open("/dev/null", O_WRONLY);
-		if (devnull >= 0) {
-			dup2(devnull, STDERR_FILENO);
-			if (devnull > STDERR_FILENO) close(devnull);
-		}
-		execlp("espeak-ng", "espeak-ng", "-v", es_voice, "--stdout", seg_text, (char *)NULL);
-		execlp("espeak", "espeak", "-v", es_voice, "--stdout", seg_text, (char *)NULL);
-		_exit(127);
-	}
-	close(pfd[1]);
-	if (pid < 0) {
-		close(pfd[0]);
-		return NULL;
+	stl_proc_t proc;
+	const char *argv_ng[] = { "espeak-ng", "-v", es_voice, "--stdout", seg_text, NULL };
+	const char *argv_es[] = { "espeak", "-v", es_voice, "--stdout", seg_text, NULL };
+	if (stl_spawn(argv_ng, STL_SPAWN_STDOUT | STL_SPAWN_NEW_GROUP, &proc) < 0) {
+		if (stl_spawn(argv_es, STL_SPAWN_STDOUT | STL_SPAWN_NEW_GROUP, &proc) < 0)
+			return NULL;
 	}
 
 	size_t cap = 65536, len = 0;
 	uint8_t *wav = (uint8_t *)malloc(cap);
-	if (wav) {
+	if (wav && proc.stdout_fd >= 0) {
 		for (;;) {
 			if (len + 4096 > cap) {
 				if (cap >= 4U * 1024U * 1024U) break;
@@ -1906,53 +1962,26 @@ static int16_t *synthesize_espeak_cli_pcm(const char *seg_text, const char *lang
 				wav = nb;
 				cap = ncap;
 			}
-			ssize_t r = read(pfd[0], wav + len, cap - len);
+			ssize_t r = tts_fd_read(proc.stdout_fd, wav + len, cap - len);
+#ifndef _WIN32
 			if (r < 0 && errno == EINTR) continue;
+#endif
 			if (r <= 0) break;
 			len += (size_t)r;
 		}
 	}
-	close(pfd[0]);
+	if (proc.stdout_fd >= 0) {
+		tts_fd_close(proc.stdout_fd);
+		proc.stdout_fd = -1;
+	}
 	int st = 0;
-	while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+	stl_proc_wait(&proc, &st, -1);
+	stl_proc_close(&proc);
 
-	if (!wav || len < 44 || memcmp(wav, "RIFF", 4) != 0 || memcmp(wav + 8, "WAVE", 4) != 0) {
-		free(wav);
-		return NULL;
-	}
-
-	uint32_t sample_rate = 22050;
-	uint16_t bits_per_sample = 16;
-	size_t off = 12;
 	int16_t *pcm16 = NULL;
-
-	while (off + 8 <= len) {
-		uint32_t csz = (uint32_t)wav[off + 4] | ((uint32_t)wav[off + 5] << 8) |
-		               ((uint32_t)wav[off + 6] << 16) | ((uint32_t)wav[off + 7] << 24);
-		size_t body = off + 8;
-		if (memcmp(wav + off, "fmt ", 4) == 0 && body + 16 <= len && csz >= 16) {
-			sample_rate = (uint32_t)wav[body + 4] | ((uint32_t)wav[body + 5] << 8) |
-			              ((uint32_t)wav[body + 6] << 16) | ((uint32_t)wav[body + 7] << 24);
-			bits_per_sample = (uint16_t)wav[body + 14] | ((uint16_t)wav[body + 15] << 8);
-		} else if (memcmp(wav + off, "data", 4) == 0 && bits_per_sample == 16 && body < len) {
-			size_t avail = len - body;
-			size_t bytes = (csz > 0 && csz <= avail) ? (size_t)csz : avail;
-			size_t nsamp = bytes / sizeof(int16_t);
-			if (nsamp > 0) {
-				pcm16 = (int16_t *)malloc(nsamp * sizeof(int16_t));
-				if (pcm16) {
-					memcpy(pcm16, wav + body, nsamp * sizeof(int16_t));
-					*out_samples = nsamp;
-					*out_rate = (sample_rate >= 8000 && sample_rate <= 96000) ? (int)sample_rate : 22050;
-				}
-			}
-			break;
-		}
-		size_t step = 8 + (size_t)csz + ((csz & 1U) ? 1U : 0U);
-		if (step < 8 || off + step > len) break;
-		off += step;
+	if (wav && len >= 44) {
+		(void)jarvis_plat_read_wav_pcm16(wav, len, &pcm16, out_samples, out_rate);
 	}
-
 	free(wav);
 	return pcm16;
 }
@@ -1988,8 +2017,10 @@ static int16_t *synthesize_segment_pcm(const char *seg_text, const char *voice, 
 		pcm = synthesize_onnx_pcm(seg_text, fb_voice, out_samples, out_rate);
 		if (pcm && *out_samples > 0) return pcm;
 
-		/* Last-resort offline CLI fallback */
+		/* Last-resort offline CLI / native OS TTS fallback */
 		pcm = synthesize_espeak_cli_pcm(seg_text, is_pt ? "pt" : NULL, out_samples, out_rate);
+		if (pcm && *out_samples > 0) return pcm;
+		pcm = jarvis_plat_tts_fallback_pcm(seg_text, is_pt ? "pt" : NULL, out_samples, out_rate);
 		if (pcm && *out_samples > 0) return pcm;
 	} else {
 		int16_t *pcm = synthesize_onnx_pcm(seg_text, voice, out_samples, out_rate);
@@ -1998,6 +2029,8 @@ static int16_t *synthesize_segment_pcm(const char *seg_text, const char *voice, 
 			return pcm;
 		}
 		pcm = synthesize_espeak_cli_pcm(seg_text, NULL, out_samples, out_rate);
+		if (pcm && *out_samples > 0) return pcm;
+		pcm = jarvis_plat_tts_fallback_pcm(seg_text, NULL, out_samples, out_rate);
 		if (pcm && *out_samples > 0) return pcm;
 	}
 
@@ -2013,112 +2046,61 @@ static int16_t *synthesize_segment_pcm(const char *seg_text, const char *voice, 
 }
 
 /* ---------------------------------------------------------------------------
- * Persistent PipeWire Playback Stream & Instant SIGKILL Preemption
+ * Persistent Playback Stream & Instant Barge-In Preemption
  * ------------------------------------------------------------------------- */
-
-static int      g_pw_pipe_fd = -1;
-static int      g_pw_rate    = 0;
 
 static bool reap_draining_player_locked(bool block)
 {
-	pid_t dpid = g_tts.draining_pid;
-	if (dpid <= 1) {
-		g_tts.draining_pid = -1;
-		return true;
+	jarvis_audio_play_t *dp = g_tts.draining_player;
+	if (!dp) return true;
+	if (!block) {
+		int done = jarvis_audio_play_poll_done(dp);
+		if (done == 0) return false;
 	}
-	int st = 0;
-	pid_t w = waitpid(dpid, &st, WNOHANG);
-	if (w == dpid || (w < 0 && errno == ECHILD)) {
-		if (g_tts.draining_pid == dpid) g_tts.draining_pid = -1;
-		return true;
-	}
-	if (!block) return false;
+	g_tts.draining_player = NULL;
 	pthread_mutex_unlock(&g_tts.mtx);
-	while (waitpid(dpid, &st, 0) < 0 && errno == EINTR) {}
+	jarvis_audio_play_close(dp);
 	pthread_mutex_lock(&g_tts.mtx);
-	if (g_tts.draining_pid == dpid) g_tts.draining_pid = -1;
 	return true;
 }
 
 static void close_persistent_player_locked(bool wait_for_drain)
 {
-	if (g_pw_pipe_fd >= 0) {
-		close(g_pw_pipe_fd);
-		g_pw_pipe_fd = -1;
-	}
-	pid_t pid = g_tts.player_pid;
-	g_tts.player_pid = -1;
-	g_pw_rate = 0;
-	if (pid <= 1) return;
+	if (!g_tts.player) return;
 
 	if (!wait_for_drain) {
-		reap_draining_player_locked(true);
-		g_tts.draining_pid = pid;
+		if (g_tts.draining_player)
+			reap_draining_player_locked(true);
+		jarvis_audio_play_t *p = g_tts.player;
+		g_tts.player = NULL;
+		if (!p) return;
+		jarvis_audio_play_finish(p);
+		g_tts.draining_player = p;
 		return;
 	}
-	reap_draining_player_locked(true);
+	if (g_tts.draining_player)
+		reap_draining_player_locked(true);
+	jarvis_audio_play_t *p = g_tts.player;
+	g_tts.player = NULL;
+	if (!p) return;
 	pthread_mutex_unlock(&g_tts.mtx);
-	int st = 0;
-	while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+	jarvis_audio_play_finish(p);
+	jarvis_audio_play_close(p);
 	pthread_mutex_lock(&g_tts.mtx);
 }
 
-static int ensure_persistent_player_locked(int sample_rate)
+static jarvis_audio_play_t *ensure_persistent_player_locked(int sample_rate)
 {
-	if (g_tts.player_pid > 1 && g_pw_pipe_fd >= 0 && g_pw_rate == sample_rate) {
-		int st = 0;
-		pid_t w = waitpid(g_tts.player_pid, &st, WNOHANG);
-		if (w == 0) {
-			return g_pw_pipe_fd;
+	if (g_tts.player) {
+		if (jarvis_audio_play_rate(g_tts.player) == sample_rate &&
+		    jarvis_audio_play_poll_done(g_tts.player) == 0) {
+			return g_tts.player;
 		}
-		close(g_pw_pipe_fd);
-		g_pw_pipe_fd = -1;
-		g_tts.player_pid = -1;
-	} else if (g_tts.player_pid > 1 || g_pw_pipe_fd >= 0) {
 		close_persistent_player_locked(true);
 	}
 	reap_draining_player_locked(true);
-
-	int pfd[2];
-	if (pipe(pfd) < 0) return -1;
-	(void)fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
-	(void)fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
-#ifdef F_SETPIPE_SZ
-	(void)fcntl(pfd[1], F_SETPIPE_SZ, 1048576);
-#endif
-	char rate_arg[32];
-	snprintf(rate_arg, sizeof(rate_arg), "--rate=%d", sample_rate);
-
-	pid_t pid = fork();
-	if (pid == 0) {
-		close(pfd[1]);
-		if (pfd[0] != STDIN_FILENO) {
-			dup2(pfd[0], STDIN_FILENO);
-			close(pfd[0]);
-		} else {
-			int fl = fcntl(STDIN_FILENO, F_GETFD);
-			if (fl >= 0) (void)fcntl(STDIN_FILENO, F_SETFD, fl & ~FD_CLOEXEC);
-		}
-		int devnull = open("/dev/null", O_RDWR);
-		if (devnull >= 0) {
-			dup2(devnull, STDOUT_FILENO);
-			dup2(devnull, STDERR_FILENO);
-			if (devnull > 2) close(devnull);
-		}
-		execlp("pw-cat", "pw-cat", "-p", "--raw", rate_arg,
-		       "--channels=1", "--format=s16",
-		       "--media-role=Communication", "-P", "application.name=jarvis-tts", "-", (char *)NULL);
-		_exit(127);
-	}
-	close(pfd[0]);
-	if (pid < 0) {
-		close(pfd[1]);
-		return -1;
-	}
-	g_tts.player_pid = pid;
-	g_pw_pipe_fd = pfd[1];
-	g_pw_rate = sample_rate;
-	return g_pw_pipe_fd;
+	g_tts.player = jarvis_audio_play_open(sample_rate, 1, "jarvis-tts");
+	return g_tts.player;
 }
 
 /* ---------------------------------------------------------------------------
@@ -2137,16 +2119,16 @@ static void *tts_worker_fn(void *arg)
 	pthread_mutex_lock(&g_tts.mtx);
 	for (;;) {
 		while (g_tts.q_count == 0 && !prefetched_pcm) {
-			/* Close write-end of active pw-cat pipe without blocking so if another
-			 * LLM clause arrives during PipeWire drain we immediately synthesize it in
+			/* Finish write-end of active player without blocking so if another
+			 * LLM clause arrives during drain we immediately synthesize it in
 			 * parallel while audio finishes playing!
 			 */
-			if (g_tts.player_pid > 1 || g_pw_pipe_fd >= 0) {
+			if (g_tts.player) {
 				close_persistent_player_locked(false);
 			}
-			if (g_tts.draining_pid > 1 && !reap_draining_player_locked(false)) {
+			if (g_tts.draining_player && !reap_draining_player_locked(false)) {
 				struct timespec drain_ts;
-				clock_gettime(CLOCK_REALTIME, &drain_ts);
+				jarvis_clock_realtime(&drain_ts);
 				drain_ts.tv_nsec += 25000000L;
 				if (drain_ts.tv_nsec >= 1000000000L) {
 					drain_ts.tv_sec += 1;
@@ -2179,7 +2161,7 @@ static void *tts_worker_fn(void *arg)
 			}
 
 			struct timespec ts;
-			clock_gettime(CLOCK_REALTIME, &ts);
+			jarvis_clock_realtime(&ts);
 			ts.tv_sec += IDLE_UNLOAD_SECONDS;
 			int rc = pthread_cond_timedwait(&g_tts.cond, &g_tts.mtx, &ts);
 			if (rc == ETIMEDOUT && g_tts.q_count == 0) {
@@ -2232,31 +2214,26 @@ static void *tts_worker_fn(void *arg)
 		if (pcm && n_samples > 0) {
 			pthread_mutex_lock(&g_tts.mtx);
 			bool cancelled = (g_tts.cancel_gen != my_gen);
-			int pfd_w = (!cancelled) ? ensure_persistent_player_locked(sample_rate) : -1;
+			jarvis_audio_play_t *play = (!cancelled) ? ensure_persistent_player_locked(sample_rate) : NULL;
 			pthread_mutex_unlock(&g_tts.mtx);
 
-			if (!cancelled && pfd_w >= 0) {
+			if (!cancelled && play) {
 				notify_tts_state("speaking");
 				if (!mic_muted) {
 					set_mic_mute(true);
 					mic_muted = true;
 				}
-				const uint8_t *ptr = (const uint8_t *)pcm;
-				size_t rem = n_samples * sizeof(int16_t);
-				while (rem > 0) {
+				size_t off_samp = 0;
+				while (off_samp < n_samples) {
 					pthread_mutex_lock(&g_tts.mtx);
-					bool now_canc = (g_tts.cancel_gen != my_gen || g_pw_pipe_fd != pfd_w);
+					bool now_canc = (g_tts.cancel_gen != my_gen || g_tts.player != play);
 					pthread_mutex_unlock(&g_tts.mtx);
 					if (now_canc) break;
 
-					size_t chunk = rem > 32768 ? 32768 : rem;
-					ssize_t nw = write(pfd_w, ptr, chunk);
-					if (nw <= 0) {
-						if (nw < 0 && errno == EINTR) continue;
-						break;
-					}
-					ptr += nw;
-					rem -= (size_t)nw;
+					size_t chunk_samp = n_samples - off_samp;
+					if (chunk_samp > 16384) chunk_samp = 16384;
+					if (jarvis_audio_play_write(play, pcm + off_samp, chunk_samp) != 0) break;
+					off_samp += chunk_samp;
 				}
 
 				/* Immediately synthesize the next queued segment while PipeWire
@@ -2461,18 +2438,14 @@ jarvis_tts_interrupt(int dummy)
 	g_tts.q_tail = 0;
 	g_tts.q_count = 0;
 	g_tts.busy_speaking = false;
-	if (g_pw_pipe_fd >= 0) {
-		close(g_pw_pipe_fd);
-		g_pw_pipe_fd = -1;
+	if (g_tts.player) {
+		jarvis_audio_play_abort(g_tts.player);
 	}
-	if (g_tts.player_pid > 1) {
-		kill(g_tts.player_pid, SIGKILL);
+	if (g_tts.draining_player) {
+		jarvis_audio_play_abort(g_tts.draining_player);
 	}
-	if (g_tts.draining_pid > 1) {
-		kill(g_tts.draining_pid, SIGKILL);
-	}
-	if (g_tts.edge_busy && g_tts.edge_pid > 1) {
-		kill(g_tts.edge_pid, SIGKILL);
+	if (g_tts.edge_busy && g_tts.has_edge) {
+		stl_proc_kill(&g_tts.edge_proc, 1);
 	}
 	write_tts_active_state(NULL, false);
 	pthread_cond_broadcast(&g_tts.cond);
@@ -2524,7 +2497,7 @@ jarvis_tts_speak_clause(const char *session_id, const char *clause_text, int is_
 	if (wait_sync && g_tts.worker_running) {
 		uint64_t wait_gen = g_tts.cancel_gen;
 		struct timespec ts;
-		clock_gettime(CLOCK_REALTIME, &ts);
+		jarvis_clock_realtime(&ts);
 		ts.tv_sec += 45;
 		while ((g_tts.q_count > 0 || g_tts.busy_speaking) && g_tts.cancel_gen == wait_gen) {
 			if (pthread_cond_timedwait(&g_tts.done_cond, &g_tts.mtx, &ts) == ETIMEDOUT) {

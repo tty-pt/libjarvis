@@ -8,14 +8,25 @@
 
 #define _GNU_SOURCE
 #include <ctype.h>
-#include <pwd.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#include <io.h>
+#ifndef R_OK
+#define R_OK 4
+#endif
+#define access _access
+#define strcasecmp _stricmp
+#define strncasecmp _strnicmp
+#else
 #include <strings.h>
 #include <unistd.h>
+#endif
 
+#include <ttypt/stele.h>
 #include "ttypt/libren.h"
 #include <ttypt/xy.h>
 
@@ -25,17 +36,27 @@ static bool rc_lookup(const char *key, char *out, size_t out_sz)
 	out[0] = '\0';
 
 	const char *env_rc = getenv("JARVISRC");
+	char hbuf[512] = {0};
 	const char *home = getenv("HOME");
-	char rc_path[512];
+	if (!home || !*home) {
+		stl_home_dir(hbuf, sizeof(hbuf));
+		home = hbuf[0] ? hbuf : NULL;
+	}
+	char rc_path[512] = {0};
 	if (env_rc && *env_rc) {
 		snprintf(rc_path, sizeof(rc_path), "%s", env_rc);
-	} else if (home && *home) {
-		snprintf(rc_path, sizeof(rc_path), "%s/.jarvisrc", home);
-		if (access(rc_path, R_OK) != 0) {
-			snprintf(rc_path, sizeof(rc_path), "%s/.config/jarvis/jarvisrc", home);
-		}
 	} else {
-		return false;
+		if (home && *home) {
+			snprintf(rc_path, sizeof(rc_path), "%s/.jarvisrc", home);
+		}
+		if (!rc_path[0] || access(rc_path, R_OK) != 0) {
+			char cdir[512] = {0};
+			if (stl_config_dir("jarvis", cdir, sizeof(cdir)) && cdir[0]) {
+				snprintf(rc_path, sizeof(rc_path), "%s/jarvisrc", cdir);
+			}
+		}
+		if (!rc_path[0])
+			return false;
 	}
 
 	FILE *fp = fopen(rc_path, "r");
@@ -96,19 +117,12 @@ static bool normalize_lang_local(const char *raw, char *out, size_t out_sz)
 static bool resolve_kbd_local(char *out, size_t out_sz)
 {
 	char ubuf[64] = {0};
-	const char *u = getenv("USER");
-	if (!u || !*u) {
-		struct passwd pw, *res = NULL;
-		char pbuf[512];
-		if (getpwuid_r(getuid(), &pw, pbuf, sizeof(pbuf), &res) == 0 && res && res->pw_name && res->pw_name[0]) {
-			snprintf(ubuf, sizeof(ubuf), "%s", res->pw_name);
-			u = ubuf;
-		} else {
-			u = "user";
-		}
-	}
-	char path[256], buf[32] = {0};
-	snprintf(path, sizeof(path), "/tmp/dwm-kbd-%s.state", u);
+	stl_username(ubuf, sizeof(ubuf));
+	const char *u = ubuf[0] ? ubuf : "user";
+	char tdir[256] = {0};
+	stl_temp_dir(tdir, sizeof(tdir));
+	char path[384], buf[32] = {0};
+	snprintf(path, sizeof(path), "%s/dwm-kbd-%s.state", tdir[0] ? tdir : "/tmp", u);
 	FILE *fp = fopen(path, "r");
 	if (!fp) return false;
 	bool ok = false;

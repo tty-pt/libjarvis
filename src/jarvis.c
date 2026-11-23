@@ -1,23 +1,31 @@
 #define _GNU_SOURCE
 #include "../include/ttypt/jarvis.h"
 #include "../include/ttypt/desktop-core.h"
+#include "jarvis-audio.h"
+#include "jarvis-platform.h"
+#include "jarvis-ren-ipc.h"
 
+#include <ttypt/stele.h>
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
-#ifndef _WIN32
-#include <arpa/inet.h>
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <process.h>
+#define strcasecmp _stricmp
+#define strncasecmp _strnicmp
+#define getpid _getpid
+#else
 #include <dirent.h>
 #include <fcntl.h>
-#include <netinet/in.h>
 #include <signal.h>
-#include <sys/socket.h>
+#include <strings.h>
 #include <sys/stat.h>
-#include <sys/time.h>
-#include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -51,7 +59,7 @@ static void print_usage(const char *prog)
 		"Options:\n"
 		"  -p, --port <port>                         Override jarvisd TCP port (default from ~/.jarvisrc)\n"
 		"  -c, --cmd <raw_cmd>                       Send raw control command to jarvisd socket\n"
-		"  --wm <auto|dwm|sway|hyprland|x11>         Window manager hint for ren session startup\n"
+		"  --wm <auto|dwm|sway|hyprland|x11|macos|win32> Window manager hint for ren session startup\n"
 		"  --surface <any|terminal|browser|site|nd>  Accepted for CLI compatibility\n"
 		"  --mod <name>                              Extra ren module name to load on session start\n"
 		"  --dry-run                                 Preview query dispatch or setup actions without changes\n"
@@ -61,20 +69,13 @@ static void print_usage(const char *prog)
 	);
 }
 
-#ifndef _WIN32
-#include <pwd.h>
-static const char *get_cli_username(void)
+static const char *get_cli_home(void)
 {
-	static char cached[64];
-	const char *u = getenv("USER");
-	if (u && *u) return u;
-	struct passwd pw, *res = NULL;
-	char buf[512];
-	if (getpwuid_r(getuid(), &pw, buf, sizeof(buf), &res) == 0 && res && res->pw_name && res->pw_name[0]) {
-		snprintf(cached, sizeof(cached), "%s", res->pw_name);
-		return cached;
-	}
-	return "user";
+	static char cached[512];
+	const char *h = getenv("HOME");
+	if (h && *h) return h;
+	stl_home_dir(cached, sizeof(cached));
+	return cached[0] ? cached : ".";
 }
 
 static void resolve_rc_file(char *out, size_t out_sz)
@@ -84,28 +85,39 @@ static void resolve_rc_file(char *out, size_t out_sz)
 		snprintf(out, out_sz, "%s", env_rc);
 		return;
 	}
-	char hbuf[512] = {0};
-	const char *home = getenv("HOME");
-	if (!home || !*home) {
-		struct passwd pw, *res = NULL;
-		char pbuf[512];
-		if (getpwuid_r(getuid(), &pw, pbuf, sizeof(pbuf), &res) == 0 && res && res->pw_dir && res->pw_dir[0]) {
-			snprintf(hbuf, sizeof(hbuf), "%s", res->pw_dir);
-			home = hbuf;
-		} else {
-			home = "/tmp";
-		}
-	}
+	const char *home = get_cli_home();
 	snprintf(out, out_sz, "%s/.jarvisrc", home);
-	if (access(out, R_OK) != 0) {
-		char alt[512];
-		snprintf(alt, sizeof(alt), "%s/.config/jarvis/jarvisrc", home);
-		if (access(alt, R_OK) == 0) {
-			snprintf(out, out_sz, "%s", alt);
+	if (!jarvis_plat_is_readable(out)) {
+		char alt[512] = {0};
+		if (stl_config_dir("jarvis", alt, sizeof(alt)) && alt[0]) {
+			char cand[512];
+			snprintf(cand, sizeof(cand), "%s/jarvisrc", alt);
+			if (jarvis_plat_is_readable(cand)) {
+				snprintf(out, out_sz, "%s", cand);
+			}
 		}
 	}
 }
 
+static int run_argv_sync(char *const argv[])
+{
+	if (!argv || !argv[0]) return -1;
+	stl_proc_t proc;
+	if (stl_spawn((const char *const *)argv, 0, &proc) != 0)
+		return -1;
+	int ec = -1;
+	stl_proc_wait(&proc, &ec, -1);
+	stl_proc_close(&proc);
+	return ec == 0 ? 0 : -1;
+}
+
+static void cli_notify(const char *title, const char *body)
+{
+	if (!title || !*title) return;
+	jarvis_plat_notify_osd(title, body ? body : "", 3000);
+}
+
+#ifndef _WIN32
 static void write_all_fd(int fd, const char *buf, size_t len)
 {
 	while (len > 0) {
@@ -115,41 +127,6 @@ static void write_all_fd(int fd, const char *buf, size_t len)
 		buf += w;
 		len -= (size_t)w;
 	}
-}
-
-static int run_argv_sync(char *const argv[])
-{
-	if (!argv || !argv[0]) return -1;
-	pid_t pid = fork();
-	if (pid < 0) return -1;
-	if (pid == 0) {
-		int devnull = open("/dev/null", O_RDWR);
-		if (devnull >= 0) {
-			dup2(devnull, STDIN_FILENO);
-			dup2(devnull, STDOUT_FILENO);
-			dup2(devnull, STDERR_FILENO);
-			if (devnull > 2) close(devnull);
-		}
-		execvp(argv[0], argv);
-		_exit(127);
-	}
-	int st = 0;
-	while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
-	return (WIFEXITED(st) && WEXITSTATUS(st) == 0) ? 0 : -1;
-}
-
-static void cli_notify(const char *title, const char *body)
-{
-	if (!title || !*title) return;
-	char *const argv[] = {
-		"notify-send",
-		"-t", "3000",
-		"-h", "string:x-dunst-stack-tag:jarvis",
-		(char *)title,
-		(char *)(body ? body : ""),
-		NULL
-	};
-	desktop_core_spawn_detached_argv(argv);
 }
 
 static int run_menu_program(
@@ -214,10 +191,57 @@ static int run_menu_program(
 	desktop_core_trim_trailing(out_sel);
 	return (int)strlen(out_sel);
 }
+#endif
 
 static int cli_dmenu(const char *prompt, const char *items, char *out_sel, size_t out_sz)
 {
 	const char *p = (prompt && *prompt) ? prompt : "Jarvis:";
+	if (!out_sel || out_sz == 0) return -1;
+	out_sel[0] = '\0';
+#if defined(_WIN32)
+	(void)items;
+	fprintf(stderr, "%s ", p);
+	if (!fgets(out_sel, (int)out_sz, stdin)) return 0;
+	desktop_core_trim_trailing(out_sel);
+	return (int)strlen(out_sel);
+#elif defined(__APPLE__)
+	char script[4096];
+	char clean_items[3072];
+	size_t ci = 0;
+	if (items && *items) {
+		size_t n_it = 0;
+		const char *line = items;
+		while (*line && n_it < 16 && ci + 4 < sizeof(clean_items)) {
+			const char *nl = strchr(line, '\n');
+			size_t len = nl ? (size_t)(nl - line) : strlen(line);
+			if (len > 0) {
+				if (n_it > 0 && ci + 2 < sizeof(clean_items)) {
+					clean_items[ci++] = ',';
+					clean_items[ci++] = ' ';
+				}
+				clean_items[ci++] = '"';
+				for (size_t k = 0; k < len && ci + 4 < sizeof(clean_items); k++) {
+					if (line[k] == '"' || line[k] == '\\') clean_items[ci++] = '\\';
+					clean_items[ci++] = line[k];
+				}
+				clean_items[ci++] = '"';
+				n_it++;
+			}
+			if (!nl) break;
+			line = nl + 1;
+		}
+	}
+	clean_items[ci] = '\0';
+	if (clean_items[0]) {
+		snprintf(script, sizeof(script),
+		         "choose from list {%s} with prompt \"%s\"", clean_items, p);
+		char *const osa[] = { "osascript", "-e", script, NULL };
+		int rc = run_menu_program(osa, NULL, out_sel, out_sz);
+		if (strcmp(out_sel, "false") == 0) out_sel[0] = '\0';
+		return rc;
+	}
+	return 0;
+#else
 	char fn[128], nb[32], nf[32], sb[32], sf[32], lines_buf[16];
 	jarvis_rc_get("dmenu_font", "Ubuntu Sans:style=Medium:size=12:antialias=true:autohint=true", fn, sizeof(fn));
 	jarvis_rc_get("dmenu_nb", "#11111b", nb, sizeof(nb));
@@ -254,22 +278,28 @@ static int cli_dmenu(const char *prompt, const char *items, char *out_sel, size_
 		}
 	}
 	return rc;
+#endif
 }
 
 static void notify_status_bar(void)
 {
-	const char *u = get_cli_username();
-	char path[256];
-	if (!jarvis_rc_get("status_notify_pid_file", NULL, path, sizeof(path)) || !path[0]) {
-		snprintf(path, sizeof(path), "/tmp/dwm-bar-%s.pid", u);
+#ifndef _WIN32
+	char path[256] = {0};
+	if (jarvis_rc_get("status_notify_pid_file", NULL, path, sizeof(path)) && path[0]) {
+		FILE *fp = fopen(path, "r");
+		if (fp) {
+			int pid = 0;
+			if (fscanf(fp, "%d", &pid) == 1 && pid > 1) {
+#ifdef SIGUSR1
+				kill((pid_t)pid, SIGUSR1);
+#endif
+			}
+			fclose(fp);
+			return;
+		}
 	}
-	FILE *fp = fopen(path, "r");
-	if (!fp) return;
-	int pid = 0;
-	if (fscanf(fp, "%d", &pid) == 1 && pid > 1) {
-		kill((pid_t)pid, SIGUSR1);
-	}
-	fclose(fp);
+#endif
+	jarvis_plat_notify_bar();
 }
 
 static int g_cli_port_override = 0;
@@ -278,12 +308,12 @@ static bool daemon_cmd_timeout(const char *cmd, int timeout_sec, char *out_resp,
 {
 	if (out_resp && resp_sz > 0) out_resp[0] = '\0';
 	int port = (g_cli_port_override > 0) ? g_cli_port_override : jarvis_rc_get_int("port", 8179);
-	int s = socket(AF_INET, SOCK_STREAM, 0);
-	if (s < 0) return false;
+	stl_sock_init();
+	stl_socket_t s = stl_sock_create(AF_INET, SOCK_STREAM, 0);
+	if (s == STL_INVALID_SOCKET) return false;
 
-	struct timeval tv = { .tv_sec = timeout_sec > 0 ? timeout_sec : 2, .tv_usec = 0 };
-	setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-	setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+	int tms = (timeout_sec > 0 ? timeout_sec : 2) * 1000;
+	stl_sock_set_timeout(s, tms, tms);
 
 	struct sockaddr_in addr;
 	memset(&addr, 0, sizeof(addr));
@@ -291,20 +321,19 @@ static bool daemon_cmd_timeout(const char *cmd, int timeout_sec, char *out_resp,
 	addr.sin_port = htons((uint16_t)port);
 	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
-	if (connect(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-		close(s);
+	if (stl_sock_connect(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		stl_sock_close(s);
 		return false;
 	}
 	char req[1024];
 	int n = snprintf(req, sizeof(req), "%s\n", cmd);
 	if (n > 0) {
-		write_all_fd(s, req, (size_t)n);
+		jarvis_plat_write_sock_all(s, req, (size_t)n);
 	}
 	if (out_resp && resp_sz > 0) {
 		size_t total = 0;
 		while (total + 1 < resp_sz) {
-			ssize_t rd = read(s, out_resp + total, resp_sz - 1 - total);
-			if (rd < 0 && errno == EINTR) continue;
+			ssize_t rd = stl_sock_recv(s, out_resp + total, resp_sz - 1 - total, 0);
 			if (rd <= 0) break;
 			total += (size_t)rd;
 			if (memchr(out_resp, '\n', total) != NULL) break;
@@ -313,7 +342,7 @@ static bool daemon_cmd_timeout(const char *cmd, int timeout_sec, char *out_resp,
 		size_t l = total;
 		while (l > 0 && isspace((unsigned char)out_resp[l - 1])) out_resp[--l] = '\0';
 	}
-	close(s);
+	stl_sock_close(s);
 	return true;
 }
 
@@ -339,184 +368,107 @@ static void ensure_daemon_running(bool activate_listener)
 		return;
 	}
 
-	const char *home = getenv("HOME");
+	const char *home = get_cli_home();
 	char bin_path[512];
-	if (home && *home) {
-		snprintf(bin_path, sizeof(bin_path), "%s/.local/bin/jarvisd", home);
-		if (access(bin_path, X_OK) != 0) {
-			snprintf(bin_path, sizeof(bin_path), "%s/.local/bin/dwm-whisperd", home);
-		}
-	} else {
-		snprintf(bin_path, sizeof(bin_path), "jarvisd");
+#ifdef _WIN32
+	char exedir[512] = {0};
+	stl_exe_dir(exedir, sizeof(exedir));
+	snprintf(bin_path, sizeof(bin_path), "%s\\jarvisd.exe", exedir[0] ? exedir : ".");
+	if (!jarvis_plat_is_readable(bin_path)) {
+		snprintf(bin_path, sizeof(bin_path), "jarvisd.exe");
 	}
+	(void)home;
+#else
+	snprintf(bin_path, sizeof(bin_path), "%s/.local/bin/jarvisd", home);
+	if (!jarvis_plat_is_exec(bin_path)) {
+		snprintf(bin_path, sizeof(bin_path), "%s/.local/bin/dwm-whisperd", home);
+		if (!jarvis_plat_is_exec(bin_path)) {
+			snprintf(bin_path, sizeof(bin_path), "jarvisd");
+		}
+	}
+#endif
 
+	bool started_svc = false;
+#ifdef __linux__
 	char *const start_svc[] = { "systemctl", "--user", "start", "jarvisd.service", NULL };
-	bool started_systemd = (run_argv_sync(start_svc) == 0);
-	if (!started_systemd) {
+	started_svc = (run_argv_sync(start_svc) == 0);
+#endif
+	if (!started_svc) {
 		if (activate_listener) {
-			char *const fb[] = { bin_path, "-j", NULL };
-			desktop_core_spawn_detached_argv(fb);
+			const char *fb[] = { bin_path, "-j", NULL };
+			stl_spawn_detached(fb);
 		} else {
-			char *const fb[] = { bin_path, NULL };
-			desktop_core_spawn_detached_argv(fb);
+			const char *fb[] = { bin_path, NULL };
+			stl_spawn_detached(fb);
 		}
 	}
 
-	int max_polls = started_systemd ? 120 : 60;
+	int max_polls = started_svc ? 120 : 60;
 	for (int i = 0; i < max_polls; i++) {
 		if (daemon_cmd("PING", resp, sizeof(resp))) {
-			if (started_systemd) {
+			if (started_svc) {
 				daemon_cmd(activate_listener ? "JARVIS_ON" : "JARVIS_OFF", resp, sizeof(resp));
 			}
 			break;
 		}
-		usleep(100000);
+		stl_sleep_ms(100);
 	}
 }
 
 static void restart_daemon(bool was_active)
 {
+#ifdef _WIN32
+	char *const tk[] = { "taskkill", "/F", "/IM", "jarvisd.exe", NULL };
+	run_argv_sync(tk);
+#else
+#ifdef __linux__
 	char *const stop_svc[] = { "systemctl", "--user", "stop", "jarvisd.service", NULL };
 	run_argv_sync(stop_svc);
+#endif
 	char *const pk1[] = { "pkill", "-x", "jarvisd", NULL };
 	run_argv_sync(pk1);
 	char *const pk2[] = { "pkill", "-x", "dwm-whisperd", NULL };
 	run_argv_sync(pk2);
-	usleep(120000);
+#endif
+	stl_sleep_ms(120);
 	ensure_daemon_running(was_active);
 	notify_status_bar();
 }
 
-static void ren_socket_path(char *out, size_t out_sz)
+static stl_socket_t connect_ren_socket(bool auto_start, const char *wm_override, const char *extra_mod)
 {
-	snprintf(out, out_sz, "/tmp/ren-jarvis-%.48s.sock", get_cli_username());
-}
-
-static int connect_ren_socket(bool auto_start, const char *wm_override, const char *extra_mod)
-{
-	char sock_path[96];
-	ren_socket_path(sock_path, sizeof(sock_path));
-
-	struct sockaddr_un addr;
-	memset(&addr, 0, sizeof(addr));
-	addr.sun_family = AF_UNIX;
-	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", sock_path);
-
-	int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (fd < 0) return -1;
-	if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
+	stl_socket_t fd = jarvis_ren_connect(0);
+	if (fd != STL_INVALID_SOCKET)
 		return fd;
-	}
-	close(fd);
+	if (!auto_start)
+		return STL_INVALID_SOCKET;
 
-	if (!auto_start) return -1;
-
-	const char *home = getenv("HOME");
-	if (!home || !*home) home = "/tmp";
-
-	unlink(sock_path);
-
-	char workdir[512];
-	const char *env_wd = getenv("JARVIS_WORKDIR");
-	if (env_wd && *env_wd && access(env_wd, X_OK) == 0) {
-		snprintf(workdir, sizeof(workdir), "%s", env_wd);
-	} else {
-		snprintf(workdir, sizeof(workdir), "%s/site", home);
-		if (access(workdir, X_OK) != 0)
-			snprintf(workdir, sizeof(workdir), "%s", home);
-	}
-
-	char ren_mods[512] = {0};
-	if (!jarvis_rc_get("ren_mods", NULL, ren_mods, sizeof(ren_mods)) || !ren_mods[0]) {
-		char wm_buf[64] = {0}, wm_mod[80];
-		if (wm_override && *wm_override && strcasecmp(wm_override, "auto") != 0) {
-			snprintf(wm_buf, sizeof(wm_buf), "%s", wm_override);
-		} else {
-			jarvis_resolve_wm(wm_buf, sizeof(wm_buf));
-		}
-		snprintf(wm_mod, sizeof(wm_mod), "ren-%s", wm_buf[0] ? wm_buf : "desktop");
-		const char *cands[] = {
-			wm_mod, "ren-reflex", "ren-x11", "ren-firefox", "ren-desktop", "ren-jarvis", "ren-mm", NULL
-		};
-		size_t mo = 0;
-		for (size_t i = 0; cands[i]; i++) {
-			if (i > 0 && strcmp(cands[i], wm_mod) == 0) continue;
-			char sp[512];
-			snprintf(sp, sizeof(sp), "%s/.local/lib/ren/%s.so", home, cands[i]);
-			if (strcmp(cands[i], "ren-jarvis") == 0 || strcmp(cands[i], "ren-mm") == 0 ||
-			    strcmp(cands[i], "ren-reflex") == 0 || access(sp, R_OK) == 0) {
-				mo += (size_t)snprintf(ren_mods + mo, sizeof(ren_mods) - mo,
-				                       "%s%s", mo > 0 ? ":" : "", cands[i]);
-			}
-		}
-		if (!ren_mods[0]) snprintf(ren_mods, sizeof(ren_mods), "ren-jarvis:ren-reflex:ren-mm");
-	}
+	char rc_mods[384] = {0}, mods[512] = {0};
+	jarvis_rc_get("ren_mods", NULL, rc_mods, sizeof(rc_mods));
+	jarvis_ren_resolve_mods(wm_override, rc_mods[0] ? rc_mods : NULL, mods, sizeof(mods));
 	if (extra_mod && *extra_mod) {
-		size_t cur = strlen(ren_mods);
-		if (cur + strlen(extra_mod) + 2 < sizeof(ren_mods)) {
-			snprintf(ren_mods + cur, sizeof(ren_mods) - cur, ":%s", extra_mod);
+		size_t cur = strlen(mods);
+		if (cur + strlen(extra_mod) + 2 < sizeof(mods)) {
+			snprintf(mods + cur, sizeof(mods) - cur, "%s%s", cur > 0 ? ":" : "", extra_mod);
 		}
 	}
-
-	pid_t pid = fork();
-	if (pid < 0) return -1;
-	if (pid == 0) {
-		setsid();
-		pid_t gpid = fork();
-		if (gpid == 0) {
-			int devnull = open("/dev/null", O_RDWR);
-			if (devnull >= 0) {
-				dup2(devnull, STDIN_FILENO);
-				dup2(devnull, STDOUT_FILENO);
-				dup2(devnull, STDERR_FILENO);
-				if (devnull > 2) close(devnull);
-			}
-			if (chdir(workdir) != 0) {
-				/* best effort */
-			}
-			execlp("sh", "sh", "-c",
-			       "tmux kill-session -t jarvis >/dev/null 2>&1 || true; "
-			       "tmux new-session -d -s jarvis -x 120 -y 36 -c \"$1\" "
-			       "ren --session jarvis --listen \"$2\" --max-turns 16 -m \"$3\" >/dev/null 2>&1 "
-			       "|| exec ren --session jarvis --listen \"$2\" --max-turns 16 -m \"$3\"",
-			       "sh", workdir, sock_path, ren_mods, (char *)NULL);
-			_exit(127);
-		}
-		_exit(gpid < 0 ? 127 : 0);
-	}
-	int st = 0;
-	while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
-
-	for (int i = 0; i < 40; i++) {
-		usleep(50000);
-		fd = socket(AF_UNIX, SOCK_STREAM, 0);
-		if (fd >= 0) {
-			if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
-				return fd;
-			}
-			close(fd);
-		}
-	}
-	return -1;
+	return jarvis_ren_ensure_session(NULL, mods, wm_override);
 }
 
 static bool send_ren_control(const char *cmd)
 {
-	int fd = connect_ren_socket(false, NULL, NULL);
-	if (fd < 0) return false;
-
-	struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
-	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-	setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+	stl_socket_t fd = connect_ren_socket(false, NULL, NULL);
+	if (fd == STL_INVALID_SOCKET) return false;
+	stl_sock_set_timeout(fd, 2000, 2000);
 
 	char msg[512];
 	int n = snprintf(msg, sizeof(msg), "%s\n", cmd);
-	if (n > 0) write_all_fd(fd, msg, (size_t)n);
+	if (n > 0) jarvis_plat_write_sock_all(fd, msg, (size_t)n);
 
 	char buf[256];
-	ssize_t r = read(fd, buf, sizeof(buf) - 1);
+	ssize_t r = stl_sock_recv(fd, buf, sizeof(buf) - 1, 0);
 	(void)r;
-	close(fd);
+	stl_sock_close(fd);
 	return true;
 }
 
@@ -528,8 +480,8 @@ static int dispatch_ren_query(
 	const char *extra_mod
 )
 {
-	int fd = connect_ren_socket(true, wm_override, extra_mod);
-	if (fd < 0) {
+	stl_socket_t fd = connect_ren_socket(true, wm_override, extra_mod);
+	if (fd == STL_INVALID_SOCKET) {
 		if (as_json) {
 			char eu[512];
 			desktop_core_json_escape(utterance, eu, sizeof(eu));
@@ -542,13 +494,7 @@ static int dispatch_ren_query(
 
 	char req[1024];
 	int n = snprintf(req, sizeof(req), "%s\n", utterance);
-	if (n > 0) write_all_fd(fd, req, (size_t)n);
-
-	FILE *fp = fdopen(fd, "r");
-	if (!fp) {
-		close(fd);
-		return 1;
-	}
+	if (n > 0) jarvis_plat_write_sock_all(fd, req, (size_t)n);
 
 	bool ok = true;
 	bool any_event = false;
@@ -558,11 +504,11 @@ static int dispatch_ren_query(
 	char err_msg[512] = {0};
 	size_t rpos = 0;
 
+	jarvis_ren_reader_t rr;
+	jarvis_ren_reader_init(&rr);
 	char line[4096];
-	while (fgets(line, sizeof(line), fp)) {
-		size_t l = strlen(line);
-		while (l > 0 && (line[l - 1] == '\n' || line[l - 1] == '\r')) line[--l] = '\0';
-		if (l == 0) continue;
+	while (jarvis_ren_read_line(fd, &rr, line, sizeof(line)) > 0) {
+		if (line[0] == '\0') continue;
 
 		char *tab1 = strchr(line, '\t');
 		if (!tab1) continue;
@@ -613,7 +559,7 @@ static int dispatch_ren_query(
 			break;
 		}
 	}
-	fclose(fp);
+	stl_sock_close(fd);
 
 	if (!any_event) ok = false;
 
@@ -633,7 +579,7 @@ static int dispatch_ren_query(
 			fprintf(stderr, "Error: %s\n", err_msg[0] ? err_msg : (any_event ? "request failed" : "ren disconnected"));
 		}
 		if (!quiet && !ok) {
-			cli_notify("  Jarvis — Error", err_msg[0] ? err_msg : utterance);
+			cli_notify("Jarvis — Error", err_msg[0] ? err_msg : utterance);
 		}
 	}
 	return ok ? 0 : 1;
@@ -670,8 +616,7 @@ static void get_cli_default_voice(const jarvis_ontology_t *ont, char *out, size_
 
 static void do_jarvis_start(bool quiet)
 {
-	char *const unmute[] = { "wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", "0", NULL };
-	run_argv_sync(unmute);
+	jarvis_audio_unmute_mic();
 	ensure_daemon_running(true);
 	notify_status_bar();
 	if (!quiet) {
@@ -701,11 +646,11 @@ static void do_jarvis_stop(bool quiet)
 
 static void write_voice_state(const char *state)
 {
-	const char *u = get_cli_username();
 	char path[256], tmp[272];
-	snprintf(path, sizeof(path), "/tmp/jarvis-voice-%s.state", u);
+	if (jarvis_plat_state_path("jarvis-voice-", ".state", path, sizeof(path)) != 0)
+		return;
 	if (!state || !*state) {
-		unlink(path);
+		remove(path);
 		return;
 	}
 	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
@@ -713,24 +658,26 @@ static void write_voice_state(const char *state)
 	if (fp) {
 		fprintf(fp, "%s\n", state);
 		fclose(fp);
+#ifdef _WIN32
+		remove(path);
+#endif
 		rename(tmp, path);
 	}
 }
 
 static int do_jarvis_listen(bool as_json, bool quiet, const char *wm_override, const char *extra_mod)
 {
-	const char *u = get_cli_username();
 	char pid_path[256];
-	snprintf(pid_path, sizeof(pid_path), "/tmp/jarvis-listen-%s.pid", u);
+	jarvis_plat_state_path("jarvis-listen-", ".pid", pid_path, sizeof(pid_path));
 
 	FILE *pfp = fopen(pid_path, "r");
 	if (pfp) {
 		int old_pid = 0;
-		if (fscanf(pfp, "%d", &old_pid) == 1 && old_pid > 1 && kill((pid_t)old_pid, 0) == 0) {
+		if (fscanf(pfp, "%d", &old_pid) == 1 && old_pid > 1 && stl_pid_alive((pid_t)old_pid)) {
 			fclose(pfp);
 			char cresp[64];
 			daemon_cmd("CANCEL", cresp, sizeof(cresp));
-			unlink(pid_path);
+			remove(pid_path);
 			write_voice_state(is_daemon_listening() ? "jarvis-idle" : NULL);
 			notify_status_bar();
 			if (as_json) printf("{\"ok\":false,\"cancelled\":true}\n");
@@ -745,8 +692,7 @@ static int do_jarvis_listen(bool as_json, bool quiet, const char *wm_override, c
 		fclose(pfp);
 	}
 
-	char *const unmute[] = { "wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", "0", NULL };
-	run_argv_sync(unmute);
+	jarvis_audio_unmute_mic();
 
 	bool was_listening = is_daemon_listening();
 	ensure_daemon_running(was_listening);
@@ -758,7 +704,7 @@ static int do_jarvis_listen(bool as_json, bool quiet, const char *wm_override, c
 	char lang[32], wake[64], state_path[256], stream_cmd[512];
 	get_cli_default_lang(ont, lang, sizeof(lang));
 	get_cli_wake_word(ont, wake, sizeof(wake));
-	snprintf(state_path, sizeof(state_path), "/tmp/jarvis-voice-%s.state", u);
+	jarvis_plat_state_path("jarvis-voice-", ".state", state_path, sizeof(state_path));
 
 	int silence_ms = jarvis_rc_get_int("cmd_silence_ms", 750);
 	int wait_ms = jarvis_rc_get_int("listen_wait_ms", 6000);
@@ -769,13 +715,12 @@ static int do_jarvis_listen(bool as_json, bool quiet, const char *wm_override, c
 	notify_status_bar();
 
 	char chime_wav[256];
-	snprintf(chime_wav, sizeof(chime_wav), "/tmp/jarvis-chime-%s.wav", u);
-	if (access(chime_wav, R_OK) != 0) {
+	jarvis_plat_state_path("jarvis-chime-", ".wav", chime_wav, sizeof(chime_wav));
+	if (!jarvis_plat_is_readable(chime_wav)) {
 		jarvis_voice_write_earcon_wav(chime_wav, false);
 	}
-	if (access(chime_wav, R_OK) == 0) {
-		char *const chime_argv[] = { "pw-play", "--volume=0.75", chime_wav, NULL };
-		desktop_core_spawn_detached_argv(chime_argv);
+	if (jarvis_plat_is_readable(chime_wav)) {
+		jarvis_audio_play_chime_async(chime_wav);
 	}
 
 	if (!quiet) {
@@ -792,11 +737,11 @@ static int do_jarvis_listen(bool as_json, bool quiet, const char *wm_override, c
 	if (ok && resp[0] == '\0' && was_listening) {
 		char cancel_resp[64];
 		daemon_cmd("CANCEL", cancel_resp, sizeof(cancel_resp));
-		usleep(80000);
+		stl_sleep_ms(80);
 		ok = daemon_cmd_timeout(stream_cmd, 25, resp, sizeof(resp));
 	}
 
-	unlink(pid_path);
+	remove(pid_path);
 
 	if (ok && strncmp(resp, "OK|", 3) == 0) {
 		char *transcript = resp + 3;
@@ -844,29 +789,26 @@ static void do_jarvis_lockdown(bool quiet)
 		jarvis_ontology_format_ui(ont, "lockdown_short_body", wake, "Listening disabled and locking screen...", body, sizeof(body));
 		cli_notify(title, body);
 	}
-	char lock_cmd[256];
-	jarvis_rc_get("lock_cmd", "slock", lock_cmd, sizeof(lock_cmd));
-	if (lock_cmd[0]) {
-		usleep(150000);
-		desktop_core_spawn_detached_sh(lock_cmd);
-	}
+	char lock_cmd[256] = {0};
+	jarvis_rc_get("lock_cmd", "", lock_cmd, sizeof(lock_cmd));
+	stl_sleep_ms(150);
+	jarvis_plat_lock_screen(lock_cmd[0] ? lock_cmd : NULL);
 }
 
 static void do_clear_learned(bool quiet)
 {
-	const char *home = getenv("HOME");
-	const char *user = get_cli_username();
+	const char *home = get_cli_home();
 	char p[512];
 
-	snprintf(p, sizeof(p), "/tmp/jarvis-%s.context.json", user);
-	unlink(p);
+	if (jarvis_plat_state_path("jarvis-", ".context.json", p, sizeof(p)) == 0)
+		remove(p);
 	if (home && *home) {
 		snprintf(p, sizeof(p), "%s/.cache/jarvis/session.json", home);
-		unlink(p);
+		remove(p);
 		snprintf(p, sizeof(p), "%s/.cache/jarvis/embeddings.json", home);
-		unlink(p);
+		remove(p);
 		snprintf(p, sizeof(p), "%s/.ren/sessions/jarvis", home);
-		unlink(p);
+		remove(p);
 	}
 	send_ren_control("/reset");
 
@@ -943,7 +885,7 @@ static int do_dmenu(bool as_json, bool quiet, const char *wm_override, const cha
 {
 	const jarvis_ontology_t *ont = get_cli_ont();
 	char wake[64], dprompt[128], fs_path[512] = {0};
-	const char *home = getenv("HOME");
+	const char *home = get_cli_home();
 	if (home && *home) {
 		char def_fs[512];
 		snprintf(def_fs, sizeof(def_fs), "%s/.config/jarvis/few_shots.json", home);
@@ -969,9 +911,23 @@ static int do_dmenu(bool as_json, bool quiet, const char *wm_override, const cha
 
 static void open_ren_terminal(const char *wm_override, const char *extra_mod)
 {
-	int fd = connect_ren_socket(true, wm_override, extra_mod);
-	if (fd >= 0) close(fd);
+	stl_socket_t fd = connect_ren_socket(true, wm_override, extra_mod);
+	if (fd != STL_INVALID_SOCKET) stl_sock_close(fd);
 
+#if defined(__APPLE__)
+	const char *argv[] = {
+		"osascript", "-e",
+		"tell application \"Terminal\" to do script \"tmux attach -t jarvis || ren --interactive\"\ntell application \"Terminal\" to activate",
+		NULL
+	};
+	stl_spawn_detached(argv);
+#elif defined(_WIN32)
+	const char *argv_wt[] = { "wt.exe", "ren", "--interactive", NULL };
+	if (stl_spawn_detached(argv_wt) != 0) {
+		const char *argv_cmd[] = { "cmd.exe", "/c", "start", "Jarvis (ren)", "ren", "--interactive", NULL };
+		stl_spawn_detached(argv_cmd);
+	}
+#else
 	char *const search[] = { "xdotool", "search", "--class", "jarvis-ren", NULL };
 	if (run_argv_sync(search) == 0) {
 		char *const pull[] = { "dwm-msg", "pull-class", "jarvis-ren", NULL };
@@ -984,6 +940,7 @@ static void open_ren_terminal(const char *wm_override, const char *extra_mod)
 		"-e", "tmux", "attach", "-t", "jarvis", NULL
 	};
 	desktop_core_spawn_detached_argv(term_argv);
+#endif
 }
 
 static void do_jarvis_menu(const char *wm_override, const char *extra_mod)
@@ -995,16 +952,22 @@ static void do_jarvis_menu(const char *wm_override, const char *extra_mod)
 	get_cli_default_voice(ont, voice, sizeof(voice));
 	get_cli_default_lang(ont, lang, sizeof(lang));
 	if (!jarvis_rc_get("whisper_model", NULL, model_path, sizeof(model_path)) || !model_path[0]) {
-		const char *home = getenv("HOME");
+		const char *home = get_cli_home();
 		snprintf(model_path, sizeof(model_path), "%s/.local/share/whisper/ggml-large-v3-turbo-q5_0.bin",
 		         home ? home : "");
-		if (access(model_path, R_OK) != 0)
-			snprintf(model_path, sizeof(model_path), "ggml-large-v3-turbo-q5_0.bin");
+		if (!jarvis_plat_is_readable(model_path)) {
+			if (jarvis_plat_data_file("whisper", "ggml-large-v3-turbo-q5_0.bin", model_path, sizeof(model_path)) != 0 ||
+			    !jarvis_plat_is_readable(model_path)) {
+				snprintf(model_path, sizeof(model_path), "ggml-large-v3-turbo-q5_0.bin");
+			}
+		}
 	}
 	get_cli_wake_word(ont, wake, sizeof(wake));
 	int fms = jarvis_rc_get_int("followup_ms", 8000);
 
 	const char *model_base = strrchr(model_path, '/');
+	const char *model_bs = strrchr(model_path, '\\');
+	if (model_bs && (!model_base || model_bs > model_base)) model_base = model_bs;
 	model_base = model_base ? (model_base + 1) : model_path;
 
 	char st_on[64], st_off[64], fw_always[96], fw_conv[64], fw_strict[64];
@@ -1175,7 +1138,7 @@ static void do_jarvis_menu(const char *wm_override, const char *extra_mod)
 		if (cli_dmenu(wprompt, mitems, mchoice, sizeof(mchoice)) > 0 && mchoice[0]) {
 			char mfile[128] = {0};
 			if (sscanf(mchoice, "%127s", mfile) == 1 && mfile[0]) {
-				const char *home = getenv("HOME");
+				const char *home = get_cli_home();
 				char full_m[512], wtitle[128];
 				snprintf(full_m, sizeof(full_m), "%s/.local/share/whisper/%s", home ? home : "", mfile);
 				jarvis_rc_set("whisper_model", full_m);
@@ -1193,107 +1156,106 @@ static void do_jarvis_menu(const char *wm_override, const char *extra_mod)
 	} else if (strncmp(choice, "10.", 3) == 0) {
 		char rc_path[512];
 		resolve_rc_file(rc_path, sizeof(rc_path));
+#if defined(__APPLE__)
+		const char *argv[] = { "open", "-t", rc_path, NULL };
+		stl_spawn_detached(argv);
+#elif defined(_WIN32)
+		const char *argv[] = { "notepad.exe", rc_path, NULL };
+		stl_spawn_detached(argv);
+#else
 		const char *ed = getenv("EDITOR");
 		if (!ed || !*ed) ed = "nvim";
 		char *const argv[] = { "st", "-e", (char *)ed, rc_path, NULL };
 		desktop_core_spawn_detached_argv(argv);
+#endif
 	}
 }
 
 static bool cmd_in_path(const char *cmd)
 {
 	if (!cmd || !*cmd) return false;
-	const char *home = getenv("HOME");
+	const char *home = get_cli_home();
 	if (home && *home) {
 		char lp[768];
 		snprintf(lp, sizeof(lp), "%s/.local/bin/%s", home, cmd);
-		if (access(lp, X_OK) == 0) return true;
+		if (jarvis_plat_is_exec(lp)) return true;
+#ifdef _WIN32
+		snprintf(lp, sizeof(lp), "%s\\.local\\bin\\%s.exe", home, cmd);
+		if (jarvis_plat_is_exec(lp)) return true;
+#endif
 	}
-	const char *path_env = getenv("PATH");
-	if (!path_env || !*path_env) return false;
-	char copy[4096];
-	snprintf(copy, sizeof(copy), "%s", path_env);
-	char *save = NULL;
-	for (char *dir = strtok_r(copy, ":", &save); dir; dir = strtok_r(NULL, ":", &save)) {
-		if (!*dir) continue;
-		char cand[1024];
-		snprintf(cand, sizeof(cand), "%s/%s", dir, cmd);
-		if (access(cand, X_OK) == 0) return true;
-	}
-	return false;
-}
-
-static int run_argv_capture(char *const argv[], char *out, size_t out_sz)
-{
-	if (!out || out_sz == 0) return -1;
-	out[0] = '\0';
-	if (!argv || !argv[0]) return -1;
-
-	int pfd[2];
-	if (pipe(pfd) < 0) return -1;
-	pid_t pid = fork();
-	if (pid < 0) {
-		close(pfd[0]);
-		close(pfd[1]);
-		return -1;
-	}
-	if (pid == 0) {
-		dup2(pfd[1], STDOUT_FILENO);
-		int dn = open("/dev/null", O_RDWR);
-		if (dn >= 0) {
-			dup2(dn, STDIN_FILENO);
-			dup2(dn, STDERR_FILENO);
-			if (dn > STDERR_FILENO) close(dn);
-		}
-		close(pfd[0]);
-		close(pfd[1]);
-		execvp(argv[0], argv);
-		_exit(127);
-	}
-	close(pfd[1]);
-	size_t tot = 0;
-	while (tot + 1 < out_sz) {
-		ssize_t r = read(pfd[0], out + tot, out_sz - 1 - tot);
-		if (r < 0 && errno == EINTR) continue;
-		if (r <= 0) break;
-		tot += (size_t)r;
-	}
-	close(pfd[0]);
-	out[tot] = '\0';
-	int st = 0;
-	while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
-	return (WIFEXITED(st) && WEXITSTATUS(st) == 0) ? 0 : -1;
+	return jarvis_plat_find_in_path(cmd, NULL, 0) == 0;
 }
 
 static bool probe_http_health(uint16_t port, const char *req_path)
 {
-	int s = socket(AF_INET, SOCK_STREAM, 0);
-	if (s < 0) return false;
-	struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
-	setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-	setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+	stl_sock_init();
+	stl_socket_t s = stl_sock_create(AF_INET, SOCK_STREAM, 0);
+	if (s == STL_INVALID_SOCKET) return false;
+	stl_sock_set_timeout(s, 1000, 1000);
 	struct sockaddr_in addr;
 	memset(&addr, 0, sizeof(addr));
 	addr.sin_family = AF_INET;
 	addr.sin_port = htons(port);
 	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-	if (connect(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-		close(s);
+	if (stl_sock_connect(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		stl_sock_close(s);
 		return false;
 	}
 	char req[256];
 	int n = snprintf(req, sizeof(req), "GET %s HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n", req_path);
-	if (n > 0) write_all_fd(s, req, (size_t)n);
+	if (n > 0) jarvis_plat_write_sock_all(s, req, (size_t)n);
 	char buf[512] = {0};
-	ssize_t rd = read(s, buf, sizeof(buf) - 1);
-	close(s);
+	ssize_t rd = stl_sock_recv(s, buf, sizeof(buf) - 1, 0);
+	stl_sock_close(s);
 	return rd > 0 && strstr(buf, "200") != NULL;
+}
+
+static bool find_file_with_ext(const char *dir, const char *ext, char *out, size_t out_sz)
+{
+	if (!dir || !*dir || !ext || !*ext) return false;
+	size_t elen = strlen(ext);
+#ifdef _WIN32
+	char pat[768];
+	WIN32_FIND_DATAA fd;
+	snprintf(pat, sizeof(pat), "%s\\*%s", dir, ext);
+	HANDLE h = FindFirstFileA(pat, &fd);
+	if (h == INVALID_HANDLE_VALUE) return false;
+	bool found = false;
+	do {
+		if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+		size_t nl = strlen(fd.cFileName);
+		if (nl > elen && _stricmp(fd.cFileName + nl - elen, ext) == 0) {
+			if (out && out_sz > 0)
+				snprintf(out, out_sz, "%s/%s", dir, fd.cFileName);
+			found = true;
+			break;
+		}
+	} while (FindNextFileA(h, &fd));
+	FindClose(h);
+	return found;
+#else
+	DIR *d = opendir(dir);
+	if (!d) return false;
+	struct dirent *de;
+	while ((de = readdir(d)) != NULL) {
+		size_t nl = strlen(de->d_name);
+		if (nl > elen && strcmp(de->d_name + nl - elen, ext) == 0) {
+			if (out && out_sz > 0)
+				snprintf(out, out_sz, "%s/%s", dir, de->d_name);
+			closedir(d);
+			return true;
+		}
+	}
+	closedir(d);
+	return false;
+#endif
 }
 
 static bool find_any_whisper_model(const char *home, bool allow_en_only, char *out, size_t out_sz)
 {
 	out[0] = '\0';
-	if (jarvis_rc_get("whisper_model", NULL, out, out_sz) && out[0] && access(out, R_OK) == 0) {
+	if (jarvis_rc_get("whisper_model", NULL, out, out_sz) && out[0] && jarvis_plat_is_readable(out)) {
 		return true;
 	}
 	out[0] = '\0';
@@ -1307,41 +1269,44 @@ static bool find_any_whisper_model(const char *home, bool allow_en_only, char *o
 	static const char *const en[] = {
 		"ggml-base.en-q8_0.bin", "ggml-small.en-q5_1.bin", NULL
 	};
+	char ddir[512] = {0};
+	stl_data_dir("whisper", ddir, sizeof(ddir));
 	for (size_t i = 0; multi[i]; i++) {
 		char cand[768];
 		snprintf(cand, sizeof(cand), "%s/.local/share/whisper/%s", home, multi[i]);
-		if (access(cand, R_OK) == 0) {
+		if (jarvis_plat_is_readable(cand)) {
 			snprintf(out, out_sz, "%s", cand);
 			return true;
+		}
+		if (ddir[0]) {
+			snprintf(cand, sizeof(cand), "%s/%s", ddir, multi[i]);
+			if (jarvis_plat_is_readable(cand)) {
+				snprintf(out, out_sz, "%s", cand);
+				return true;
+			}
 		}
 	}
 	if (allow_en_only) {
 		for (size_t i = 0; en[i]; i++) {
 			char cand[768];
 			snprintf(cand, sizeof(cand), "%s/.local/share/whisper/%s", home, en[i]);
-			if (access(cand, R_OK) == 0) {
+			if (jarvis_plat_is_readable(cand)) {
 				snprintf(out, out_sz, "%s", cand);
 				return true;
+			}
+			if (ddir[0]) {
+				snprintf(cand, sizeof(cand), "%s/%s", ddir, en[i]);
+				if (jarvis_plat_is_readable(cand)) {
+					snprintf(out, out_sz, "%s", cand);
+					return true;
+				}
 			}
 		}
 	}
 	char wdir[512];
 	snprintf(wdir, sizeof(wdir), "%s/.local/share/whisper", home);
-	DIR *d = opendir(wdir);
-	if (d) {
-		struct dirent *de;
-		while ((de = readdir(d)) != NULL) {
-			size_t nl = strlen(de->d_name);
-			if (nl > 4 && strcmp(de->d_name + nl - 4, ".bin") == 0) {
-				char full[1024];
-				snprintf(full, sizeof(full), "%s/%s", wdir, de->d_name);
-				snprintf(out, out_sz, "%s", full);
-				closedir(d);
-				return true;
-			}
-		}
-		closedir(d);
-	}
+	if (find_file_with_ext(wdir, ".bin", out, out_sz)) return true;
+	if (ddir[0] && find_file_with_ext(ddir, ".bin", out, out_sz)) return true;
 	return false;
 }
 
@@ -1349,40 +1314,22 @@ static bool has_piper_or_kokoro_model(const char *home)
 {
 	char kokoro[768];
 	snprintf(kokoro, sizeof(kokoro), "%s/.local/share/kokoro/kokoro-v1.0.onnx", home);
-	if (access(kokoro, R_OK) == 0) return true;
+	if (jarvis_plat_is_readable(kokoro)) return true;
+	if (jarvis_plat_data_file("kokoro", "kokoro-v1.0.onnx", kokoro, sizeof(kokoro)) == 0 &&
+	    jarvis_plat_is_readable(kokoro)) {
+		return true;
+	}
 	char pdir[768];
 	snprintf(pdir, sizeof(pdir), "%s/.local/share/piper", home);
-	DIR *d = opendir(pdir);
-	if (d) {
-		struct dirent *de;
-		while ((de = readdir(d)) != NULL) {
-			size_t nl = strlen(de->d_name);
-			if (nl > 5 && strcmp(de->d_name + nl - 5, ".onnx") == 0) {
-				closedir(d);
-				return true;
-			}
-		}
-		closedir(d);
+	if (find_file_with_ext(pdir, ".onnx", NULL, 0)) return true;
+	if (stl_data_dir("piper", pdir, sizeof(pdir)) && pdir[0] &&
+	    find_file_with_ext(pdir, ".onnx", NULL, 0)) {
+		return true;
 	}
 	return false;
 }
 
-static bool mkdir_p_path(const char *path)
-{
-	char tmp[768];
-	size_t len = strlen(path);
-	if (len == 0 || len >= sizeof(tmp)) return false;
-	snprintf(tmp, sizeof(tmp), "%s", path);
-	for (char *p = tmp + 1; *p; p++) {
-		if (*p == '/') {
-			*p = '\0';
-			if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return false;
-			*p = '/';
-		}
-	}
-	return (mkdir(tmp, 0755) == 0 || errno == EEXIST);
-}
-
+#ifdef __linux__
 static bool copy_file_atomic(const char *src, const char *dst)
 {
 	FILE *in = fopen(src, "rb");
@@ -1407,21 +1354,21 @@ static bool copy_file_atomic(const char *src, const char *dst)
 	fclose(in);
 	if (fclose(out) != 0) ok = false;
 	if (!ok) {
-		unlink(tmp);
+		remove(tmp);
 		return false;
 	}
 	return rename(tmp, dst) == 0;
 }
+#endif
 
 static int do_jarvis_doctor(bool as_json)
 {
-	const char *home = getenv("HOME");
-	if (!home || !*home) home = "/tmp";
+	const char *home = get_cli_home();
 
 	const jarvis_ontology_t *ont = get_cli_ont();
 	char rc_path[512];
 	resolve_rc_file(rc_path, sizeof(rc_path));
-	bool has_rc = (access(rc_path, R_OK) == 0);
+	bool has_rc = (jarvis_plat_is_readable(rc_path) != 0);
 
 	char lang[32] = {0}, wake[64] = {0}, voice[64] = {0}, wm[64] = {0};
 	jarvis_resolve_lang(ont, lang, sizeof(lang));
@@ -1429,22 +1376,28 @@ static int do_jarvis_doctor(bool as_json)
 	jarvis_resolve_tts_voice(ont, voice, sizeof(voice));
 	jarvis_resolve_wm(wm, sizeof(wm));
 
-	bool has_pw_rec = cmd_in_path("pw-record");
-	bool has_pw_cat = cmd_in_path("pw-cat");
-	bool has_wpctl  = cmd_in_path("wpctl");
+	const char *audio_backend = jarvis_audio_backend_name();
+	bool has_capture_audio = jarvis_audio_has_capture_backend();
+	bool has_pw_rec = false, has_pw_cat = false, has_wpctl = false;
+	bool has_aec_conf = false, has_aec_node = false;
 
-	char aec_conf[768];
+#ifdef __linux__
+	char aec_conf[768] = {0};
+	has_pw_rec = cmd_in_path("pw-record");
+	has_pw_cat = cmd_in_path("pw-cat");
+	has_wpctl  = cmd_in_path("wpctl");
+
 	snprintf(aec_conf, sizeof(aec_conf), "%s/.config/pipewire/pipewire.conf.d/99-jarvis-aec.conf", home);
-	bool has_aec_conf = (access(aec_conf, R_OK) == 0);
+	has_aec_conf = (jarvis_plat_is_readable(aec_conf) != 0);
 
-	bool has_aec_node = false;
 	if (has_wpctl) {
 		char wp_out[8192];
 		char *const wp_argv[] = { "wpctl", "status", NULL };
-		if (run_argv_capture(wp_argv, wp_out, sizeof(wp_out)) == 0) {
+		if (desktop_core_exec_capture(wp_argv, wp_out, sizeof(wp_out)) == 0) {
 			has_aec_node = (strstr(wp_out, "jarvis_aec_source") != NULL);
 		}
 	}
+#endif
 
 	bool allow_en = (strncasecmp(lang, "en", 2) == 0);
 	char model_path[1024] = {0};
@@ -1454,20 +1407,32 @@ static int do_jarvis_doctor(bool as_json)
 	    (strstr(model_path, ".en.") != NULL || strstr(model_path, ".en-") != NULL)) {
 		en_model_mismatch = true;
 	}
-	bool has_vulkan = (access("/dev/dri/renderD128", R_OK) == 0);
+#ifdef __APPLE__
+	bool has_vulkan = true; /* Apple Metal / CoreML backend */
+#elif defined(_WIN32)
+	bool has_vulkan = false;
+#else
+	bool has_vulkan = (jarvis_plat_is_readable("/dev/dri/renderD128") != 0);
+#endif
 
 	bool has_edge_pcm = cmd_in_path("edge-tts-pcm");
 	bool has_ffmpeg   = cmd_in_path("ffmpeg");
 	bool has_espeak   = cmd_in_path("espeak-ng");
+#if defined(__APPLE__) || defined(_WIN32)
+	bool has_native_tts = true; /* macOS 'say' / Windows SAPI5 always available */
+#else
+	bool has_native_tts = false;
+#endif
 	bool has_edge_py  = false;
 	{
 		char venv1[768], venv2[768];
 		snprintf(venv1, sizeof(venv1), "%s/.local/share/dwm-voice/venv/bin/python", home);
 		snprintf(venv2, sizeof(venv2), "%s/.venv/bin/python", home);
+		const char *py_cmd = cmd_in_path("python3") ? "python3" : (cmd_in_path("python") ? "python" : NULL);
 		const char *py_cands[3] = {
-			cmd_in_path("python3") ? "python3" : NULL,
-			access(venv1, X_OK) == 0 ? venv1 : NULL,
-			access(venv2, X_OK) == 0 ? venv2 : NULL
+			py_cmd,
+			jarvis_plat_is_exec(venv1) ? venv1 : NULL,
+			jarvis_plat_is_exec(venv2) ? venv2 : NULL
 		};
 		for (int i = 0; i < 3 && !has_edge_py; i++) {
 			if (!py_cands[i]) continue;
@@ -1478,11 +1443,12 @@ static int do_jarvis_doctor(bool as_json)
 	bool has_local_onnx = has_piper_or_kokoro_model(home);
 
 	bool has_ren = cmd_in_path("ren");
+	const char *so_ext = stl_so_ext();
 	char ren_wm_so[768], ren_jarvis_so[768];
-	snprintf(ren_wm_so, sizeof(ren_wm_so), "%s/.local/lib/ren/ren-%s.so", home, wm);
-	snprintf(ren_jarvis_so, sizeof(ren_jarvis_so), "%s/.local/lib/ren/ren-jarvis.so", home);
-	bool has_ren_wm = (access(ren_wm_so, R_OK) == 0);
-	bool has_ren_jarvis = (access(ren_jarvis_so, R_OK) == 0);
+	snprintf(ren_wm_so, sizeof(ren_wm_so), "%s/.local/lib/ren/ren-%s.%s", home, wm, so_ext);
+	snprintf(ren_jarvis_so, sizeof(ren_jarvis_so), "%s/.local/lib/ren/ren-jarvis.%s", home, so_ext);
+	bool has_ren_wm = (jarvis_plat_is_readable(ren_wm_so) != 0);
+	bool has_ren_jarvis = (jarvis_plat_is_readable(ren_jarvis_so) != 0);
 
 	bool auren_ok = probe_http_health(4242, "/v1/models");
 	char ping_resp[64] = {0}, st_resp[64] = {0};
@@ -1490,26 +1456,30 @@ static int do_jarvis_doctor(bool as_json)
 	bool daemon_listening = daemon_up && daemon_cmd("JARVIS_STATUS", st_resp, sizeof(st_resp)) &&
 	                        (strcmp(st_resp, "ON") == 0);
 
-	bool healthy = (ont != NULL) && has_pw_rec && has_pw_cat && has_model &&
-	               !en_model_mismatch && (has_edge_pcm || has_local_onnx || has_espeak) && has_ren;
+	bool healthy = (ont != NULL) && has_capture_audio && has_model &&
+	               !en_model_mismatch &&
+	               (has_edge_pcm || has_local_onnx || has_espeak || has_native_tts) &&
+	               has_ren;
 
 	if (as_json) {
-		char e_rc[640], e_lang[64], e_wake[128], e_voice[128], e_wm[64], e_mod[1024];
+		char e_rc[640], e_lang[64], e_wake[128], e_voice[128], e_wm[64], e_mod[1024], e_ab[64];
 		desktop_core_json_escape(has_rc ? rc_path : "none (zero-config defaults)", e_rc, sizeof(e_rc));
 		desktop_core_json_escape(lang, e_lang, sizeof(e_lang));
 		desktop_core_json_escape(wake, e_wake, sizeof(e_wake));
 		desktop_core_json_escape(voice, e_voice, sizeof(e_voice));
 		desktop_core_json_escape(wm, e_wm, sizeof(e_wm));
 		desktop_core_json_escape(has_model ? model_path : "", e_mod, sizeof(e_mod));
+		desktop_core_json_escape(audio_backend, e_ab, sizeof(e_ab));
 		printf("{\"healthy\":%s,"
 		       "\"config\":{\"rc_file\":\"%s\",\"has_rc\":%s,\"lang\":\"%s\",\"wake_word\":\"%s\",\"tts_voice\":\"%s\",\"wm\":\"%s\",\"ontology_loaded\":%s},"
-		       "\"audio\":{\"pw_record\":%s,\"pw_cat\":%s,\"wpctl\":%s,\"aec_conf\":%s,\"aec_source_active\":%s},"
+		       "\"audio\":{\"backend\":\"%s\",\"capture_ready\":%s,\"pw_record\":%s,\"pw_cat\":%s,\"wpctl\":%s,\"aec_conf\":%s,\"aec_source_active\":%s},"
 		       "\"whisper\":{\"model\":\"%s\",\"model_found\":%s,\"en_model_mismatch\":%s,\"vulkan_render_node\":%s},"
-		       "\"tts\":{\"edge_tts_pcm\":%s,\"edge_tts_python\":%s,\"ffmpeg\":%s,\"local_onnx\":%s,\"espeak_ng\":%s},"
+		       "\"tts\":{\"edge_tts_pcm\":%s,\"edge_tts_python\":%s,\"ffmpeg\":%s,\"local_onnx\":%s,\"espeak_ng\":%s,\"native_tts\":%s},"
 		       "\"ren\":{\"ren_bin\":%s,\"ren_jarvis_so\":%s,\"ren_wm_so\":%s,\"axil_auren_health\":%s},"
 		       "\"daemon\":{\"running\":%s,\"listening\":%s}}\n",
 		       healthy ? "true" : "false",
 		       e_rc, has_rc ? "true" : "false", e_lang, e_wake, e_voice, e_wm, ont ? "true" : "false",
+		       e_ab, has_capture_audio ? "true" : "false",
 		       has_pw_rec ? "true" : "false", has_pw_cat ? "true" : "false",
 		       has_wpctl ? "true" : "false", has_aec_conf ? "true" : "false",
 		       has_aec_node ? "true" : "false",
@@ -1517,7 +1487,7 @@ static int do_jarvis_doctor(bool as_json)
 		       has_vulkan ? "true" : "false",
 		       has_edge_pcm ? "true" : "false", has_edge_py ? "true" : "false",
 		       has_ffmpeg ? "true" : "false", has_local_onnx ? "true" : "false",
-		       has_espeak ? "true" : "false",
+		       has_espeak ? "true" : "false", has_native_tts ? "true" : "false",
 		       has_ren ? "true" : "false", has_ren_jarvis ? "true" : "false",
 		       has_ren_wm ? "true" : "false", auren_ok ? "true" : "false",
 		       daemon_up ? "true" : "false", daemon_listening ? "true" : "false");
@@ -1527,21 +1497,33 @@ static int do_jarvis_doctor(bool as_json)
 		printf("    %-18s %s\n", "rc file:", has_rc ? rc_path : "none (zero-config defaults)");
 		printf("    %-18s %s (wake=%s, tts=%s, wm=%s)\n", "resolved:", lang, wake, voice, wm);
 		printf("    %-18s %s\n", "ontology:", ont ? "loaded" : "MISSING");
-		printf("  [Audio & PipeWire]\n");
+		printf("  [Audio & %s]\n", audio_backend);
+#ifdef __linux__
 		printf("    %-18s pw-record=%s pw-cat=%s wpctl=%s\n", "tools:",
 		       has_pw_rec ? "OK" : "MISSING", has_pw_cat ? "OK" : "MISSING", has_wpctl ? "OK" : "MISSING");
 		printf("    %-18s conf=%s node(jarvis_aec_source)=%s\n", "AEC:",
 		       has_aec_conf ? "OK" : "missing (run 'jarvis setup')",
 		       has_aec_node ? "ACTIVE" : "inactive");
+#else
+		printf("    %-18s %s (backend=%s)\n", "capture/play:",
+		       has_capture_audio ? "OK (native)" : "MISSING", audio_backend);
+#endif
 		printf("  [Whisper & GPU]\n");
 		printf("    %-18s %s%s\n", "model:", has_model ? model_path : "MISSING (run 'jarvis setup')",
 		       en_model_mismatch ? " [WARN: .en model with non-en lang]" : "");
+#ifdef __APPLE__
+		printf("    %-18s %s\n", "GPU backend:", "Apple Metal / CoreML");
+#elif defined(_WIN32)
+		printf("    %-18s %s\n", "GPU backend:", "CPU / Win32");
+#else
 		printf("    %-18s %s\n", "vulkan GPU:", has_vulkan ? "/dev/dri/renderD128 OK" : "not detected (CPU fallback)");
+#endif
 		printf("  [TTS Backends]\n");
 		printf("    %-18s edge-tts-pcm=%s python-edge_tts=%s ffmpeg=%s\n", "neural:",
 		       has_edge_pcm ? "OK" : "missing", has_edge_py ? "OK" : "missing", has_ffmpeg ? "OK" : "missing");
-		printf("    %-18s local-onnx=%s espeak-ng=%s\n", "offline:",
-		       has_local_onnx ? "OK" : "none", has_espeak ? "OK" : "missing");
+		printf("    %-18s local-onnx=%s espeak-ng=%s native=%s\n", "offline:",
+		       has_local_onnx ? "OK" : "none", has_espeak ? "OK" : "missing",
+		       has_native_tts ? "OK" : "n/a");
 		printf("  [Agent & Services]\n");
 		printf("    %-18s bin=%s ren-jarvis=%s ren-%s=%s\n", "ren:",
 		       has_ren ? "OK" : "MISSING", has_ren_jarvis ? "OK" : "missing",
@@ -1555,18 +1537,24 @@ static int do_jarvis_doctor(bool as_json)
 
 static int do_jarvis_setup(bool dry_run, bool as_json)
 {
-	const char *home = getenv("HOME");
-	if (!home || !*home) home = "/tmp";
+	const char *home = get_cli_home();
 
 	char wdir[512], pwdir[512], cfgdir[512];
 	snprintf(wdir, sizeof(wdir), "%s/.local/share/whisper", home);
+#ifdef _WIN32
+	if (stl_data_dir("whisper", cfgdir, sizeof(cfgdir)) && cfgdir[0])
+		snprintf(wdir, sizeof(wdir), "%s", cfgdir);
+#endif
 	snprintf(pwdir, sizeof(pwdir), "%s/.config/pipewire/pipewire.conf.d", home);
-	snprintf(cfgdir, sizeof(cfgdir), "%s/.config/jarvis", home);
+	if (!stl_config_dir("jarvis", cfgdir, sizeof(cfgdir)) || !cfgdir[0])
+		snprintf(cfgdir, sizeof(cfgdir), "%s/.config/jarvis", home);
 
 	if (!dry_run) {
-		mkdir_p_path(wdir);
-		mkdir_p_path(pwdir);
-		mkdir_p_path(cfgdir);
+		stl_mkdir_p(wdir);
+#ifdef __linux__
+		stl_mkdir_p(pwdir);
+#endif
+		stl_mkdir_p(cfgdir);
 	}
 
 	char lang[32] = {0}, wake[64] = {0}, voice[64] = {0}, wm[64] = {0};
@@ -1597,20 +1585,25 @@ static int do_jarvis_setup(bool dry_run, bool as_json)
 				char *const argv[] = { "wget", "-O", tmp_m, (char *)url, NULL };
 				dl_rc = run_argv_sync(argv);
 			}
+#ifdef _WIN32
+			if (dl_rc == 0) remove(model_path);
+#endif
 			if (dl_rc == 0 && rename(tmp_m, model_path) == 0) {
 				has_model = true;
 				model_action = "downloaded";
 			} else {
-				unlink(tmp_m);
+				remove(tmp_m);
 				model_action = "download-failed";
 			}
 		}
 	}
 
-	char aec_dst[1024];
+	char aec_dst[1024] = {0};
+	const char *aec_action = "not-applicable";
+#ifdef __linux__
 	snprintf(aec_dst, sizeof(aec_dst), "%s/99-jarvis-aec.conf", pwdir);
-	bool has_aec = (access(aec_dst, R_OK) == 0);
-	const char *aec_action = "present";
+	bool has_aec = (jarvis_plat_is_readable(aec_dst) != 0);
+	aec_action = "present";
 	if (!has_aec) {
 		char aec_src_home[768];
 		snprintf(aec_src_home, sizeof(aec_src_home), "%s/.local/share/jarvis/99-jarvis-aec.conf", home);
@@ -1623,7 +1616,7 @@ static int do_jarvis_setup(bool dry_run, bool as_json)
 		};
 		const char *found_src = NULL;
 		for (size_t i = 0; cands[i]; i++) {
-			if (access(cands[i], R_OK) == 0) {
+			if (jarvis_plat_is_readable(cands[i])) {
 				found_src = cands[i];
 				break;
 			}
@@ -1639,6 +1632,7 @@ static int do_jarvis_setup(bool dry_run, bool as_json)
 			aec_action = "install-failed";
 		}
 	}
+#endif
 
 	if (as_json) {
 		char e_mod[1024], e_aec[1024];
@@ -1653,17 +1647,20 @@ static int do_jarvis_setup(bool dry_run, bool as_json)
 	} else {
 		printf("Jarvis Setup%s\n", dry_run ? " (dry-run)" : "");
 		printf("  Whisper model: %s (%s)\n", model_path, model_action);
+#ifdef __linux__
 		printf("  PipeWire AEC : %s (%s)\n", aec_dst, aec_action);
 		if (strcmp(aec_action, "installed") == 0) {
 			printf("    Note: run 'systemctl --user restart pipewire pipewire-pulse' to activate jarvis_aec_source.\n");
 		}
+#else
+		printf("  Audio backend: %s (native)\n", jarvis_audio_backend_name());
+#endif
 		printf("  Defaults     : lang=%s wake=%s voice=%s wm=%s (no ~/.jarvisrc required)\n",
 		       lang, wake, voice, wm);
 		printf("  Switch lang  : jarvis config lang pt   (or 'jarvis config lang en')\n");
 	}
 	return 0;
 }
-#endif /* !_WIN32 */
 
 int main(int argc, char **argv)
 {
@@ -1692,11 +1689,7 @@ int main(int argc, char **argv)
 				return 0;
 			}
 			if ((strcmp(argv[i], "--port") == 0 || strcmp(argv[i], "-p") == 0) && i + 1 < argc) {
-#ifndef _WIN32
 				g_cli_port_override = atoi(argv[++i]);
-#else
-				++i;
-#endif
 				continue;
 			}
 			if ((strcmp(argv[i], "--cmd") == 0 || strcmp(argv[i], "-c") == 0) && i + 1 < argc) {
@@ -1777,7 +1770,6 @@ int main(int argc, char **argv)
 		                          "%s%s", u_pos ? " " : "", argv[i]);
 	}
 
-#ifndef _WIN32
 	if (raw_daemon_cmd) {
 		char resp[4096];
 		if (!daemon_cmd(raw_daemon_cmd, resp, sizeof(resp))) {
@@ -1938,8 +1930,8 @@ int main(int argc, char **argv)
 		}
 		if (strcmp(subcmd, "warmup") == 0) {
 			(void)get_cli_ont();
-			int fd = connect_ren_socket(true, wm_override, extra_mod);
-			if (fd >= 0) close(fd);
+			stl_socket_t fd = connect_ren_socket(true, wm_override, extra_mod);
+			if (fd != STL_INVALID_SOCKET) stl_sock_close(fd);
 			return 0;
 		}
 		if (strcmp(subcmd, "dmenu") == 0 || strcmp(subcmd, "omni") == 0) {
@@ -1953,8 +1945,7 @@ int main(int argc, char **argv)
 	}
 
 	if (dry_run) {
-		char sock_path[96];
-		ren_socket_path(sock_path, sizeof(sock_path));
+		const char *sock_path = jarvis_ren_endpoint();
 		if (as_json) {
 			char eu[512], es[128];
 			desktop_core_json_escape(utterance, eu, sizeof(eu));
@@ -1967,21 +1958,4 @@ int main(int argc, char **argv)
 	}
 
 	return dispatch_ren_query(utterance, as_json, quiet, wm_override, extra_mod);
-#else
-	(void)wm_override;
-	(void)extra_mod;
-	(void)dry_run;
-	(void)as_json;
-	(void)quiet;
-	(void)subcmd;
-	(void)subarg;
-	(void)subarg2;
-	(void)raw_daemon_cmd;
-	if (!utterance[0]) {
-		print_usage(argv[0]);
-		return 1;
-	}
-	fprintf(stderr, "ren socket client is only supported on POSIX\n");
-	return 1;
-#endif
 }

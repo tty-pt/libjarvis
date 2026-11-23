@@ -7,13 +7,20 @@
 
 #define _GNU_SOURCE
 #include <ctype.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#define strcasecmp _stricmp
+#define strncasecmp _strnicmp
+#else
+#include <fcntl.h>
 #include <strings.h>
 #include <unistd.h>
+#endif
 
+#include <ttypt/stele.h>
 #include "ttypt/libren.h"
 #include <ttypt/xy.h>
 #include "../../include/ttypt/desktop-core.h"
@@ -50,14 +57,30 @@ static bool extract_json_int(const char *json, const char *key, int *out_val)
 	return true;
 }
 
+static int ff_call_window_tool(const char *arg, char **out)
+{
+	char *res = NULL;
+	int rc = ren_call_tool("x11_windows", arg, &res);
+	if (rc != 0 && (!res || strcmp(res, "Error: unknown tool") == 0)) {
+		free(res);
+		res = NULL;
+		rc = ren_call_tool("window", arg, &res);
+	}
+	if (out)
+		*out = res;
+	else
+		free(res);
+	return rc;
+}
+
 static bool ren_ff_is_browser_focused(void *ud)
 {
 	(void)ud;
 	char *out = NULL;
-	int rc = ren_call_tool("x11_windows", "focused", &out);
+	int rc = ff_call_window_tool("focused", &out);
 	if (rc != 0 || !out) {
 		free(out);
-		/* If no X11 window query tool is loaded (e.g. Wayland), allow AT-SPI2 inspection */
+		/* If no window query tool is loaded (e.g. Wayland), allow a11y inspection */
 		return true;
 	}
 	char cls[128] = {0};
@@ -71,18 +94,11 @@ static bool ren_ff_focus_browser(void *ud)
 	(void)ud;
 	if (ren_ff_is_browser_focused(NULL)) return true;
 
-	static const char *const BROWSERS[] = { "firefox", "chromium", "chrome", "brave", "qutebrowser", NULL };
+	static const char *const BROWSERS[] = { "firefox", "chromium", "chrome", "brave", "safari", "edge", "qutebrowser", NULL };
 	for (size_t i = 0; BROWSERS[i]; i++) {
 		char arg[64], *out = NULL;
 		snprintf(arg, sizeof(arg), "focus %s", BROWSERS[i]);
-		int rc = ren_call_tool("x11_windows", arg, &out);
-		free(out);
-		if (rc == 0) return true;
-	}
-	for (size_t i = 0; BROWSERS[i]; i++) {
-		char arg[64], *out = NULL;
-		snprintf(arg, sizeof(arg), "focus %s", BROWSERS[i]);
-		int rc = ren_call_tool("window", arg, &out);
+		int rc = ff_call_window_tool(arg, &out);
 		free(out);
 		if (rc == 0) return true;
 	}
@@ -93,7 +109,7 @@ static bool ren_ff_get_geometry(void *ud, int *x, int *y, int *w, int *h)
 {
 	(void)ud;
 	char *out = NULL;
-	int rc = ren_call_tool("x11_windows", "focused", &out);
+	int rc = ff_call_window_tool("focused", &out);
 	if (rc != 0 || !out) {
 		free(out);
 		return false;
@@ -117,7 +133,7 @@ static bool ren_ff_get_screen_bounds(void *ud, int *sw, int *sh)
 {
 	(void)ud;
 	char *out = NULL;
-	int rc = ren_call_tool("x11_windows", "focused", &out);
+	int rc = ff_call_window_tool("focused", &out);
 	if (rc != 0 || !out) {
 		free(out);
 		return false;
@@ -163,11 +179,19 @@ static firefox_core_ops_t ren_ff_ops(void)
 
 static void spawn_browser_url(const char *url)
 {
+#ifdef __APPLE__
+	char *const argv[] = { "open", (char *)url, NULL };
+	desktop_core_spawn_detached_argv(argv);
+#elif defined(_WIN32)
+	char *const argv[] = { "cmd.exe", "/c", "start", "", (char *)url, NULL };
+	desktop_core_spawn_detached_argv(argv);
+#else
 	char *const argv[] = { "firefox", "--new-tab", (char *)url, NULL };
 	if (desktop_core_spawn_detached_argv(argv) <= 0) {
 		char *const xdg[] = { "xdg-open", (char *)url, NULL };
 		desktop_core_spawn_detached_argv(xdg);
 	}
+#endif
 }
 
 static void ff_trim_trailing_ws(char *s)
@@ -335,7 +359,7 @@ static int tool_browser(const char *args, char **out_result)
 			char *out = (char *)malloc(FF_INSPECT_BUF_SZ + 1024);
 			if (!out) return -1;
 			if (strcmp(role, "table row") == 0 || strcmp(role, "page tab") == 0 || strcmp(role, "list item") == 0) {
-				usleep(160000);
+				stl_sleep_ms(160);
 				firefox_tab_t tabs[FIREFOX_CORE_MAX_TABS];
 				size_t ntabs = firefox_core_populate_tabs(tabs, FIREFOX_CORE_MAX_TABS);
 				char page[FF_INSPECT_BUF_SZ] = {0};
@@ -418,12 +442,12 @@ static int tool_browser(const char *args, char **out_result)
 				}
 				return -1;
 			}
-			if (strcmp(role, "entry") != 0 && strcmp(role, "combo box") != 0) usleep(160000);
+			if (strcmp(role, "entry") != 0 && strcmp(role, "combo box") != 0) stl_sleep_ms(160);
 		}
 
 		if (!ren_ff_is_browser_focused(NULL)) {
 			ren_ff_focus_browser(NULL);
-			usleep(40000);
+			stl_sleep_ms(40);
 			if (!ren_ff_is_browser_focused(NULL)) {
 				*out_result = strdup("Error: browser window is not focused; refusing to type");
 				return -1;

@@ -245,6 +245,7 @@ XY_MODULE_API void xy_install(void)
 {
 	ren_register_tool("input", "input <submit <text> | type <text> | key <combo> | click <x y | center> | scroll <up|down|left|right> [amount]>", tool_input);
 	ren_register_tool("x11_windows", "x11_windows [focus <id_or_title> | close <id>]", tool_x11_windows);
+	ren_register_tool("window", "window [focused | focus <id_or_title> | close <id>]", tool_x11_windows);
 	ren_register_tool("clipboard", "clipboard", tool_clipboard);
 	ren_register_context_provider(x11_context_provider);
 }

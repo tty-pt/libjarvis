@@ -10,13 +10,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#define strcasecmp _stricmp
+#define strncasecmp _strnicmp
+#else
 #include <strings.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
+#endif
 
+#include <ttypt/stele.h>
 #include "ttypt/libren.h"
 #include "../../include/ttypt/desktop-core.h"
-#include "atspi_core.h"
+#include "a11y_core.h"
 #include <ttypt/xy.h>
 
 static bool desktop_extract_json_str(const char *json, const char *key, char *out, size_t out_sz)
@@ -93,6 +104,22 @@ static bool desktop_find_new_window(
 	return false;
 }
 
+static int desktop_call_window_tool(const char *arg, char **out)
+{
+	char *res = NULL;
+	int rc = ren_call_tool("x11_windows", arg, &res);
+	if (rc != 0 && (!res || strcmp(res, "Error: unknown tool") == 0)) {
+		free(res);
+		res = NULL;
+		rc = ren_call_tool("window", arg, &res);
+	}
+	if (out)
+		*out = res;
+	else
+		free(res);
+	return rc;
+}
+
 static int tool_open_app(const char *args, char **out_result)
 {
 	while (args && *args == ' ') args++;
@@ -109,7 +136,7 @@ static int tool_open_app(const char *args, char **out_result)
 	}
 
 	char *before_wins = NULL;
-	bool have_x11 = (ren_call_tool("x11_windows", "", &before_wins) == 0 && before_wins != NULL);
+	bool have_win = (desktop_call_window_tool("", &before_wins) == 0 && before_wins != NULL);
 
 	if (desktop_core_spawn_detached_sh(resolved) < 0) {
 		free(before_wins);
@@ -118,16 +145,16 @@ static int tool_open_app(const char *args, char **out_result)
 	}
 
 	char mapped_desc[256] = {0}, focused_desc[256] = {0};
-	if (have_x11) {
+	if (have_win) {
 		for (int i = 0; i < 12; i++) {
 			if (ren_is_interrupted()) break;
-			usleep(100000);
+			stl_sleep_ms(100);
 			char *now_wins = NULL;
-			if (ren_call_tool("x11_windows", "", &now_wins) == 0 && now_wins) {
+			if (desktop_call_window_tool("", &now_wins) == 0 && now_wins) {
 				bool found = desktop_find_new_window(before_wins, now_wins, mapped_desc, sizeof(mapped_desc));
 				free(now_wins);
 				if (found) {
-					usleep(60000);
+					stl_sleep_ms(60);
 					break;
 				}
 			} else {
@@ -136,7 +163,7 @@ static int tool_open_app(const char *args, char **out_result)
 			}
 		}
 		char *foc_json = NULL;
-		if (ren_call_tool("x11_windows", "focused", &foc_json) == 0 && foc_json) {
+		if (desktop_call_window_tool("focused", &foc_json) == 0 && foc_json) {
 			char fcls[96] = {0}, ftitle[128] = {0};
 			desktop_extract_json_str(foc_json, "class", fcls, sizeof(fcls));
 			desktop_extract_json_str(foc_json, "title", ftitle, sizeof(ftitle));
@@ -177,8 +204,14 @@ static int tool_media(const char *args, char **out_result)
 		while (*q == ' ') q++;
 		if (*q) {
 			desktop_core_mpris_control("Pause");
-			char enc[512], yt_url[768], resolve_cmd[1024], vid_id[64] = {0};
+			char enc[512], yt_url[768];
 			desktop_core_url_encode(q, enc, sizeof(enc));
+#if defined(_WIN32)
+			snprintf(yt_url, sizeof(yt_url), "https://www.youtube.com/results?search_query=%s", enc);
+			char *const argv[] = { "cmd.exe", "/c", "start", "", yt_url, NULL };
+			desktop_core_spawn_detached_argv(argv);
+#else
+			char resolve_cmd[1024], vid_id[64] = {0};
 			snprintf(
 				resolve_cmd, sizeof(resolve_cmd),
 				"curl -s -L --max-time 3.5 -A 'Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0' "
@@ -192,63 +225,122 @@ static int tool_media(const char *args, char **out_result)
 			} else {
 				snprintf(yt_url, sizeof(yt_url), "https://www.youtube.com/results?search_query=%s", enc);
 			}
+#ifdef __APPLE__
+			char *const argv[] = { "open", yt_url, NULL };
+			desktop_core_spawn_detached_argv(argv);
+#else
 			char *const argv[] = { "firefox", "--new-tab", yt_url, NULL };
 			if (desktop_core_spawn_detached_argv(argv) <= 0) {
 				char *const xdg[] = { "xdg-open", yt_url, NULL };
 				desktop_core_spawn_detached_argv(xdg);
 			}
+#endif
+#endif
 			char buf[384];
 			snprintf(buf, sizeof(buf), "playing: %.320s", q);
 			*out_result = strdup(buf);
 			return 0;
 		}
+#ifdef __APPLE__
+		desktop_core_spawn_detached_sh(
+			"osascript -e 'tell application \"Music\" to play' 2>/dev/null || "
+			"osascript -e 'tell application \"Spotify\" to play' 2>/dev/null");
+#elif defined(_WIN32)
+		ren_call_tool("input", "key MediaPlayPause", NULL);
+#else
 		if (!desktop_core_mpris_control("Play")) {
 			ren_call_tool("input", "key XF86AudioPlay", NULL);
 		}
+#endif
 		*out_result = strdup("resumed media");
 		return 0;
 	}
 
 	if (strcasecmp(args, "pause") == 0 || strcasecmp(args, "stop") == 0) {
+#ifdef __APPLE__
+		desktop_core_spawn_detached_sh(
+			"osascript -e 'tell application \"Music\" to pause' 2>/dev/null || "
+			"osascript -e 'tell application \"Spotify\" to pause' 2>/dev/null");
+#elif defined(_WIN32)
+		ren_call_tool("input", "key MediaPlayPause", NULL);
+#else
 		if (!desktop_core_mpris_control("Pause")) {
 			ren_call_tool("input", "key XF86AudioPlay", NULL);
 		}
+#endif
 		*out_result = strdup("paused media");
 		return 0;
 	}
 
 	if (strcasecmp(args, "next") == 0) {
+#ifdef __APPLE__
+		desktop_core_spawn_detached_sh(
+			"osascript -e 'tell application \"Music\" to next track' 2>/dev/null || "
+			"osascript -e 'tell application \"Spotify\" to next track' 2>/dev/null");
+#elif defined(_WIN32)
+		ren_call_tool("input", "key MediaNextTrack", NULL);
+#else
 		desktop_core_mpris_control("Next");
+#endif
 		*out_result = strdup("next track");
 		return 0;
 	}
 
 	if (strcasecmp(args, "prev") == 0 || strcasecmp(args, "previous") == 0) {
+#ifdef __APPLE__
+		desktop_core_spawn_detached_sh(
+			"osascript -e 'tell application \"Music\" to previous track' 2>/dev/null || "
+			"osascript -e 'tell application \"Spotify\" to previous track' 2>/dev/null");
+#elif defined(_WIN32)
+		ren_call_tool("input", "key MediaPrevTrack", NULL);
+#else
 		desktop_core_mpris_control("Previous");
+#endif
 		*out_result = strdup("previous track");
 		return 0;
 	}
 
 	if (strcasecmp(args, "volume_up") == 0 || strcasecmp(args, "up") == 0) {
+#ifdef __APPLE__
+		desktop_core_spawn_detached_sh(
+			"osascript -e 'set volume output volume ((output volume of (get volume settings)) + 6)' 2>/dev/null");
+#elif defined(_WIN32)
+		ren_call_tool("input", "key VolumeUp", NULL);
+#else
 		desktop_core_spawn_detached_sh(
 			"wpctl set-volume -l 1.5 @DEFAULT_AUDIO_SINK@ 5%+ 2>/dev/null || "
 			"pactl set-sink-volume @DEFAULT_SINK@ +5% 2>/dev/null");
+#endif
 		*out_result = strdup("volume: volume_up");
 		return 0;
 	}
 
 	if (strcasecmp(args, "volume_down") == 0 || strcasecmp(args, "down") == 0) {
+#ifdef __APPLE__
+		desktop_core_spawn_detached_sh(
+			"osascript -e 'set volume output volume ((output volume of (get volume settings)) - 6)' 2>/dev/null");
+#elif defined(_WIN32)
+		ren_call_tool("input", "key VolumeDown", NULL);
+#else
 		desktop_core_spawn_detached_sh(
 			"wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%- 2>/dev/null || "
 			"pactl set-sink-volume @DEFAULT_SINK@ -5% 2>/dev/null");
+#endif
 		*out_result = strdup("volume: volume_down");
 		return 0;
 	}
 
 	if (strcasecmp(args, "mute") == 0 || strcasecmp(args, "volume_mute") == 0) {
+#ifdef __APPLE__
+		desktop_core_spawn_detached_sh(
+			"osascript -e 'set volume output muted (not (output muted of (get volume settings)))' 2>/dev/null");
+#elif defined(_WIN32)
+		ren_call_tool("input", "key VolumeMute", NULL);
+#else
 		desktop_core_spawn_detached_sh(
 			"wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle 2>/dev/null || "
 			"pactl set-sink-mute @DEFAULT_SINK@ toggle 2>/dev/null");
+#endif
 		*out_result = strdup("volume: volume_mute");
 		return 0;
 	}
@@ -268,10 +360,27 @@ static int tool_system(const char *args, char **out_result)
 	if (strcasecmp(aspect, "all") == 0 || strcasecmp(aspect, "memory") == 0 ||
 	    strcasecmp(aspect, "ram") == 0 || strcasecmp(aspect, "processes") == 0 ||
 	    strcasecmp(aspect, "cpu") == 0) {
+#ifdef _WIN32
+		desktop_core_run_cmd_capture("tasklist /FO CSV /NH | head -n 8", top_cpu, sizeof(top_cpu));
+		snprintf(top_mem, sizeof(top_mem), "%s", top_cpu);
+#elif defined(__APPLE__)
+		desktop_core_run_cmd_capture("ps -Ao pid,comm,%cpu,%mem -r | head -n 7", top_cpu, sizeof(top_cpu));
+		desktop_core_run_cmd_capture("ps -Ao pid,comm,%cpu,%mem -m | head -n 7", top_mem, sizeof(top_mem));
+#else
 		desktop_core_run_cmd_capture("ps -eo pid,comm,%cpu,%mem --sort=-%cpu | head -n 7", top_cpu, sizeof(top_cpu));
 		desktop_core_run_cmd_capture("ps -eo pid,comm,%cpu,%mem --sort=-%mem | head -n 7", top_mem, sizeof(top_mem));
+#endif
 	}
 	if (strcasecmp(aspect, "all") == 0 || strcasecmp(aspect, "disk") == 0 || strcasecmp(aspect, "storage") == 0) {
+#ifdef _WIN32
+		ULARGE_INTEGER avail_b, total_b, free_b;
+		if (GetDiskFreeSpaceExA("C:\\", &avail_b, &total_b, &free_b) && total_b.QuadPart > 0) {
+			double tot_gb = (double)total_b.QuadPart / (1024.0 * 1024.0 * 1024.0);
+			double avail_gb = (double)avail_b.QuadPart / (1024.0 * 1024.0 * 1024.0);
+			double used_gb = tot_gb - avail_gb;
+			snprintf(disk, sizeof(disk), "C:: %.1fG used / %.1fG total (%.1fG free)", used_gb, tot_gb, avail_gb);
+		}
+#else
 		struct statvfs vfs_root;
 		if (statvfs("/", &vfs_root) == 0 && vfs_root.f_blocks > 0) {
 			double tot_gb = (double)(vfs_root.f_blocks * vfs_root.f_frsize) / (1024.0 * 1024.0 * 1024.0);
@@ -279,9 +388,16 @@ static int tool_system(const char *args, char **out_result)
 			double used_gb = tot_gb - avail_gb;
 			snprintf(disk, sizeof(disk), "/: %.1fG used / %.1fG total (%.1fG free)", used_gb, tot_gb, avail_gb);
 		}
+#endif
 	}
 	if (strcasecmp(aspect, "all") == 0 || strcasecmp(aspect, "ports") == 0 || strcasecmp(aspect, "network") == 0) {
+#ifdef _WIN32
+		desktop_core_run_cmd_capture("netstat -ano -p TCP | findstr LISTENING", ports, sizeof(ports));
+#elif defined(__APPLE__)
+		desktop_core_run_cmd_capture("lsof -i -P -n | grep LISTEN | head -n 15", ports, sizeof(ports));
+#else
 		desktop_core_run_cmd_capture("ss -tulpn 2>/dev/null | head -n 15", ports, sizeof(ports));
+#endif
 	}
 
 	char eh[300], ecpu[512], emem[512], edisk[384], eports[512], out[2560];
@@ -318,7 +434,7 @@ static void desktop_query_focused_window(desktop_win_state_t *out)
 	snprintf(out->win_sel, sizeof(out->win_sel), "%s", saved_sel);
 
 	char *foc_json = NULL;
-	if (ren_call_tool("x11_windows", "focused", &foc_json) != 0 || !foc_json) {
+	if (desktop_call_window_tool("focused", &foc_json) != 0 || !foc_json) {
 		free(foc_json);
 		return;
 	}
@@ -349,9 +465,9 @@ static void desktop_query_focused_window(desktop_win_state_t *out)
 	free(foc_json);
 }
 
-static atspi_win_ctx_t desktop_win_to_atspi(const desktop_win_state_t *w)
+static a11y_win_ctx_t desktop_win_to_a11y(const desktop_win_state_t *w)
 {
-	atspi_win_ctx_t ctx;
+	a11y_win_ctx_t ctx;
 	memset(&ctx, 0, sizeof(ctx));
 	if (!w) return ctx;
 	ctx.pid = w->pid;
@@ -398,8 +514,8 @@ static bool desktop_win_matches_sel(const desktop_win_state_t *w, const char *se
 {
 	if (!w || !sel || !*sel) return false;
 	if (w->id[0] && strcasecmp(w->id, sel) == 0) return true;
-	if (w->cls[0] && strcasestr(w->cls, sel) != NULL) return true;
-	if (w->title[0] && strcasestr(w->title, sel) != NULL) return true;
+	if (w->cls[0] && desktop_core_str_contains_ci(w->cls, sel)) return true;
+	if (w->title[0] && desktop_core_str_contains_ci(w->title, sel)) return true;
 	return false;
 }
 
@@ -419,12 +535,7 @@ static bool desktop_focus_target_win(
 	char cmd[200];
 	snprintf(cmd, sizeof(cmd), "focus %s", win_sel);
 	char *fout = NULL;
-	int rc = ren_call_tool("x11_windows", cmd, &fout);
-	if (rc != 0 && fout && strstr(fout, "unknown tool")) {
-		free(fout);
-		fout = NULL;
-		rc = ren_call_tool("window", cmd, &fout);
-	}
+	int rc = desktop_call_window_tool(cmd, &fout);
 	if (rc != 0) {
 		if (out_err && err_sz > 0) {
 			if (fout && *fout) snprintf(out_err, err_sz, "%s", fout);
@@ -434,7 +545,7 @@ static bool desktop_focus_target_win(
 		return false;
 	}
 	free(fout);
-	usleep(120000);
+	stl_sleep_ms(120);
 	desktop_query_focused_window(out_win);
 	if (!out_win->cls[0] && !out_win->title[0]) {
 		snprintf(out_win->title, sizeof(out_win->title), "%s", win_sel);
@@ -442,31 +553,26 @@ static bool desktop_focus_target_win(
 	return true;
 }
 
-static bool desktop_atspi_focus_win(void *ud)
+static bool desktop_a11y_focus_win(void *ud)
 {
 	desktop_win_state_t *w = (desktop_win_state_t *)ud;
 	const char *sel = (w && w->win_sel[0]) ? w->win_sel : (w && w->id[0] ? w->id : NULL);
 	if (!sel || !*sel) return false;
 	char cmd[200], *fout = NULL;
 	snprintf(cmd, sizeof(cmd), "focus %s", sel);
-	int rc = ren_call_tool("x11_windows", cmd, &fout);
-	if (rc != 0 && fout && strstr(fout, "unknown tool")) {
-		free(fout);
-		fout = NULL;
-		rc = ren_call_tool("window", cmd, &fout);
-	}
+	int rc = desktop_call_window_tool(cmd, &fout);
 	free(fout);
 	return rc == 0;
 }
 
-static bool desktop_atspi_is_win_focused(void *ud)
+static bool desktop_a11y_is_win_focused(void *ud)
 {
 	desktop_win_state_t *w = (desktop_win_state_t *)ud;
 	char *foc_json = NULL;
-	int rc = ren_call_tool("x11_windows", "focused", &foc_json);
+	int rc = desktop_call_window_tool("focused", &foc_json);
 	if (rc != 0 || !foc_json) {
 		free(foc_json);
-		return true; /* No x11_windows tool loaded (e.g. Wayland) */
+		return true; /* No window tool loaded (e.g. Wayland) */
 	}
 	char cur_id[32] = {0};
 	desktop_extract_json_str(foc_json, "id", cur_id, sizeof(cur_id));
@@ -477,7 +583,7 @@ static bool desktop_atspi_is_win_focused(void *ud)
 	return cur_id[0] != '\0';
 }
 
-static bool desktop_atspi_click_xy(void *ud, int x, int y, int btn)
+static bool desktop_a11y_click_xy(void *ud, int x, int y, int btn)
 {
 	(void)ud;
 	char arg[64], *out = NULL;
@@ -487,7 +593,7 @@ static bool desktop_atspi_click_xy(void *ud, int x, int y, int btn)
 	return rc == 0;
 }
 
-static bool desktop_atspi_send_key(void *ud, const char *combo)
+static bool desktop_a11y_send_key(void *ud, const char *combo)
 {
 	(void)ud;
 	if (!combo || !*combo) return false;
@@ -498,7 +604,7 @@ static bool desktop_atspi_send_key(void *ud, const char *combo)
 	return rc == 0;
 }
 
-static bool desktop_atspi_type_text(void *ud, const char *text, bool submit)
+static bool desktop_a11y_type_text(void *ud, const char *text, bool submit)
 {
 	(void)ud;
 	if (!text) return false;
@@ -513,15 +619,15 @@ static bool desktop_atspi_type_text(void *ud, const char *text, bool submit)
 	return rc == 0;
 }
 
-static atspi_ops_t desktop_make_atspi_ops(desktop_win_state_t *w)
+static a11y_ops_t desktop_make_a11y_ops(desktop_win_state_t *w)
 {
-	atspi_ops_t ops;
+	a11y_ops_t ops;
 	memset(&ops, 0, sizeof(ops));
-	ops.focus_win = desktop_atspi_focus_win;
-	ops.is_win_focused = desktop_atspi_is_win_focused;
-	ops.click_xy = desktop_atspi_click_xy;
-	ops.send_key = desktop_atspi_send_key;
-	ops.type_text = desktop_atspi_type_text;
+	ops.focus_win = desktop_a11y_focus_win;
+	ops.is_win_focused = desktop_a11y_is_win_focused;
+	ops.click_xy = desktop_a11y_click_xy;
+	ops.send_key = desktop_a11y_send_key;
+	ops.type_text = desktop_a11y_type_text;
 	ops.ud = w;
 	return ops;
 }
@@ -615,8 +721,8 @@ static int tool_read_window(const char *args, char **out_result)
 		}
 	}
 
-	atspi_win_ctx_t awin = desktop_win_to_atspi(&win);
-	if (atspi_core_read_window(&awin, inspect_mode, filter, buf, 8192)) {
+	a11y_win_ctx_t awin = desktop_win_to_a11y(&win);
+	if (a11y_core_read_window(&awin, inspect_mode, filter, buf, 8192)) {
 		size_t out_sz = strlen(buf) + 384;
 		char *out = (char *)malloc(out_sz);
 		if (!out) {
@@ -633,7 +739,7 @@ static int tool_read_window(const char *args, char **out_result)
 	free(buf);
 	char msg[512];
 	snprintf(msg, sizeof(msg),
-	         "(no AT-SPI2 or tmux text tree available for window class='%s' title='%.120s' pid=%lu)",
+	         "(no a11y or tmux text tree available for window class='%s' title='%.120s' pid=%lu)",
 	         win.cls[0] ? win.cls : "none", win.title, win.pid);
 	*out_result = strdup(msg);
 	return 0;
@@ -723,21 +829,21 @@ static int tool_ui(const char *args, char **out_result)
 		return -1;
 	}
 
-	atspi_win_ctx_t awin = desktop_win_to_atspi(&win);
-	atspi_ops_t ops = desktop_make_atspi_ops(&win);
+	a11y_win_ctx_t awin = desktop_win_to_a11y(&win);
+	a11y_ops_t ops = desktop_make_a11y_ops(&win);
 
 	if (verb == UI_CLICK || verb == UI_RCLICK) {
-		bool ok = atspi_core_click(&awin, &ops, target, verb == UI_RCLICK ? 3 : 1, msg, sizeof(msg));
+		bool ok = a11y_core_click(&awin, &ops, target, verb == UI_RCLICK ? 3 : 1, msg, sizeof(msg));
 		*out_result = strdup(msg[0] ? msg : (ok ? "ok" : "Error: ui click failed"));
 		return ok ? 0 : -1;
 	}
 	if (verb == UI_FOCUS) {
-		bool ok = atspi_core_focus(&awin, &ops, target, msg, sizeof(msg));
+		bool ok = a11y_core_focus(&awin, &ops, target, msg, sizeof(msg));
 		*out_result = strdup(msg[0] ? msg : (ok ? "ok" : "Error: ui focus failed"));
 		return ok ? 0 : -1;
 	}
 	if (verb == UI_SET) {
-		bool ok = atspi_core_set(&awin, &ops, target, text, msg, sizeof(msg));
+		bool ok = a11y_core_set(&awin, &ops, target, text, msg, sizeof(msg));
 		*out_result = strdup(msg[0] ? msg : (ok ? "ok" : "Error: ui set failed"));
 		return ok ? 0 : -1;
 	}
@@ -745,12 +851,12 @@ static int tool_ui(const char *args, char **out_result)
 	/* UI_TYPE / UI_SUBMIT */
 	char role[64] = {0}, label[128] = {0};
 	bool is_term = desktop_core_is_terminal_class(win.cls);
-	if (!atspi_core_prepare_input(&awin, &ops, target[0] ? target : NULL, is_term,
-	                              role, sizeof(role), label, sizeof(label), msg, sizeof(msg))) {
+	if (!a11y_core_prepare_input(&awin, &ops, target[0] ? target : NULL, is_term,
+	                             role, sizeof(role), label, sizeof(label), msg, sizeof(msg))) {
 		*out_result = strdup(msg[0] ? msg : "Error: no editable input focused");
 		return -1;
 	}
-	if (!desktop_atspi_type_text(&win, text, verb == UI_SUBMIT)) {
+	if (!desktop_a11y_type_text(&win, text, verb == UI_SUBMIT)) {
 		*out_result = strdup("Error: input tool unavailable to type text");
 		return -1;
 	}
