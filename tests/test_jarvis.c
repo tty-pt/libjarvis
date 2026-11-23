@@ -244,7 +244,71 @@ static void test_05_desktop_core(void)
 	char health[256] = {0};
 	desktop_core_populate_system_health(health, sizeof(health));
 	assert(strlen(health) > 10);
-	printf("  [PASS] desktop-core.h escaping, safe app resolution, and zombie-free spawn!\n");
+
+	/* Process-tree parsers & live POSIX child PID traversal */
+	unsigned long pids[4] = {0};
+	assert(desktop_core_parse_pid_lines("101\n202\n 303  404\t\n", pids, 4) == 4);
+	assert(pids[0] == 101 && pids[1] == 202 && pids[2] == 303 && pids[3] == 404);
+	assert(desktop_core_parse_pid_lines("0 abc 12x 55 66 77", pids, 2) == 2);
+	assert(pids[0] == 55 && pids[1] == 66);
+	assert(desktop_core_parse_pid_lines("", pids, 4) == 0);
+	assert(desktop_core_parse_pid_lines(NULL, pids, 4) == 0);
+
+	char comm[64];
+	desktop_core_extract_comm_basename("/usr/bin/ssh\n", comm, sizeof(comm));
+	assert(strcmp(comm, "ssh") == 0);
+	desktop_core_extract_comm_basename("  /bin/zsh  ", comm, sizeof(comm));
+	assert(strcmp(comm, "zsh") == 0);
+	desktop_core_extract_comm_basename("-zsh\r\n", comm, sizeof(comm));
+	assert(strcmp(comm, "-zsh") == 0);
+	desktop_core_extract_comm_basename("/usr/bin/", comm, sizeof(comm));
+	assert(strcmp(comm, "") == 0);
+	desktop_core_extract_comm_basename(NULL, comm, sizeof(comm));
+	assert(strcmp(comm, "") == 0);
+
+	int sync_pipe[2];
+	assert(pipe(sync_pipe) == 0);
+	pid_t child = fork();
+	assert(child >= 0);
+	if (child == 0) {
+		close(sync_pipe[1]);
+		char b;
+		ssize_t r = read(sync_pipe[0], &b, 1);
+		(void)r;
+		close(sync_pipe[0]);
+		_exit(0);
+	}
+	close(sync_pipe[0]);
+	unsigned long ch[16] = {0};
+	size_t n_ch = desktop_core_get_child_pids((unsigned long)getpid(), ch, 16);
+	bool found_child = false;
+	for (size_t i = 0; i < n_ch; i++) {
+		if (ch[i] == (unsigned long)child) found_child = true;
+	}
+	assert(found_child);
+	assert(desktop_core_pid_is_descendant((unsigned long)getpid(), (unsigned long)child));
+	assert(!desktop_core_pid_is_descendant((unsigned long)child, (unsigned long)getpid()));
+	close(sync_pipe[1]);
+	while (waitpid(child, &wst, 0) < 0 && errno == EINTR) {}
+
+	/* UTF-8 safe truncation & copy helpers */
+	char u8[8];
+	desktop_core_utf8_copy(u8, 4, "a\xC3\xA3" "b"); /* "aãb": 'a' + 2-byte 'ã', cap 4 bytes -> "aã" */
+	assert(strcmp(u8, "a\xC3\xA3") == 0);
+	desktop_core_utf8_copy(u8, 3, "a\xC3\xA3" "b"); /* cap 3 bytes splits 'ã' -> "a" */
+	assert(strcmp(u8, "a") == 0);
+	desktop_core_utf8_copy(u8, 4, "\xE2\x82\xAC" "x"); /* 3-byte Euro '€', cap 4 bytes -> "€" */
+	assert(strcmp(u8, "\xE2\x82\xAC") == 0);
+	desktop_core_utf8_copy(u8, 3, "\xE2\x82\xAC" "x"); /* cap 3 bytes splits '€' -> "" */
+	assert(strcmp(u8, "") == 0);
+	desktop_core_utf8_copy(u8, 5, "\xF0\x9F\x98\x80" "!"); /* 4-byte emoji '😀', cap 5 -> "😀" */
+	assert(strcmp(u8, "\xF0\x9F\x98\x80") == 0);
+	desktop_core_utf8_copy(u8, 4, "\xF0\x9F\x98\x80" "!"); /* cap 4 splits '😀' -> "" */
+	assert(strcmp(u8, "") == 0);
+	desktop_core_utf8_copy(u8, sizeof(u8), NULL);
+	assert(strcmp(u8, "") == 0);
+
+	printf("  [PASS] desktop-core.h escaping, safe app resolution, process parsers, UTF-8 truncation, and zombie-free spawn!\n");
 }
 
 static void test_06_zero_config_and_locales(void)

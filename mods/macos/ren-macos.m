@@ -549,15 +549,15 @@ static int tool_window(const char *args, char **out_result)
 static int tool_clipboard(const char *args, char **out_result)
 {
 	(void)args;
-	char clip[768] = {0};
+	char clip[384] = {0};
 	@autoreleasepool {
 		NSPasteboard *pb = [NSPasteboard generalPasteboard];
 		NSString *s = pb ? [pb stringForType:NSPasteboardTypeString] : nil;
-		if (s) snprintf(clip, sizeof(clip), "%s", s.UTF8String);
+		if (s) desktop_core_utf8_copy(clip, sizeof(clip), s.UTF8String);
 	}
-	char e_clip[900], buf[1200];
+	char e_clip[800], buf[1200];
 	json_esc(clip, e_clip, sizeof(e_clip));
-	snprintf(buf, sizeof(buf), "{\"primary_selection\":\"\",\"clipboard\":\"%.750s\"}", e_clip);
+	snprintf(buf, sizeof(buf), "{\"primary_selection\":\"\",\"clipboard\":\"%s\"}", e_clip);
 	*out_result = strdup(buf);
 	return 0;
 }
@@ -587,16 +587,20 @@ static char *macos_context_provider(void)
 	char wlist[512] = {0};
 	size_t woff = 0;
 	for (size_t i = 0; i < n && woff + 64 < sizeof(wlist); i++) {
+		char short_t[41];
+		desktop_core_utf8_copy(short_t, sizeof(short_t), wins[i].title);
 		woff += (size_t)snprintf(wlist + woff, sizeof(wlist) - woff,
-		                         "%s%s:'%.40s'",
+		                         "%s%s:'%s'",
 		                         i > 0 ? ", " : "",
-		                         wins[i].owner, wins[i].title);
+		                         wins[i].owner, short_t);
 	}
 
+	char foc_t[81];
+	desktop_core_utf8_copy(foc_t, sizeof(foc_t), foc.title);
 	char buf[1280];
 	snprintf(buf, sizeof(buf),
-	         "macos_focused='%s' title='%.80s' cwd='%s' windows=[%s]",
-	         foc.owner, foc.title, cwd, wlist);
+	         "macos_focused='%s' title='%s' cwd='%s' windows=[%s]",
+	         foc.owner, foc_t, cwd, wlist);
 	return strdup(buf);
 }
 

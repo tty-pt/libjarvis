@@ -1200,6 +1200,19 @@ static void do_jarvis_menu(const char *wm_override, const char *extra_mod)
 static bool cmd_in_path(const char *cmd)
 {
 	if (!cmd || !*cmd) return false;
+	char exedir[512] = {0};
+	if (stl_exe_dir(exedir, sizeof(exedir)) && exedir[0]) {
+		char ep[768];
+#ifdef _WIN32
+		snprintf(ep, sizeof(ep), "%s\\%s.exe", exedir, cmd);
+		if (jarvis_plat_is_exec(ep)) return true;
+		snprintf(ep, sizeof(ep), "%s\\%s", exedir, cmd);
+		if (jarvis_plat_is_exec(ep)) return true;
+#else
+		snprintf(ep, sizeof(ep), "%s/%s", exedir, cmd);
+		if (jarvis_plat_is_exec(ep)) return true;
+#endif
+	}
 	const char *home = get_cli_home();
 	if (home && *home) {
 		char lp[768];
@@ -1454,15 +1467,25 @@ static int do_jarvis_doctor(bool as_json)
 	bool has_edge_py  = false;
 	{
 		char venv1[768], venv2[768];
+#ifdef _WIN32
+		snprintf(venv1, sizeof(venv1), "%s/.local/share/dwm-voice/venv/Scripts/python.exe", home);
+		snprintf(venv2, sizeof(venv2), "%s/.venv/Scripts/python.exe", home);
+#else
 		snprintf(venv1, sizeof(venv1), "%s/.local/share/dwm-voice/venv/bin/python", home);
 		snprintf(venv2, sizeof(venv2), "%s/.venv/bin/python", home);
-		const char *py_cmd = cmd_in_path("python3") ? "python3" : (cmd_in_path("python") ? "python" : NULL);
-		const char *py_cands[3] = {
-			py_cmd,
+#endif
+		const char *py_cands[5] = {
+			cmd_in_path("python3") ? "python3" : NULL,
+			cmd_in_path("python")  ? "python"  : NULL,
+#ifdef _WIN32
+			cmd_in_path("py")      ? "py"      : NULL,
+#else
+			NULL,
+#endif
 			jarvis_plat_is_exec(venv1) ? venv1 : NULL,
 			jarvis_plat_is_exec(venv2) ? venv2 : NULL
 		};
-		for (int i = 0; i < 3 && !has_edge_py; i++) {
+		for (int i = 0; i < 5 && !has_edge_py; i++) {
 			if (!py_cands[i]) continue;
 			char *const py_argv[] = { (char *)py_cands[i], "-c", "import edge_tts", NULL };
 			has_edge_py = (run_argv_sync(py_argv) == 0);

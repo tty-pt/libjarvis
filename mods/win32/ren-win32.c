@@ -29,7 +29,27 @@ typedef struct {
 	char  title[256];
 	int   x, y, w, h;
 	bool  focused;
+	bool  visible;
 } w32_win_t;
+
+static void wchar_to_utf8(const WCHAR *ws, char *out, size_t out_sz)
+{
+	if (!out || out_sz == 0) return;
+	out[0] = '\0';
+	if (!ws || !*ws) return;
+	char tmp[1024];
+	int n = WideCharToMultiByte(CP_UTF8, 0, ws, -1, tmp, (int)sizeof(tmp), NULL, NULL);
+	if (n <= 0) {
+		n = WideCharToMultiByte(CP_UTF8, 0, ws, -1, out, (int)out_sz, NULL, NULL);
+		if (n <= 0) out[out_sz - 1] = '\0';
+	} else {
+		size_t copy_len = strlen(tmp);
+		if (copy_len >= out_sz) copy_len = out_sz - 1;
+		memcpy(out, tmp, copy_len);
+		out[copy_len] = '\0';
+	}
+	desktop_core_utf8_trim_tail(out);
+}
 
 static void json_esc(const char *in, char *out, size_t out_sz)
 {
@@ -58,6 +78,7 @@ static void json_esc(const char *in, char *out, size_t out_sz)
 		}
 	}
 	out[w] = '\0';
+	desktop_core_utf8_trim_tail(out);
 }
 
 static void resolve_proc_exe(DWORD pid, char *out, size_t cap)
@@ -65,9 +86,11 @@ static void resolve_proc_exe(DWORD pid, char *out, size_t cap)
 	out[0] = '\0';
 	HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
 	if (!h) return;
-	char path[MAX_PATH] = {0};
-	DWORD sz = sizeof(path);
-	if (QueryFullProcessImageNameA(h, 0, path, &sz) && sz > 0) {
+	WCHAR wpath[MAX_PATH] = {0};
+	DWORD sz = MAX_PATH;
+	if (QueryFullProcessImageNameW(h, 0, wpath, &sz) && sz > 0) {
+		char path[1024];
+		wchar_to_utf8(wpath, path, sizeof(path));
 		const char *base = strrchr(path, '\\');
 		snprintf(out, cap, "%s", base ? base + 1 : path);
 		char *dot = strrchr(out, '.');
@@ -81,11 +104,17 @@ static void fill_win_info(HWND hwnd, HWND fg, w32_win_t *w)
 	memset(w, 0, sizeof(*w));
 	w->hwnd = hwnd;
 	w->focused = (hwnd == fg);
+	w->visible = !IsIconic(hwnd);
 	GetWindowThreadProcessId(hwnd, &w->pid);
 	resolve_proc_exe(w->pid, w->cls, sizeof(w->cls));
-	if (!w->cls[0])
-		GetClassNameA(hwnd, w->cls, (int)sizeof(w->cls));
-	GetWindowTextA(hwnd, w->title, (int)sizeof(w->title));
+	if (!w->cls[0]) {
+		WCHAR wcls[128] = {0};
+		if (GetClassNameW(hwnd, wcls, (int)(sizeof(wcls) / sizeof(wcls[0]))) > 0)
+			wchar_to_utf8(wcls, w->cls, sizeof(w->cls));
+	}
+	WCHAR wtitle[256] = {0};
+	if (GetWindowTextW(hwnd, wtitle, (int)(sizeof(wtitle) / sizeof(wtitle[0]))) > 0)
+		wchar_to_utf8(wtitle, w->title, sizeof(w->title));
 	RECT rc = {0, 0, 0, 0};
 	if (GetWindowRect(hwnd, &rc)) {
 		w->x = (int)rc.left;
@@ -105,10 +134,10 @@ typedef struct {
 static BOOL CALLBACK enum_win_cb(HWND hwnd, LPARAM lp)
 {
 	w32_enum_t *st = (w32_enum_t *)lp;
-	if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return TRUE;
+	if (!IsWindowVisible(hwnd)) return TRUE;
 	LONG ex = GetWindowLongA(hwnd, GWL_EXSTYLE);
 	if (ex & WS_EX_TOOLWINDOW) return TRUE;
-	int tlen = GetWindowTextLengthA(hwnd);
+	int tlen = GetWindowTextLengthW(hwnd);
 	if (tlen <= 0) return TRUE;
 	if (st->count >= st->cap) return FALSE;
 	fill_win_info(hwnd, st->fg, &st->arr[st->count]);
@@ -129,8 +158,9 @@ static size_t query_windows(w32_win_t *arr, size_t cap, w32_win_t *out_foc)
 	return st.count;
 }
 
-static WORD vk_for_name(const char *tok)
+static WORD vk_for_name(const char *tok, BYTE *out_shift)
 {
+	if (out_shift) *out_shift = 0;
 	if (!tok || !*tok) return 0;
 	if (_stricmp(tok, "Return") == 0 || _stricmp(tok, "Enter") == 0) return VK_RETURN;
 	if (_stricmp(tok, "Tab") == 0) return VK_TAB;
@@ -156,14 +186,26 @@ static WORD vk_for_name(const char *tok)
 		int fn = atoi(tok + 1);
 		if (fn >= 1 && fn <= 24) return (WORD)(VK_F1 + fn - 1);
 	}
-	if (tok[1] == '\0') {
-		unsigned char c = (unsigned char)tok[0];
-		if (isalpha(c)) return (WORD)toupper(c);
-		if (isdigit(c)) return (WORD)c;
-		SHORT vk = VkKeyScanA((CHAR)c);
-		if (vk != -1) return (WORD)(vk & 0xFF);
+	WCHAR wtok[4] = {0};
+	int wn = MultiByteToWideChar(CP_UTF8, 0, tok, -1, wtok, 4);
+	if (wn == 2 && wtok[0] != 0) {
+		if (wtok[0] < 128 && isalpha((unsigned char)wtok[0])) return (WORD)toupper((unsigned char)wtok[0]);
+		if (wtok[0] < 128 && isdigit((unsigned char)wtok[0])) return (WORD)wtok[0];
+		SHORT vk = VkKeyScanW(wtok[0]);
+		if (vk != -1) {
+			if (out_shift) *out_shift = (BYTE)((vk >> 8) & 0x07);
+			return (WORD)(vk & 0xFF);
+		}
 	}
 	return 0;
+}
+
+static void add_mod_unique(WORD *mods, int *nmods, int max_mods, WORD m)
+{
+	for (int i = 0; i < *nmods; i++) {
+		if (mods[i] == m) return;
+	}
+	if (*nmods < max_mods) mods[(*nmods)++] = m;
 }
 
 static void win32_press_key_combo(const char *combo)
@@ -172,9 +214,10 @@ static void win32_press_key_combo(const char *combo)
 	char copy[128];
 	snprintf(copy, sizeof(copy), "%s", combo);
 
-	WORD mods[4] = {0};
+	WORD mods[8] = {0};
 	int nmods = 0;
 	WORD vk = 0;
+	BYTE implied_shift = 0;
 
 	char *tok = copy;
 	while (tok && *tok) {
@@ -182,22 +225,25 @@ static void win32_press_key_combo(const char *combo)
 		if (plus) *plus++ = '\0';
 		while (*tok == ' ') tok++;
 		if (_stricmp(tok, "ctrl") == 0 || _stricmp(tok, "control") == 0) {
-			if (nmods < 4) mods[nmods++] = VK_CONTROL;
+			add_mod_unique(mods, &nmods, 8, VK_CONTROL);
 		} else if (_stricmp(tok, "super") == 0 || _stricmp(tok, "win") == 0 ||
 		           _stricmp(tok, "meta") == 0) {
-			if (nmods < 4) mods[nmods++] = VK_LWIN;
+			add_mod_unique(mods, &nmods, 8, VK_LWIN);
 		} else if (_stricmp(tok, "alt") == 0 || _stricmp(tok, "mod1") == 0) {
-			if (nmods < 4) mods[nmods++] = VK_MENU;
+			add_mod_unique(mods, &nmods, 8, VK_MENU);
 		} else if (_stricmp(tok, "shift") == 0) {
-			if (nmods < 4) mods[nmods++] = VK_SHIFT;
+			add_mod_unique(mods, &nmods, 8, VK_SHIFT);
 		} else {
-			vk = vk_for_name(tok);
+			vk = vk_for_name(tok, &implied_shift);
 		}
 		tok = plus;
 	}
 	if (vk == 0) return;
+	if (implied_shift & 1) add_mod_unique(mods, &nmods, 8, VK_SHIFT);
+	if (implied_shift & 2) add_mod_unique(mods, &nmods, 8, VK_CONTROL);
+	if (implied_shift & 4) add_mod_unique(mods, &nmods, 8, VK_MENU);
 
-	INPUT in[10];
+	INPUT in[18];
 	memset(in, 0, sizeof(in));
 	UINT idx = 0;
 	for (int i = 0; i < nmods; i++) {
@@ -477,10 +523,12 @@ static int tool_window(const char *args, char **out_result)
 		json_esc(wins[i].cls, ec, sizeof(ec));
 		json_esc(wins[i].title, et, sizeof(et));
 		off += (size_t)snprintf(out + off, sizeof(out) - off,
-		                        "%s{\"id\":\"0x%llx\",\"class\":\"%s\",\"title\":\"%s\",\"tag\":1,\"visible\":true,\"focused\":%s}",
+		                        "%s{\"id\":\"0x%llx\",\"class\":\"%s\",\"title\":\"%s\",\"tag\":1,\"visible\":%s,\"focused\":%s}",
 		                        i > 0 ? "," : "",
 		                        (unsigned long long)(uintptr_t)wins[i].hwnd,
-		                        ec, et, wins[i].focused ? "true" : "false");
+		                        ec, et,
+		                        wins[i].visible ? "true" : "false",
+		                        wins[i].focused ? "true" : "false");
 	}
 	snprintf(out + off, sizeof(out) - off, "]}");
 	*out_result = strdup(out);
@@ -490,22 +538,30 @@ static int tool_window(const char *args, char **out_result)
 static int tool_clipboard(const char *args, char **out_result)
 {
 	(void)args;
-	char clip[768] = {0};
+	char clip[384] = {0};
 	if (OpenClipboard(NULL)) {
 		HANDLE h = GetClipboardData(CF_UNICODETEXT);
 		if (h) {
 			const WCHAR *ws = (const WCHAR *)GlobalLock(h);
 			if (ws) {
-				int n = WideCharToMultiByte(CP_UTF8, 0, ws, -1, clip, (int)sizeof(clip) - 1, NULL, NULL);
-				if (n > 0) clip[n] = '\0';
+				WCHAR wclip[256];
+				size_t wlen = 0;
+				while (wlen < 255 && ws[wlen]) {
+					wclip[wlen] = ws[wlen];
+					wlen++;
+				}
+				if (wlen == 255 && wclip[wlen - 1] >= 0xD800 && wclip[wlen - 1] <= 0xDBFF)
+					wlen--;
+				wclip[wlen] = 0;
+				wchar_to_utf8(wclip, clip, sizeof(clip));
 				GlobalUnlock(h);
 			}
 		}
 		CloseClipboard();
 	}
-	char e_clip[900], buf[1200];
+	char e_clip[800], buf[1200];
 	json_esc(clip, e_clip, sizeof(e_clip));
-	snprintf(buf, sizeof(buf), "{\"primary_selection\":\"\",\"clipboard\":\"%.750s\"}", e_clip);
+	snprintf(buf, sizeof(buf), "{\"primary_selection\":\"\",\"clipboard\":\"%s\"}", e_clip);
 	*out_result = strdup(buf);
 	return 0;
 }
@@ -533,15 +589,19 @@ static char *win32_context_provider(void)
 	char wlist[512] = {0};
 	size_t woff = 0;
 	for (size_t i = 0; i < n && woff + 64 < sizeof(wlist); i++) {
+		char short_t[41];
+		desktop_core_utf8_copy(short_t, sizeof(short_t), wins[i].title);
 		woff += (size_t)snprintf(wlist + woff, sizeof(wlist) - woff,
-		                         "%s%s:'%.40s'",
+		                         "%s%s:'%s'",
 		                         i > 0 ? ", " : "",
-		                         wins[i].cls, wins[i].title);
+		                         wins[i].cls, short_t);
 	}
+	char foc_t[81];
+	desktop_core_utf8_copy(foc_t, sizeof(foc_t), foc.title);
 	char buf[1280];
 	snprintf(buf, sizeof(buf),
-	         "win32_focused='%s' title='%.80s' windows=[%s]",
-	         foc.cls, foc.title, wlist);
+	         "win32_focused='%s' title='%s' windows=[%s]",
+	         foc.cls, foc_t, wlist);
 	return strdup(buf);
 }
 

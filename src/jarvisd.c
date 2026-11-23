@@ -3788,6 +3788,39 @@ resolve_default_whisper_models(char *main_out, size_t main_sz, char *wake_out, s
 	}
 }
 
+static void
+prepend_path_dir(const char *dir)
+{
+	if (!dir || !*dir) return;
+	const char *cur_path = stl_getenv("PATH");
+	if (!cur_path || !*cur_path) {
+		stl_setenv("PATH", dir, 1);
+		return;
+	}
+#ifdef _WIN32
+	const char sep = ';';
+#else
+	const char sep = ':';
+#endif
+	size_t dlen = strlen(dir);
+	const char *p = cur_path;
+	while (p && *p) {
+		const char *next = strchr(p, sep);
+		size_t plen = next ? (size_t)(next - p) : strlen(p);
+#ifdef _WIN32
+		if (plen == dlen && _strnicmp(p, dir, dlen) == 0)
+			return;
+#else
+		if (plen == dlen && strncmp(p, dir, dlen) == 0)
+			return;
+#endif
+		p = next ? next + 1 : NULL;
+	}
+	char new_path[4096];
+	snprintf(new_path, sizeof(new_path), "%s%c%s", dir, sep, cur_path);
+	stl_setenv("PATH", new_path, 1);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -3796,21 +3829,18 @@ main(int argc, char *argv[])
 	const char *client_req      = NULL;
 	{
 		const char *home = get_home_dir();
-		const char *cur_path = stl_getenv("PATH");
 		if (home && *home) {
 			char local_bin[512];
-			snprintf(local_bin, sizeof(local_bin), "%s/.local/bin", home);
-			if (!cur_path || !*cur_path) {
-				stl_setenv("PATH", local_bin, 1);
-			} else if (!strstr(cur_path, local_bin)) {
-				char new_path[4096];
 #ifdef _WIN32
-				snprintf(new_path, sizeof(new_path), "%s;%s", local_bin, cur_path);
+			snprintf(local_bin, sizeof(local_bin), "%s\\.local\\bin", home);
 #else
-				snprintf(new_path, sizeof(new_path), "%s:%s", local_bin, cur_path);
+			snprintf(local_bin, sizeof(local_bin), "%s/.local/bin", home);
 #endif
-				stl_setenv("PATH", new_path, 1);
-			}
+			prepend_path_dir(local_bin);
+		}
+		char exe_dir[512] = {0};
+		if (stl_exe_dir(exe_dir, sizeof(exe_dir)) && exe_dir[0]) {
+			prepend_path_dir(exe_dir);
 		}
 	}
 	int port = jarvis_rc_get_int("port", 8179);

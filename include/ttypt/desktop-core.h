@@ -48,6 +48,40 @@ static __attribute__((unused)) void desktop_core_trim_trailing(char *s)
 	}
 }
 
+static __attribute__((unused)) void desktop_core_utf8_trim_tail(char *s)
+{
+	if (!s) return;
+	size_t len = strlen(s);
+	if (len == 0 || ((unsigned char)s[len - 1] & 0x80) == 0) return;
+	size_t i = len;
+	size_t cont = 0;
+	while (i > 0 && (((unsigned char)s[i - 1]) & 0xC0) == 0x80 && cont < 3) {
+		i--;
+		cont++;
+	}
+	if (i > 0) {
+		unsigned char lead = (unsigned char)s[i - 1];
+		size_t expected = 0;
+		if ((lead & 0xE0) == 0xC0) expected = 2;
+		else if ((lead & 0xF0) == 0xE0) expected = 3;
+		else if ((lead & 0xF8) == 0xF0) expected = 4;
+		if (expected > 0 && (len - (i - 1)) < expected) {
+			s[i - 1] = '\0';
+		}
+	}
+}
+
+static __attribute__((unused)) void desktop_core_utf8_copy(char *dst, size_t dst_sz, const char *src)
+{
+	if (!dst || dst_sz == 0) return;
+	if (!src) {
+		dst[0] = '\0';
+		return;
+	}
+	snprintf(dst, dst_sz, "%s", src);
+	desktop_core_utf8_trim_tail(dst);
+}
+
 static __attribute__((unused)) void desktop_core_cap_lines(char *s, int max_lines)
 {
 	if (!s || max_lines <= 0) {
@@ -363,6 +397,141 @@ static __attribute__((unused)) void desktop_core_json_escape(const char *src, ch
 	dst[w] = '\0';
 }
 
+static __attribute__((unused)) int desktop_core_exec_capture(char *const argv[], char *out, size_t out_sz)
+{
+	if (!out || out_sz == 0) return -1;
+	out[0] = '\0';
+	if (!argv || !argv[0]) return -1;
+
+#ifdef _WIN32
+	char cmdline[2048];
+	size_t off = 0;
+	cmdline[0] = '\0';
+	for (size_t i = 0; argv[i] && off + 4 < sizeof(cmdline); i++) {
+		if (i > 0) cmdline[off++] = ' ';
+		const char *a = argv[i];
+		bool quote = (!*a || strchr(a, ' ') || strchr(a, '\t') || strchr(a, '"'));
+		if (quote && off + 1 < sizeof(cmdline)) cmdline[off++] = '"';
+		for (const char *p = a; *p && off + 2 < sizeof(cmdline); p++) {
+			if (*p == '"') cmdline[off++] = '\\';
+			cmdline[off++] = *p;
+		}
+		if (quote && off + 1 < sizeof(cmdline)) cmdline[off++] = '"';
+		cmdline[off] = '\0';
+	}
+	SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+	HANDLE r_pipe = NULL, w_pipe = NULL;
+	if (!CreatePipe(&r_pipe, &w_pipe, &sa, 0)) return -1;
+	SetHandleInformation(r_pipe, HANDLE_FLAG_INHERIT, 0);
+	STARTUPINFOA si;
+	PROCESS_INFORMATION pi;
+	memset(&si, 0, sizeof(si));
+	si.cb = sizeof(si);
+	si.dwFlags = STARTF_USESTDHANDLES;
+	si.hStdOutput = w_pipe;
+	si.hStdError = w_pipe;
+	si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+	memset(&pi, 0, sizeof(pi));
+	BOOL ok = CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+	CloseHandle(w_pipe);
+	if (!ok) { CloseHandle(r_pipe); return -1; }
+	CloseHandle(pi.hThread);
+	size_t pos = 0;
+	while (pos + 1 < out_sz) {
+		DWORD rd = 0;
+		if (!ReadFile(r_pipe, out + pos, (DWORD)(out_sz - 1 - pos), &rd, NULL) || rd == 0) break;
+		pos += rd;
+	}
+	out[pos] = '\0';
+	CloseHandle(r_pipe);
+	WaitForSingleObject(pi.hProcess, INFINITE);
+	DWORD ec = 1;
+	GetExitCodeProcess(pi.hProcess, &ec);
+	CloseHandle(pi.hProcess);
+	desktop_core_trim_trailing(out);
+	return ec == 0 ? 0 : -1;
+#else
+	int pfd[2];
+	if (pipe(pfd) < 0) return -1;
+	(void)fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
+	(void)fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
+
+	pid_t pid = fork();
+	if (pid < 0) {
+		close(pfd[0]);
+		close(pfd[1]);
+		return -1;
+	}
+	if (pid == 0) {
+		close(pfd[0]);
+		if (pfd[1] != STDOUT_FILENO) {
+			dup2(pfd[1], STDOUT_FILENO);
+			close(pfd[1]);
+		}
+		int devnull = open("/dev/null", O_RDWR);
+		if (devnull >= 0) {
+			dup2(devnull, STDIN_FILENO);
+			dup2(devnull, STDERR_FILENO);
+			if (devnull > 2) close(devnull);
+		}
+		execvp(argv[0], argv);
+		_exit(127);
+	}
+
+	close(pfd[1]);
+	size_t off = 0;
+	while (off + 1 < out_sz) {
+		ssize_t rd = read(pfd[0], out + off, out_sz - 1 - off);
+		if (rd < 0 && errno == EINTR) continue;
+		if (rd <= 0) break;
+		off += (size_t)rd;
+	}
+	out[off] = '\0';
+	close(pfd[0]);
+
+	int st = 0;
+	while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+	desktop_core_trim_trailing(out);
+	return (WIFEXITED(st) && WEXITSTATUS(st) == 0) ? 0 : -1;
+#endif
+}
+
+static __attribute__((unused)) size_t desktop_core_parse_pid_lines(const char *buf, unsigned long *out_pids, size_t max_pids)
+{
+	if (!buf || !*buf || !out_pids || max_pids == 0) return 0;
+	size_t count = 0;
+	const char *p = buf;
+	while (*p && count < max_pids) {
+		while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+		if (!*p) break;
+		char *end = NULL;
+		unsigned long cp = strtoul(p, &end, 10);
+		if (end == p) {
+			while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') p++;
+			continue;
+		}
+		if (cp > 0 && (*end == '\0' || *end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) {
+			out_pids[count++] = cp;
+		} else {
+			while (*end && *end != ' ' && *end != '\t' && *end != '\r' && *end != '\n') end++;
+		}
+		p = end;
+	}
+	return count;
+}
+
+static __attribute__((unused)) void desktop_core_extract_comm_basename(const char *raw, char *out, size_t out_sz)
+{
+	if (!out || out_sz == 0) return;
+	out[0] = '\0';
+	if (!raw) return;
+	while (*raw == ' ' || *raw == '\t' || *raw == '\r' || *raw == '\n') raw++;
+	const char *slash = strrchr(raw, '/');
+	const char *base = slash ? slash + 1 : raw;
+	snprintf(out, out_sz, "%s", base);
+	desktop_core_trim_trailing(out);
+}
+
 static __attribute__((unused)) size_t desktop_core_get_child_pids(unsigned long pid, unsigned long *out_pids, size_t max_pids)
 {
 #ifdef __linux__
@@ -374,14 +543,18 @@ static __attribute__((unused)) size_t desktop_core_get_child_pids(unsigned long 
 	char buf[1024];
 	size_t count = 0;
 	if (fgets(buf, sizeof(buf), fp)) {
-		char *saveptr = NULL;
-		for (char *tok = dc_strtok_r(buf, " \t\n", &saveptr); tok && count < max_pids; tok = dc_strtok_r(NULL, " \t\n", &saveptr)) {
-			unsigned long cp = strtoul(tok, NULL, 10);
-			if (cp > 0) out_pids[count++] = cp;
-		}
+		count = desktop_core_parse_pid_lines(buf, out_pids, max_pids);
 	}
 	fclose(fp);
 	return count;
+#elif defined(__APPLE__)
+	if (!pid || !out_pids || max_pids == 0) return 0;
+	char pid_str[32], buf[1024];
+	snprintf(pid_str, sizeof(pid_str), "%lu", pid);
+	char *const argv[] = { "pgrep", "-P", pid_str, NULL };
+	if (desktop_core_exec_capture(argv, buf, sizeof(buf)) != 0 || !buf[0])
+		return 0;
+	return desktop_core_parse_pid_lines(buf, out_pids, max_pids);
 #else
 	(void)pid; (void)out_pids; (void)max_pids;
 	return 0;
@@ -402,6 +575,14 @@ static __attribute__((unused)) void desktop_core_read_proc_comm(unsigned long pi
 		desktop_core_trim_trailing(out);
 	}
 	fclose(fp);
+#elif defined(__APPLE__)
+	if (!pid) return;
+	char pid_str[32], buf[256];
+	snprintf(pid_str, sizeof(pid_str), "%lu", pid);
+	char *const argv[] = { "ps", "-o", "comm=", "-p", pid_str, NULL };
+	if (desktop_core_exec_capture(argv, buf, sizeof(buf)) == 0 && buf[0]) {
+		desktop_core_extract_comm_basename(buf, out, out_sz);
+	}
 #else
 	(void)pid;
 #endif
@@ -424,6 +605,17 @@ static __attribute__((unused)) void desktop_core_read_proc_cmdline(unsigned long
 	}
 	out[rd] = '\0';
 	desktop_core_trim_trailing(out);
+#elif defined(__APPLE__)
+	if (!pid) return;
+	char pid_str[32], buf[1024];
+	snprintf(pid_str, sizeof(pid_str), "%lu", pid);
+	char *const argv[] = { "ps", "-o", "args=", "-p", pid_str, NULL };
+	if (desktop_core_exec_capture(argv, buf, sizeof(buf)) == 0 && buf[0]) {
+		const char *p = buf;
+		while (*p == ' ' || *p == '\t') p++;
+		snprintf(out, out_sz, "%s", p);
+		desktop_core_trim_trailing(out);
+	}
 #else
 	(void)pid;
 #endif
@@ -435,6 +627,25 @@ static __attribute__((unused)) bool desktop_core_is_shell_name(const char *comm)
 	const char *c = (comm[0] == '-') ? (comm + 1) : comm;
 	return strcmp(c, "bash") == 0 || strcmp(c, "zsh") == 0 ||
 	       strcmp(c, "sh") == 0 || strcmp(c, "fish") == 0 || strcmp(c, "dash") == 0;
+}
+
+static __attribute__((unused)) unsigned long desktop_core_resolve_shell_pid(unsigned long term_pid)
+{
+	if (!term_pid) return 0;
+	unsigned long sh_pids[16];
+	size_t n_sh = desktop_core_get_child_pids(term_pid, sh_pids, 16);
+	if (n_sh == 0) return 0;
+	unsigned long sh_pid = sh_pids[n_sh - 1];
+#ifdef __APPLE__
+	char comm[64];
+	desktop_core_read_proc_comm(sh_pid, comm, sizeof(comm));
+	if (strcmp(comm, "login") == 0) {
+		unsigned long login_ch[16];
+		size_t n_lc = desktop_core_get_child_pids(sh_pid, login_ch, 16);
+		if (n_lc > 0) sh_pid = login_ch[n_lc - 1];
+	}
+#endif
+	return sh_pid;
 }
 
 static __attribute__((unused)) void desktop_core_resolve_pid_cwd_fg(unsigned long pid, char *out_cwd, size_t cwd_sz, char *out_fg, size_t fg_sz)
@@ -452,9 +663,8 @@ static __attribute__((unused)) void desktop_core_resolve_pid_cwd_fg(unsigned lon
 	if (!pid) return;
 
 #ifdef __linux__
-	unsigned long sh_pids[16];
-	size_t n_sh = desktop_core_get_child_pids(pid, sh_pids, 16);
-	unsigned long sh_pid = n_sh > 0 ? sh_pids[n_sh - 1] : pid;
+	unsigned long sh_pid = desktop_core_resolve_shell_pid(pid);
+	if (!sh_pid) sh_pid = pid;
 
 	char cwd_link[128], resolved[512];
 	snprintf(cwd_link, sizeof(cwd_link), "/proc/%lu/cwd", sh_pid);
@@ -474,21 +684,31 @@ static __attribute__((unused)) void desktop_core_resolve_pid_cwd_fg(unsigned lon
 		}
 	}
 #elif defined(__APPLE__)
+	unsigned long sh_pid = desktop_core_resolve_shell_pid(pid);
+	if (!sh_pid) sh_pid = pid;
+
 	char cmd[128], buf[512];
-	snprintf(cmd, sizeof(cmd), "lsof -a -d cwd -Fn -p %lu 2>/dev/null | sed -n 's/^n//p' | head -n1", pid);
+	snprintf(cmd, sizeof(cmd), "lsof -a -d cwd -Fn -p %lu 2>/dev/null | sed -n 's/^n//p' | head -n1", sh_pid);
 	desktop_core_run_cmd_capture(cmd, buf, sizeof(buf));
 	if (buf[0] && out_cwd && cwd_sz > 0) snprintf(out_cwd, cwd_sz, "%s", buf);
+
+	if (out_fg && fg_sz > 0) {
+		unsigned long sub_pids[16];
+		size_t n_sub = desktop_core_get_child_pids(sh_pid, sub_pids, 16);
+		unsigned long target_p = n_sub > 0 ? sub_pids[n_sub - 1] : sh_pid;
+		desktop_core_read_proc_cmdline(target_p, out_fg, fg_sz);
+		if (!out_fg[0]) {
+			desktop_core_read_proc_comm(target_p, out_fg, fg_sz);
+		}
+	}
 #endif
 }
 
 static __attribute__((unused)) bool desktop_core_is_idle_shell_pid(unsigned long pid)
 {
-#ifdef __linux__
-	if (!pid) return false;
-	unsigned long sh_pids[16];
-	size_t n_sh = desktop_core_get_child_pids(pid, sh_pids, 16);
-	if (n_sh == 0) return false;
-	unsigned long sh_pid = sh_pids[n_sh - 1];
+#if defined(__linux__) || defined(__APPLE__)
+	unsigned long sh_pid = desktop_core_resolve_shell_pid(pid);
+	if (!sh_pid) return false;
 
 	unsigned long sub_pids[16];
 	size_t n_sub = desktop_core_get_child_pids(sh_pid, sub_pids, 16);
@@ -526,12 +746,9 @@ static __attribute__((unused)) bool desktop_core_is_idle_shell_pid(unsigned long
 
 static __attribute__((unused)) bool desktop_core_is_ssh_pid(unsigned long pid)
 {
-#ifdef __linux__
-	if (!pid) return false;
-	unsigned long sh_pids[16];
-	size_t n_sh = desktop_core_get_child_pids(pid, sh_pids, 16);
-	if (n_sh == 0) return false;
-	unsigned long sh_pid = sh_pids[n_sh - 1];
+#if defined(__linux__) || defined(__APPLE__)
+	unsigned long sh_pid = desktop_core_resolve_shell_pid(pid);
+	if (!sh_pid) return false;
 
 	unsigned long sub_pids[16];
 	size_t n_sub = desktop_core_get_child_pids(sh_pid, sub_pids, 16);
@@ -929,105 +1146,6 @@ static __attribute__((unused)) bool desktop_core_is_browser_name(const char *nam
 		if (desktop_core_str_contains_ci(name, BROWSERS[i])) return true;
 	}
 	return false;
-}
-
-static __attribute__((unused)) int desktop_core_exec_capture(char *const argv[], char *out, size_t out_sz)
-{
-	if (!out || out_sz == 0) return -1;
-	out[0] = '\0';
-	if (!argv || !argv[0]) return -1;
-
-#ifdef _WIN32
-	char cmdline[2048];
-	size_t off = 0;
-	cmdline[0] = '\0';
-	for (size_t i = 0; argv[i] && off + 4 < sizeof(cmdline); i++) {
-		if (i > 0) cmdline[off++] = ' ';
-		const char *a = argv[i];
-		bool quote = (!*a || strchr(a, ' ') || strchr(a, '\t') || strchr(a, '"'));
-		if (quote && off + 1 < sizeof(cmdline)) cmdline[off++] = '"';
-		for (const char *p = a; *p && off + 2 < sizeof(cmdline); p++) {
-			if (*p == '"') cmdline[off++] = '\\';
-			cmdline[off++] = *p;
-		}
-		if (quote && off + 1 < sizeof(cmdline)) cmdline[off++] = '"';
-		cmdline[off] = '\0';
-	}
-	SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
-	HANDLE r_pipe = NULL, w_pipe = NULL;
-	if (!CreatePipe(&r_pipe, &w_pipe, &sa, 0)) return -1;
-	SetHandleInformation(r_pipe, HANDLE_FLAG_INHERIT, 0);
-	STARTUPINFOA si;
-	PROCESS_INFORMATION pi;
-	memset(&si, 0, sizeof(si));
-	si.cb = sizeof(si);
-	si.dwFlags = STARTF_USESTDHANDLES;
-	si.hStdOutput = w_pipe;
-	si.hStdError = w_pipe;
-	si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-	memset(&pi, 0, sizeof(pi));
-	BOOL ok = CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
-	CloseHandle(w_pipe);
-	if (!ok) { CloseHandle(r_pipe); return -1; }
-	CloseHandle(pi.hThread);
-	size_t pos = 0;
-	while (pos + 1 < out_sz) {
-		DWORD rd = 0;
-		if (!ReadFile(r_pipe, out + pos, (DWORD)(out_sz - 1 - pos), &rd, NULL) || rd == 0) break;
-		pos += rd;
-	}
-	out[pos] = '\0';
-	CloseHandle(r_pipe);
-	WaitForSingleObject(pi.hProcess, INFINITE);
-	DWORD ec = 1;
-	GetExitCodeProcess(pi.hProcess, &ec);
-	CloseHandle(pi.hProcess);
-	desktop_core_trim_trailing(out);
-	return ec == 0 ? 0 : -1;
-#else
-	int pfd[2];
-	if (pipe(pfd) < 0) return -1;
-	(void)fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
-	(void)fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
-
-	pid_t pid = fork();
-	if (pid < 0) {
-		close(pfd[0]);
-		close(pfd[1]);
-		return -1;
-	}
-	if (pid == 0) {
-		close(pfd[0]);
-		if (pfd[1] != STDOUT_FILENO) {
-			dup2(pfd[1], STDOUT_FILENO);
-			close(pfd[1]);
-		}
-		int devnull = open("/dev/null", O_RDWR);
-		if (devnull >= 0) {
-			dup2(devnull, STDIN_FILENO);
-			dup2(devnull, STDERR_FILENO);
-			if (devnull > 2) close(devnull);
-		}
-		execvp(argv[0], argv);
-		_exit(127);
-	}
-
-	close(pfd[1]);
-	size_t off = 0;
-	while (off + 1 < out_sz) {
-		ssize_t rd = read(pfd[0], out + off, out_sz - 1 - off);
-		if (rd < 0 && errno == EINTR) continue;
-		if (rd <= 0) break;
-		off += (size_t)rd;
-	}
-	out[off] = '\0';
-	close(pfd[0]);
-
-	int st = 0;
-	while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
-	desktop_core_trim_trailing(out);
-	return (WIFEXITED(st) && WEXITSTATUS(st) == 0) ? 0 : -1;
-#endif
 }
 
 static __attribute__((unused)) bool desktop_core_pid_is_descendant(unsigned long root_pid, unsigned long candidate_pid)
