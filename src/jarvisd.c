@@ -12,6 +12,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <pthread.h>
+#include <pwd.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -236,8 +237,33 @@ write_all(int fd, const char *buf, size_t len)
 static const char *
 get_username(void)
 {
+	static char cached[64];
 	const char *u = getenv("USER");
-	return (u && *u) ? u : "quirinpa";
+	if (u && *u)
+		return u;
+	struct passwd pw, *res = NULL;
+	char buf[512];
+	if (getpwuid_r(getuid(), &pw, buf, sizeof(buf), &res) == 0 && res && res->pw_name && res->pw_name[0]) {
+		snprintf(cached, sizeof(cached), "%s", res->pw_name);
+		return cached;
+	}
+	return "user";
+}
+
+static const char *
+get_home_dir(void)
+{
+	static char cached[512];
+	const char *home = getenv("HOME");
+	if (home && *home)
+		return home;
+	struct passwd pw, *res = NULL;
+	char buf[512];
+	if (getpwuid_r(getuid(), &pw, buf, sizeof(buf), &res) == 0 && res && res->pw_dir && res->pw_dir[0]) {
+		snprintf(cached, sizeof(cached), "%s", res->pw_dir);
+		return cached;
+	}
+	return "/tmp";
 }
 
 static void
@@ -452,6 +478,80 @@ calc_frame_db(const int16_t *samples, size_t n, vad_biquad_t *flt)
 	return db;
 }
 
+static ssize_t
+run_cmd_capture_argv(char *const argv[], char *out, size_t out_sz)
+{
+	if (!out || out_sz == 0)
+		return -1;
+	out[0] = '\0';
+	int pfd[2];
+	if (pipe(pfd) < 0)
+		return -1;
+	fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
+	fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
+	pid_t pid = fork();
+	if (pid < 0) {
+		close(pfd[0]);
+		close(pfd[1]);
+		return -1;
+	}
+	if (pid == 0) {
+		int dn = open("/dev/null", O_RDWR);
+		if (dn >= 0) {
+			dup2(dn, STDIN_FILENO);
+			dup2(dn, STDERR_FILENO);
+			if (dn > STDERR_FILENO)
+				close(dn);
+		}
+		dup2(pfd[1], STDOUT_FILENO);
+		close(pfd[0]);
+		close(pfd[1]);
+		execvp(argv[0], argv);
+		_exit(127);
+	}
+	close(pfd[1]);
+	size_t total = 0;
+	while (total + 1 < out_sz) {
+		ssize_t r = read(pfd[0], out + total, out_sz - 1 - total);
+		if (r < 0 && errno == EINTR)
+			continue;
+		if (r <= 0)
+			break;
+		total += (size_t)r;
+	}
+	out[total] = '\0';
+	close(pfd[0]);
+	int st = 0;
+	while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+	return (WIFEXITED(st) && WEXITSTATUS(st) == 0) ? (ssize_t)total : -1;
+}
+
+static void
+spawn_argv_detached(char *const argv[])
+{
+	pid_t pid = fork();
+	if (pid < 0)
+		return;
+	if (pid == 0) {
+		pid_t gp = fork();
+		if (gp == 0) {
+			int dn = open("/dev/null", O_RDWR);
+			if (dn >= 0) {
+				dup2(dn, STDIN_FILENO);
+				dup2(dn, STDOUT_FILENO);
+				dup2(dn, STDERR_FILENO);
+				if (dn > STDERR_FILENO)
+					close(dn);
+			}
+			execvp(argv[0], argv);
+			_exit(127);
+		}
+		_exit(0);
+	}
+	int st = 0;
+	while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+}
+
 /* Post-wake speaker auto-ducking: temporarily attenuate active playback while
  * capturing the spoken command after "Jarvis" wakes, then restore afterward.
  */
@@ -462,28 +562,23 @@ duck_speaker_for_command(void)
 {
 	if (g_saved_sink_vol > 0.0)
 		return;
-	FILE *fp = popen("wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null", "r");
-	if (!fp)
+	char buf[128];
+	char *const get_argv[] = {"wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@", NULL};
+	if (run_cmd_capture_argv(get_argv, buf, sizeof(buf)) <= 0)
 		return;
-	char buf[128] = {0};
-	if (fgets(buf, sizeof(buf), fp)) {
-		if (!strstr(buf, "[MUTED]")) {
-			double v = 0.0;
-			if (sscanf(buf, "Volume: %lf", &v) == 1 && v > 0.22) {
-				g_saved_sink_vol = v;
-				double ducked = v * 0.35;
-				if (ducked < 0.12)
-					ducked = 0.12;
-				char cmd[128];
-				snprintf(cmd, sizeof(cmd),
-				         "wpctl set-volume @DEFAULT_AUDIO_SINK@ %.2f >/dev/null 2>&1 &",
-				         ducked);
-				int rc = system(cmd);
-				(void)rc;
-			}
-		}
+	if (strstr(buf, "[MUTED]"))
+		return;
+	double v = 0.0;
+	if (sscanf(buf, "Volume: %lf", &v) == 1 && v > 0.22) {
+		g_saved_sink_vol = v;
+		double ducked = v * 0.35;
+		if (ducked < 0.12)
+			ducked = 0.12;
+		char vstr[32];
+		snprintf(vstr, sizeof(vstr), "%.2f", ducked);
+		char *const set_argv[] = {"wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", vstr, NULL};
+		spawn_argv_detached(set_argv);
 	}
-	pclose(fp);
 }
 
 static bool
@@ -514,12 +609,10 @@ restore_speaker_after_command(const char *spoken_cmd)
 	/* Do not overwrite volume if the user's command itself adjusts volume/mute */
 	if (is_volume_adjustment_command(spoken_cmd))
 		return;
-	char cmd[128];
-	snprintf(cmd, sizeof(cmd),
-	         "wpctl set-volume @DEFAULT_AUDIO_SINK@ %.2f >/dev/null 2>&1 &",
-	         restore_v);
-	int rc = system(cmd);
-	(void)rc;
+	char vstr[32];
+	snprintf(vstr, sizeof(vstr), "%.2f", restore_v);
+	char *const set_argv[] = {"wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", vstr, NULL};
+	spawn_argv_detached(set_argv);
 }
 
 static int
@@ -530,21 +623,18 @@ spawn_pw_record(pid_t *out_pid)
 	jarvis_rc_get("pw_target", NULL, target, sizeof(target));
 	if (!target[0] || strcasecmp(target, "auto") == 0) {
 		target[0] = '\0';
-		FILE *sfp = popen("pactl list sources short 2>/dev/null", "r");
-		if (sfp) {
-			char sline[512];
-			while (fgets(sline, sizeof(sline), sfp)) {
-				char *tok = strtok(sline, " \t\r\n");
-				while (tok) {
-					if (strcmp(tok, "jarvis_aec_source") == 0) {
-						snprintf(target, sizeof(target), "jarvis_aec_source");
-						break;
-					}
-					tok = strtok(NULL, " \t\r\n");
+		char sources_buf[4096];
+		char *const pactl_argv[] = {"pactl", "list", "sources", "short", NULL};
+		if (run_cmd_capture_argv(pactl_argv, sources_buf, sizeof(sources_buf)) > 0) {
+			char *save = NULL;
+			for (char *tok = strtok_r(sources_buf, " \t\r\n", &save);
+			     tok;
+			     tok = strtok_r(NULL, " \t\r\n", &save)) {
+				if (strcmp(tok, "jarvis_aec_source") == 0) {
+					snprintf(target, sizeof(target), "jarvis_aec_source");
+					break;
 				}
-				if (target[0]) break;
 			}
-			pclose(sfp);
 		}
 	}
 	if (target[0])
@@ -2185,8 +2275,8 @@ handle_jarvis_wait_ex(int srv, int cli, struct whisper_context *ctx_wake, int n_
 	int final_tail_f = operating_mode ? 12 : 18;
 	int soft_limit_f = (eff_silence_ms / FRAME_MS) + (operating_mode ? 10 : 18);
 	int spec_early_f = (eff_silence_ms * 7) / (10 * FRAME_MS);
-	if (spec_early_f < 28)
-		spec_early_f = 28;
+	if (spec_early_f < 25)
+		spec_early_f = 25;
 	if (spec_early_f > 45)
 		spec_early_f = 45;
 
@@ -3053,7 +3143,7 @@ read_jarvis_runtime_cfg(char *lang, size_t lang_sz,
 	if (*out_conv_followup_ms < 0 || *out_conv_followup_ms > 3600000)
 		*out_conv_followup_ms = 9000;
 	if (out_cmd_silence_ms) {
-		int cs = jarvis_rc_get_int("cmd_silence_ms", 900);
+		int cs = jarvis_rc_get_int("cmd_silence_ms", 750);
 		if (cs < 560)
 			cs = 560;
 		if (cs > 10000)
@@ -3065,9 +3155,7 @@ read_jarvis_runtime_cfg(char *lang, size_t lang_sz,
 static void
 init_daemon_runtime(void)
 {
-	const char *home = getenv("HOME");
-	if (!home || !*home)
-		home = "/home/quirinpa";
+	const char *home = get_home_dir();
 
 	const char *u = get_username();
 	char chime_wav[256], done_wav[256];
@@ -3106,9 +3194,7 @@ init_daemon_runtime(void)
 static int
 ensure_ren_jarvis_session(const char *sock_path, const struct sockaddr_un *addr)
 {
-	const char *home = getenv("HOME");
-	if (!home || !*home)
-		home = "/home/quirinpa";
+	const char *home = get_home_dir();
 
 	unlink(sock_path);
 
@@ -3470,7 +3556,7 @@ run_inprocess_jarvis_turn(int srv, struct whisper_context *ctx_wake, int n_threa
 	snprintf(acting_pid, sizeof(acting_pid), "/tmp/jarvis-acting-%s.pid", u);
 
 	char lang[32], wm_surface[64];
-	int fcfg = 0, conv_followup_ms = 9000, cmd_silence_ms = 900;
+	int fcfg = 0, conv_followup_ms = 9000, cmd_silence_ms = 750;
 	read_jarvis_runtime_cfg(lang, sizeof(lang), &fcfg, &conv_followup_ms, &cmd_silence_ms);
 	jarvis_resolve_wm(wm_surface, sizeof(wm_surface));
 
@@ -4013,9 +4099,7 @@ is_english_only_whisper_model(const char *path)
 static void
 resolve_default_whisper_models(char *main_out, size_t main_sz, char *wake_out, size_t wake_sz)
 {
-	const char *home = getenv("HOME");
-	if (!home || !*home)
-		home = "/home/quirinpa";
+	const char *home = get_home_dir();
 
 	char eff_lang[32] = {0};
 	jarvis_resolve_lang(NULL, eff_lang, sizeof(eff_lang));

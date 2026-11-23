@@ -23,6 +23,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <pthread.h>
+#include <pwd.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -396,21 +397,64 @@ static void resolve_default_lang(char *out, size_t out_sz)
 	snprintf(out, out_sz, "en");
 }
 
+static void resolve_local_voice(const char *def_lang, char *out_voice, size_t out_sz)
+{
+	const char *home = getenv("HOME");
+	bool is_pt = (def_lang && strncmp(def_lang, "pt", 2) == 0);
+	if (is_pt) {
+		if (home && *home) {
+			char p[512];
+			snprintf(p, sizeof(p), "%s/.local/share/piper/pt_PT-tugao-medium.onnx", home);
+			if (access(p, R_OK) == 0) {
+				snprintf(out_voice, out_sz, "piper:pt_PT-tugao-medium");
+				return;
+			}
+			snprintf(p, sizeof(p), "%s/.local/share/piper/pt_PT-miro.onnx", home);
+			if (access(p, R_OK) == 0) {
+				snprintf(out_voice, out_sz, "piper:pt_PT-miro");
+				return;
+			}
+		}
+		snprintf(out_voice, out_sz, "pm_tuga");
+		return;
+	}
+	if (home && *home) {
+		char p[512];
+		if (def_lang && strcmp(def_lang, "en-us") == 0) {
+			snprintf(p, sizeof(p), "%s/.local/share/piper/en_US-lessac-high.onnx", home);
+			if (access(p, R_OK) == 0) {
+				snprintf(out_voice, out_sz, "piper:us");
+				return;
+			}
+		}
+		snprintf(p, sizeof(p), "%s/.local/share/piper/en_GB-northern_english_male-medium.onnx", home);
+		if (access(p, R_OK) == 0) {
+			snprintf(out_voice, out_sz, "piper:gb");
+			return;
+		}
+	}
+	snprintf(out_voice, out_sz, "bm_daniel");
+}
+
 static void get_tts_voice(char *out, size_t out_sz)
 {
-	const char *env_v = getenv("JARVIS_VOICE");
-	if (env_v && *env_v && strcasecmp(env_v, "auto") != 0) {
-		snprintf(out, out_sz, "%s", env_v);
-		return;
-	}
-	char rc_v[64] = {0};
-	if (rc_lookup("tts_voice", rc_v, sizeof(rc_v)) &&
-	    rc_v[0] && strcasecmp(rc_v, "auto") != 0) {
-		snprintf(out, out_sz, "%s", rc_v);
-		return;
-	}
 	char def_lang[32];
 	resolve_default_lang(def_lang, sizeof(def_lang));
+
+	const char *req = getenv("JARVIS_VOICE");
+	char rc_v[64] = {0};
+	if ((!req || !*req) && rc_lookup("tts_voice", rc_v, sizeof(rc_v)) && rc_v[0])
+		req = rc_v;
+
+	if (req && *req && strcasecmp(req, "auto") != 0) {
+		if (strcasecmp(req, "local") == 0) {
+			resolve_local_voice(def_lang, out, out_sz);
+			return;
+		}
+		snprintf(out, out_sz, "%s", req);
+		return;
+	}
+
 	if (strcmp(def_lang, "pt-br") == 0) {
 		snprintf(out, out_sz, "edge:pt-BR-FranciscaNeural");
 	} else if (strncmp(def_lang, "pt", 2) == 0) {
@@ -432,6 +476,12 @@ static void get_tts_voice(char *out, size_t out_sz)
 	}
 }
 
+void jarvis_tts_resolve_voice(char *out, size_t out_sz)
+{
+	if (!out || out_sz == 0) return;
+	get_tts_voice(out, out_sz);
+}
+
 static void set_mic_mute(bool muted)
 {
 	/* Never mute the user's microphone source during TTS synthesis or playback so
@@ -444,8 +494,18 @@ static void set_mic_mute(bool muted)
 static void write_tts_active_state(const char *text, bool active)
 {
 	static char s_accum[2048] = {0};
+	char ubuf[64] = {0};
 	const char *u = getenv("USER");
-	if (!u || !*u) u = "quirinpa";
+	if (!u || !*u) {
+		struct passwd pw, *res = NULL;
+		char pbuf[512];
+		if (getpwuid_r(getuid(), &pw, pbuf, sizeof(pbuf), &res) == 0 && res && res->pw_name && res->pw_name[0]) {
+			snprintf(ubuf, sizeof(ubuf), "%s", res->pw_name);
+			u = ubuf;
+		} else {
+			u = "user";
+		}
+	}
 	char path[256], tmp[280];
 	snprintf(path, sizeof(path), "/tmp/jarvis-tts-active-%s.state", u);
 	if (!active) {
@@ -1485,33 +1545,7 @@ static int read_exact_edge_timeout(int fd, void *buf, size_t len, int timeout_ms
 
 static void resolve_edge_fallback_voice(bool is_pt, char *out_voice, size_t out_sz)
 {
-	const char *home = getenv("HOME");
-	if (is_pt) {
-		if (home && *home) {
-			char p[512];
-			snprintf(p, sizeof(p), "%s/.local/share/piper/pt_PT-tugao-medium.onnx", home);
-			if (access(p, R_OK) == 0) {
-				snprintf(out_voice, out_sz, "piper:pt_PT-tugao-medium");
-				return;
-			}
-			snprintf(p, sizeof(p), "%s/.local/share/piper/pt_PT-miro.onnx", home);
-			if (access(p, R_OK) == 0) {
-				snprintf(out_voice, out_sz, "piper:pt_PT-miro");
-				return;
-			}
-		}
-		snprintf(out_voice, out_sz, "pm_tuga");
-		return;
-	}
-	if (home && *home) {
-		char p[512];
-		snprintf(p, sizeof(p), "%s/.local/share/piper/en_GB-northern_english_male-medium.onnx", home);
-		if (access(p, R_OK) == 0) {
-			snprintf(out_voice, out_sz, "piper:gb");
-			return;
-		}
-	}
-	snprintf(out_voice, out_sz, "bm_daniel");
+	resolve_local_voice(is_pt ? "pt" : "en", out_voice, out_sz);
 }
 
 static int16_t *synthesize_edge_tts(const char *seg_text, const char *voice, size_t *out_samples, int *out_rate, uint64_t my_gen)

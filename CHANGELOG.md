@@ -2,6 +2,27 @@
 
 All notable changes to `libjarvis` (`@tty-pt/jarvis`) are documented in this file.
 
+## [1.2.0] - 2026-11-23
+
+### Added
+- **Zero-Config `auto` Defaults & One-Line Language Switching (`src/jarvisd.c`, `src/jarvis-tts.c`, `src/jarvis-ontology.c`, `src/jarvis.c`, `data/ontology.json`)**:
+  - `lang = auto` resolves system locale (`LC_ALL`/`LC_MESSAGES`/`LANG`, defaulting to `en`), and switching `lang = pt-pt` (or `en-us`, `es`, `fr`, `de`, `it`) automatically configures Whisper STT language, `ontology.json` wake-word/phrases/UI strings, and neural TTS voice without per-feature overrides.
+  - Added `tts_voice = local` (`JARVIS_VOICE=local`) to resolve local Piper ONNX (`piper:pt_PT-tugao-medium`, `piper:gb`, `piper:us`) or Kokoro fallback (`pm_tuga`, `bm_daniel`) with zero network calls.
+  - Added `pw_target = auto` (`jarvis_aec_source` auto-detection with `data/99-jarvis-aec.conf` PipeWire drop-in), `wm = auto`, and `whisper_model = auto` discovery.
+  - Added `jarvis restart`, `jarvis doctor`, `jarvis setup`, and `jarvis locales` CLI subcommands.
+- **Persistent Edge-TTS Worker & 32-Slot LRU PCM Cache (`src/jarvis-tts.c`, `scripts/edge-tts-pcm`)**:
+  - Replaced per-clause Python subprocess spawning with a persistent `edge-tts-pcm --serve` framing worker and 32-slot in-memory PCM LRU cache (`<5ms` repeat-phrase synthesis) with bounded timeout fallback to local ONNX.
+- **Standalone Desktop & Window Manager Modules (`mods/ren-jarvis/`, `mods/desktop/`, `mods/x11/`, `mods/firefox/`, `mods/sway/`, `mods/hyprland/`)**:
+  - Consolidated desktop automation into `ren-jarvis.so`, `ren-desktop.so`, `ren-x11.so`, `ren-firefox.so`, `ren-sway.so`, and `ren-hyprland.so` under `mods/`, with `browser` `open_url` load-wait/read and `window_list` / screen geometry reporting.
+
+### Changed
+- **End-to-End Voice Latency & `ren`-Only Dispatch (`src/jarvisd.c`, `src/jarvis.c`)**:
+  - Completed the `ren`-only architecture over `/tmp/ren-jarvis-$USER.sock` with thin `bin/jarvis` CLI and removed legacy duplicate `libjarvis` agent/solver stacks.
+  - Added dynamic `whisper_full_params.audio_ctx` sizing (rounded up from captured speech frames instead of fixed `1500` frames) for ~2–3x faster short-command Whisper decoding.
+  - Lowered default `cmd_silence_ms` from `900ms` to `750ms` (with `spec_early_f` floor adjusted from `28` to `25` frames = `500ms`) for snappier VAD endpointing without clipping pauses.
+  - Replaced `popen()` / `system()` shell invocations in `jarvisd` wake-time speaker ducking/restoration (`wpctl`) and PipeWire source discovery (`pactl`) with direct zero-shell `fork()`/`execvp()` helpers, and replaced hardcoded user/home fallbacks across `jarvisd.c`, `jarvis.c`, `libjarvis.c`, and `jarvis-tts.c` with thread-safe `getpwuid_r()` lookups.
+  - Restored clean `SIGCHLD` child reaping and fixed follow-up barge-in cancellation across turns.
+
 ## [1.1.0] - 2026-11-20
 
 ### Added

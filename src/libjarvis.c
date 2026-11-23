@@ -2,6 +2,7 @@
 #include <strings.h>
 
 #ifndef __wasm__
+#include <pwd.h>
 #include <unistd.h>
 #endif
 
@@ -452,8 +453,18 @@ static bool normalize_lang_tag(const char *raw, char *out, size_t out_sz)
 static bool resolve_kbd_layout_lang(char *out, size_t out_sz)
 {
 #ifndef __wasm__
+	char ubuf[64] = {0};
 	const char *u = getenv("USER");
-	if (!u || !*u) u = "quirinpa";
+	if (!u || !*u) {
+		struct passwd pw, *res = NULL;
+		char pbuf[512];
+		if (getpwuid_r(getuid(), &pw, pbuf, sizeof(pbuf), &res) == 0 && res && res->pw_name && res->pw_name[0]) {
+			snprintf(ubuf, sizeof(ubuf), "%s", res->pw_name);
+			u = ubuf;
+		} else {
+			u = "user";
+		}
+	}
 	char path[256], buf[32] = {0};
 	snprintf(path, sizeof(path), "/tmp/dwm-kbd-%s.state", u);
 	FILE *fp = fopen(path, "r");

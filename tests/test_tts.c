@@ -181,7 +181,81 @@ int main(void)
 	unsetenv("JARVIS_NO_TTS");
 	printf("  [PASS] Busy barge-in interrupt (%ldms) & zero-child/zero-zombie cleanup verified!\n", barge_ms);
 
+	/* 5. Offline local voice mode (JARVIS_VOICE=local & tts_voice=local) */
+	const char *old_home = getenv("HOME");
+	char *saved_home = old_home ? strdup(old_home) : NULL;
+	char fake_home[512], fake_local[544], fake_share[576], fake_piper[600];
+	snprintf(fake_home, sizeof(fake_home), "%s/home", tmpdir);
+	snprintf(fake_local, sizeof(fake_local), "%s/.local", fake_home);
+	snprintf(fake_share, sizeof(fake_share), "%s/share", fake_local);
+	snprintf(fake_piper, sizeof(fake_piper), "%s/piper", fake_share);
+	assert(mkdir(fake_home, 0755) == 0);
+	assert(mkdir(fake_local, 0755) == 0);
+	assert(mkdir(fake_share, 0755) == 0);
+	assert(mkdir(fake_piper, 0755) == 0);
+	setenv("HOME", fake_home, 1);
+
+	/* 5a. Empty piper dir -> Kokoro fallback per language */
+	char vbuf[64] = {0};
+	setenv("JARVIS_VOICE", "local", 1);
+	setenv("JARVIS_LANG", "pt-pt", 1);
+	jarvis_tts_resolve_voice(vbuf, sizeof(vbuf));
+	assert(strcmp(vbuf, "pm_tuga") == 0);
+
+	setenv("JARVIS_LANG", "en", 1);
+	jarvis_tts_resolve_voice(vbuf, sizeof(vbuf));
+	assert(strcmp(vbuf, "bm_daniel") == 0);
+
+	/* 5b. With Piper ONNX models present -> prefers local Piper model matching language */
+	char onnx_pt[640], onnx_gb[640], onnx_us[640];
+	snprintf(onnx_pt, sizeof(onnx_pt), "%s/pt_PT-tugao-medium.onnx", fake_piper);
+	snprintf(onnx_gb, sizeof(onnx_gb), "%s/en_GB-northern_english_male-medium.onnx", fake_piper);
+	snprintf(onnx_us, sizeof(onnx_us), "%s/en_US-lessac-high.onnx", fake_piper);
+	FILE *op = fopen(onnx_pt, "wb"); assert(op); fclose(op);
+	op = fopen(onnx_gb, "wb"); assert(op); fclose(op);
+	op = fopen(onnx_us, "wb"); assert(op); fclose(op);
+
+	setenv("JARVIS_LANG", "pt-pt", 1);
+	jarvis_tts_resolve_voice(vbuf, sizeof(vbuf));
+	assert(strcmp(vbuf, "piper:pt_PT-tugao-medium") == 0);
+
+	setenv("JARVIS_LANG", "en-gb", 1);
+	jarvis_tts_resolve_voice(vbuf, sizeof(vbuf));
+	assert(strcmp(vbuf, "piper:gb") == 0);
+
+	setenv("JARVIS_LANG", "en-us", 1);
+	jarvis_tts_resolve_voice(vbuf, sizeof(vbuf));
+	assert(strcmp(vbuf, "piper:us") == 0);
+
+	/* 5c. RC tts_voice=local works without JARVIS_VOICE env var */
+	unsetenv("JARVIS_VOICE");
+	{
+		FILE *fp = fopen(rc_path, "w");
+		assert(fp != NULL);
+		fprintf(fp, "lang = pt-pt\ntts_voice = local\n");
+		fclose(fp);
+	}
+	unsetenv("JARVIS_LANG");
+	jarvis_tts_resolve_voice(vbuf, sizeof(vbuf));
+	assert(strcmp(vbuf, "piper:pt_PT-tugao-medium") == 0);
+	printf("  [PASS] Local offline voice mode (tts_voice=local / JARVIS_VOICE=local) verified!\n");
+
 	/* Cleanup */
+	unlink(onnx_pt);
+	unlink(onnx_gb);
+	unlink(onnx_us);
+	rmdir(fake_piper);
+	rmdir(fake_share);
+	rmdir(fake_local);
+	rmdir(fake_home);
+	if (saved_home) {
+		setenv("HOME", saved_home, 1);
+		free(saved_home);
+	} else {
+		unsetenv("HOME");
+	}
+	unsetenv("JARVIS_LANG");
+	unsetenv("JARVIS_VOICE");
 	unsetenv("JARVISRC");
 	unsetenv("JARVIS_EDGE_TTS_BIN");
 	unsetenv("JARVIS_EDGE_TTS_TIMEOUT_MS");

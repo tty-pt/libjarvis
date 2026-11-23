@@ -60,10 +60,19 @@ static void print_usage(const char *prog)
 }
 
 #ifndef _WIN32
+#include <pwd.h>
 static const char *get_cli_username(void)
 {
+	static char cached[64];
 	const char *u = getenv("USER");
-	return (u && *u) ? u : "quirinpa";
+	if (u && *u) return u;
+	struct passwd pw, *res = NULL;
+	char buf[512];
+	if (getpwuid_r(getuid(), &pw, buf, sizeof(buf), &res) == 0 && res && res->pw_name && res->pw_name[0]) {
+		snprintf(cached, sizeof(cached), "%s", res->pw_name);
+		return cached;
+	}
+	return "user";
 }
 
 static void resolve_rc_file(char *out, size_t out_sz)
@@ -73,8 +82,18 @@ static void resolve_rc_file(char *out, size_t out_sz)
 		snprintf(out, out_sz, "%s", env_rc);
 		return;
 	}
+	char hbuf[512] = {0};
 	const char *home = getenv("HOME");
-	if (!home || !*home) home = "/tmp";
+	if (!home || !*home) {
+		struct passwd pw, *res = NULL;
+		char pbuf[512];
+		if (getpwuid_r(getuid(), &pw, pbuf, sizeof(pbuf), &res) == 0 && res && res->pw_dir && res->pw_dir[0]) {
+			snprintf(hbuf, sizeof(hbuf), "%s", res->pw_dir);
+			home = hbuf;
+		} else {
+			home = "/tmp";
+		}
+	}
 	snprintf(out, out_sz, "%s/.jarvisrc", home);
 	if (access(out, R_OK) != 0) {
 		char alt[512];
