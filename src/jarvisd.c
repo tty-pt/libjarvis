@@ -2260,9 +2260,13 @@ handle_jarvis_wait_ex(int srv, int cli, struct whisper_context *ctx_wake, int n_
 							interrupt_tts_and_clear_cache();
 					} else if (wm == 0) {
 						if (tts_on || (tts_was_active_in_utter && active_tts[0])) {
-							if (is_bargein_stop_phrase(raw_res) || (operating_mode && is_op_abort_phrase(raw_res))) {
+							if (operating_mode && (is_bargein_stop_phrase(raw_res) || is_op_abort_phrase(raw_res))) {
 								interrupt_tts_and_clear_cache();
 								candidate = raw_res;
+							} else if (!operating_mode && is_bargein_stop_phrase(raw_res)) {
+								interrupt_tts_and_clear_cache();
+								tts_was_active_in_utter = 0;
+								live_cmd[0] = '\0';
 							} else if (!is_tts_self_echo(raw_res, active_tts)) {
 								if (tts_on)
 									interrupt_tts_and_clear_cache();
@@ -2884,15 +2888,25 @@ handle_jarvis_wait_ex(int srv, int cli, struct whisper_context *ctx_wake, int n_
 						continue;
 					} else if (wm == 0) {
 						if (tts_on || (tts_was_active_in_utter && active_tts[0])) {
-							if (is_bargein_stop_phrase(final_raw) ||
-							    (operating_mode && is_op_abort_phrase(final_raw)) ||
-							    ((is_followup_window || operating_mode) && !is_tts_self_echo(final_raw, active_tts))) {
+							if (operating_mode && (is_bargein_stop_phrase(final_raw) || is_op_abort_phrase(final_raw))) {
+								if (tts_on)
+									interrupt_tts_and_clear_cache();
+								snprintf(live_cmd, sizeof(live_cmd), "%s", final_raw);
+							} else if (!operating_mode && is_bargein_stop_phrase(final_raw)) {
+								interrupt_tts_and_clear_cache();
+								tts_was_active_in_utter = 0;
+								live_cmd[0] = '\0';
+							} else if ((is_followup_window || operating_mode) && !is_tts_self_echo(final_raw, active_tts)) {
 								if (tts_on)
 									interrupt_tts_and_clear_cache();
 								snprintf(live_cmd, sizeof(live_cmd), "%s", final_raw);
 							} else {
 								live_cmd[0] = '\0';
 							}
+						} else if (!operating_mode && is_bargein_stop_phrase(final_raw)) {
+							interrupt_tts_and_clear_cache();
+							tts_was_active_in_utter = 0;
+							live_cmd[0] = '\0';
 						} else {
 							snprintf(live_cmd, sizeof(live_cmd), "%s", final_raw);
 						}

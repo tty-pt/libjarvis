@@ -24,6 +24,13 @@
 #include <unistd.h>
 
 #define FIREFOX_CORE_MAX_TABS 16
+#define FF_INSPECT_BUF_SZ     8192
+
+#define FF_ATSPI_STATE_BUSY     3
+#define FF_ATSPI_STATE_DEFUNCT  6
+#define FF_ATSPI_STATE_FOCUSED  12
+#define FF_ATSPI_STATE_SELECTED 23
+#define FF_ATSPI_STATE_SHOWING  25
 
 typedef struct {
 	int  index;
@@ -32,10 +39,21 @@ typedef struct {
 } firefox_tab_t;
 
 typedef struct {
+	bool found;
+	bool showing;
+	bool defunct;
+	bool busy;
+	int  child_count;
+	char url[512];
+	char title[256];
+} ff_doc_state_t;
+
+typedef struct {
 	bool (*focus_browser)(void *ud);
 	bool (*is_browser_focused)(void *ud);
 	bool (*get_focused_geometry)(void *ud, int *x, int *y, int *w, int *h);
 	void (*click_xy)(void *ud, int x, int y, int btn);
+	int  (*should_abort)(void *ud);
 	void *ud;
 } firefox_core_ops_t;
 
@@ -156,7 +174,7 @@ static char *firefox_core_decompress_mozlz4(const char *path, size_t *out_len)
 	return (char *)out;
 }
 
-static size_t firefox_core_populate_tabs(firefox_tab_t *out_tabs, size_t max_tabs)
+static __attribute__((unused)) size_t firefox_core_populate_tabs(firefox_tab_t *out_tabs, size_t max_tabs)
 {
 	if (!out_tabs || max_tabs == 0) return 0;
 	const char *home = getenv("HOME");
@@ -406,6 +424,7 @@ static void ff_clean_atspi_text(const char *raw, char *clean_txt, size_t clean_s
 	if (raw) {
 		for (const unsigned char *p = (const unsigned char *)raw; *p && cw + 2 < clean_sz; ) {
 			if (p[0] == 0xEF && p[1] == 0xBF && p[2] == 0xBC) {
+				if (cw > 0 && clean_txt[cw - 1] != ' ') clean_txt[cw++] = ' ';
 				p += 3;
 				continue;
 			}
@@ -430,13 +449,76 @@ static void ff_clean_atspi_text(const char *raw, char *clean_txt, size_t clean_s
 	clean_txt[cw] = '\0';
 }
 
-static void ff_walk_browser_node(
-	void *node, int depth, bool in_doc, const char *filter_query,
-	const firefox_core_ops_t *ops,
-	char *out, size_t out_sz, size_t *off, int *visited)
+typedef struct {
+	const firefox_core_ops_t *ops;
+	const char               *filter_query;
+	bool                      read_mode;
+	size_t                    skip_chars;
+	size_t                    seen_chars;
+	bool                      truncated;
+	char                     *out;
+	size_t                    out_sz;
+	size_t                    off;
+	int                       visited;
+} ff_walk_ctx_t;
+
+static void ff_emit_line(ff_walk_ctx_t *ctx, const char *line)
 {
-	if (!node || depth > 24 || *visited > 2800 || *off + 110 >= out_sz) return;
-	(*visited)++;
+	if (!ctx || !line || !*line || ctx->truncated || ctx->out_sz < 96) return;
+	size_t len = strlen(line);
+	if (ctx->seen_chars + len <= ctx->skip_chars) {
+		ctx->seen_chars += len;
+		return;
+	}
+	size_t start = (ctx->skip_chars > ctx->seen_chars) ? (ctx->skip_chars - ctx->seen_chars) : 0;
+	ctx->seen_chars += len;
+	size_t rem = len - start;
+	size_t limit = ctx->out_sz - 80;
+	if (ctx->off >= limit) {
+		ctx->truncated = true;
+		return;
+	}
+	size_t avail = limit - ctx->off;
+	if (rem > avail) {
+		memcpy(ctx->out + ctx->off, line + start, avail);
+		ctx->off += avail;
+		ctx->out[ctx->off] = '\0';
+		ctx->truncated = true;
+		return;
+	}
+	memcpy(ctx->out + ctx->off, line + start, rem);
+	ctx->off += rem;
+	ctx->out[ctx->off] = '\0';
+}
+
+static bool ff_is_readable_text_role(const char *role)
+{
+	if (!role) return false;
+	return strcmp(role, "heading") == 0 ||
+	       strcmp(role, "paragraph") == 0 ||
+	       strcmp(role, "link") == 0 ||
+	       strcmp(role, "alert") == 0 ||
+	       strcmp(role, "status") == 0 ||
+	       strcmp(role, "blockquote") == 0 ||
+	       strcmp(role, "caption") == 0 ||
+	       strcmp(role, "pre") == 0 ||
+	       strcmp(role, "text") == 0 ||
+	       strcmp(role, "static") == 0 ||
+	       strcmp(role, "label") == 0 ||
+	       strcmp(role, "description term") == 0 ||
+	       strcmp(role, "description value") == 0 ||
+	       strcmp(role, "list item") == 0 ||
+	       strcmp(role, "table cell") == 0 ||
+	       strcmp(role, "section") == 0 ||
+	       strcmp(role, "article") == 0;
+}
+
+static void ff_walk_browser_node(
+	void *node, int depth, bool in_doc, const char *active_filter,
+	ff_walk_ctx_t *ctx)
+{
+	if (!node || !ctx || depth > 24 || ctx->visited > 4000 || ctx->truncated) return;
+	ctx->visited++;
 
 	void *err = NULL;
 	char *role = g_ff_atspi.get_role_name(node, &err);
@@ -444,12 +526,16 @@ static void ff_walk_browser_node(
 	char *name = g_ff_atspi.get_name(node, &err);
 
 	bool now_in_doc = in_doc;
-	const char *child_filter = filter_query;
+	const char *child_filter = active_filter;
 	bool skip_children = false;
+
+	err = NULL;
+	int n_children = g_ff_atspi.get_child_count(node, &err);
 
 	if (role) {
 		if (strcmp(role, "document web") == 0 || strcmp(role, "document frame") == 0) {
-			if (!ff_node_has_state(node, 25) || ff_node_has_state(node, 38)) {
+			if (!ff_node_has_state(node, FF_ATSPI_STATE_SHOWING) ||
+			    ff_node_has_state(node, FF_ATSPI_STATE_DEFUNCT)) {
 				g_ff_atspi.g_free(role);
 				if (name) g_ff_atspi.g_free(name);
 				return;
@@ -470,27 +556,31 @@ static void ff_walk_browser_node(
 					child_filter = NULL;
 				}
 			}
-			*off += (size_t)snprintf(out + *off, out_sz - *off,
-			                         "[%s] %s%s%s\n",
-			                         role,
-			                         (name && *name) ? name : "",
-			                         (doc_url && *doc_url) ? " url=" : "",
-			                         (doc_url && *doc_url) ? doc_url : "");
+			char line[768];
+			snprintf(line, sizeof(line), "[%s] %s%s%s\n",
+			         role,
+			         (name && *name) ? name : "",
+			         (doc_url && *doc_url) ? " url=" : "",
+			         (doc_url && *doc_url) ? doc_url : "");
+			ff_emit_line(ctx, line);
 			if (doc_url) g_ff_atspi.g_free(doc_url);
-		} else if (!in_doc && strcmp(role, "frame") == 0 && name && *name) {
-			*off += (size_t)snprintf(out + *off, out_sz - *off, "[frame] %s\n", name);
-		} else if (!in_doc && strcmp(role, "page tab") == 0 && name && *name) {
+		} else if (!in_doc && !ctx->read_mode && strcmp(role, "frame") == 0 && name && *name) {
+			char line[320];
+			snprintf(line, sizeof(line), "[frame] %s\n", name);
+			ff_emit_line(ctx, line);
+		} else if (!in_doc && !ctx->read_mode && strcmp(role, "page tab") == 0 && name && *name) {
 			int cx = 0, cy = 0;
 			char coord_buf[32] = {0};
-			if (ff_get_node_center(node, ops, &cx, &cy)) {
+			if (ff_get_node_center(node, ctx->ops, &cx, &cy)) {
 				snprintf(coord_buf, sizeof(coord_buf), " @(%d,%d)", cx, cy);
 			}
-			bool is_sel = ff_node_has_state(node, 23);
-			*off += (size_t)snprintf(out + *off, out_sz - *off,
-			                         "[page tab%s%s] %s\n",
-			                         coord_buf, is_sel ? " *ACTIVE*" : "", name);
+			bool is_sel = ff_node_has_state(node, FF_ATSPI_STATE_SELECTED);
+			char line[320];
+			snprintf(line, sizeof(line), "[page tab%s%s] %s\n",
+			         coord_buf, is_sel ? " *ACTIVE*" : "", name);
+			ff_emit_line(ctx, line);
 			skip_children = true;
-		} else if (now_in_doc &&
+		} else if (now_in_doc && !ctx->read_mode &&
 		           (ff_is_interactive_role(role) || strcmp(role, "heading") == 0)) {
 			char *txt = NULL;
 			if ((!name || !*name) && g_ff_atspi.text_get_text) {
@@ -511,10 +601,11 @@ static void ff_walk_browser_node(
 
 			if (matches && clean_txt[0]) {
 				int cx = 0, cy = 0;
-				if (ff_get_node_center(node, ops, &cx, &cy)) {
-					*off += (size_t)snprintf(out + *off, out_sz - *off,
-					                         "[%s @(%d,%d)] %.95s\n",
-					                         role, cx, cy, clean_txt);
+				if (ff_get_node_center(node, ctx->ops, &cx, &cy)) {
+					char line[256];
+					snprintf(line, sizeof(line), "[%s @(%d,%d)] %.120s\n",
+					         role, cx, cy, clean_txt);
+					ff_emit_line(ctx, line);
 					if (strcmp(role, "table row") == 0 ||
 					    strcmp(role, "button") == 0 ||
 					    strcmp(role, "push button") == 0 ||
@@ -527,40 +618,62 @@ static void ff_walk_browser_node(
 				}
 			}
 			if (txt) g_ff_atspi.g_free(txt);
+		} else if (now_in_doc && ctx->read_mode &&
+		           (ff_is_readable_text_role(role) || ff_is_interactive_role(role))) {
+			bool is_leaf = (n_children <= 0);
+			bool is_atomic = (strcmp(role, "heading") == 0 ||
+			                  strcmp(role, "link") == 0 ||
+			                  strcmp(role, "button") == 0 ||
+			                  strcmp(role, "push button") == 0 ||
+			                  strcmp(role, "toggle button") == 0 ||
+			                  strcmp(role, "entry") == 0 ||
+			                  strcmp(role, "combo box") == 0 ||
+			                  strcmp(role, "alert") == 0 ||
+			                  strcmp(role, "status") == 0);
+			if (is_leaf || (is_atomic && name && *name)) {
+				char *txt = NULL;
+				if ((!name || !*name) && g_ff_atspi.text_get_text) {
+					void *terr = NULL;
+					txt = g_ff_atspi.text_get_text(node, 0, 400, &terr);
+				}
+				const char *best_txt = (name && *name) ? name : ((txt && *txt) ? txt : "");
+				char clean_txt[360] = {0};
+				ff_clean_atspi_text(best_txt, clean_txt, sizeof(clean_txt));
+
+				bool matches = true;
+				if (child_filter && *child_filter) {
+					matches = ff_str_ci(clean_txt, child_filter) ||
+					          (name && ff_str_ci(name, child_filter));
+				}
+
+				if (matches && clean_txt[0]) {
+					char line[420];
+					if (strcmp(role, "static") == 0 || strcmp(role, "text") == 0 ||
+					    strcmp(role, "paragraph") == 0 || strcmp(role, "section") == 0 ||
+					    strcmp(role, "article") == 0) {
+						snprintf(line, sizeof(line), "%s\n", clean_txt);
+					} else {
+						snprintf(line, sizeof(line), "[%s] %s\n", role, clean_txt);
+					}
+					ff_emit_line(ctx, line);
+					if (is_atomic) skip_children = true;
+				}
+				if (txt) g_ff_atspi.g_free(txt);
+			}
 		}
 	}
 
 	if (role) g_ff_atspi.g_free(role);
 	if (name) g_ff_atspi.g_free(name);
-	if (skip_children) return;
+	if (skip_children || ctx->truncated) return;
 
-	err = NULL;
-	int n = g_ff_atspi.get_child_count(node, &err);
-	if (n > 80) n = 80;
-	if (now_in_doc && (!child_filter || !*child_filter) && n > 10) {
-		for (int i = 0; i < 6 && *off + 110 < out_sz; i++) {
-			err = NULL;
-			void *ch = g_ff_atspi.get_child_at_index(node, i, &err);
-			if (ch) {
-				ff_walk_browser_node(ch, depth + 1, now_in_doc, child_filter, ops, out, out_sz, off, visited);
-				g_ff_atspi.g_unref(ch);
-			}
-		}
-		for (int i = n - 4; i < n && *off + 110 < out_sz; i++) {
-			err = NULL;
-			void *ch = g_ff_atspi.get_child_at_index(node, i, &err);
-			if (ch) {
-				ff_walk_browser_node(ch, depth + 1, now_in_doc, child_filter, ops, out, out_sz, off, visited);
-				g_ff_atspi.g_unref(ch);
-			}
-		}
-		return;
-	}
-	for (int i = 0; i < n && *off + 110 < out_sz; i++) {
+	int n = n_children;
+	if (n > 150) n = 150;
+	for (int i = 0; i < n && !ctx->truncated; i++) {
 		err = NULL;
 		void *ch = g_ff_atspi.get_child_at_index(node, i, &err);
 		if (ch) {
-			ff_walk_browser_node(ch, depth + 1, now_in_doc, child_filter, ops, out, out_sz, off, visited);
+			ff_walk_browser_node(ch, depth + 1, now_in_doc, child_filter, ctx);
 			g_ff_atspi.g_unref(ch);
 		}
 	}
@@ -641,7 +754,8 @@ static void ff_find_interactive_node(void *node, int depth, bool in_doc, bool in
 
 	bool now_in_doc = in_doc;
 	if (role && (strcmp(role, "document web") == 0 || strcmp(role, "document frame") == 0)) {
-		if (!ff_node_has_state(node, 25) || ff_node_has_state(node, 38)) {
+		if (!ff_node_has_state(node, FF_ATSPI_STATE_SHOWING) ||
+		    ff_node_has_state(node, FF_ATSPI_STATE_DEFUNCT)) {
 			g_ff_atspi.g_free(role);
 			if (name) g_ff_atspi.g_free(name);
 			return;
@@ -732,7 +846,8 @@ static void ff_walk_entry_focus(void *node, int depth, bool in_doc, ff_entry_foc
 
 	bool now_in_doc = in_doc;
 	if (role && (strcmp(role, "document web") == 0 || strcmp(role, "document frame") == 0)) {
-		if (!ff_node_has_state(node, 25) || ff_node_has_state(node, 38)) {
+		if (!ff_node_has_state(node, FF_ATSPI_STATE_SHOWING) ||
+		    ff_node_has_state(node, FF_ATSPI_STATE_DEFUNCT)) {
 			g_ff_atspi.g_free(role);
 			if (name) g_ff_atspi.g_free(name);
 			return;
@@ -741,14 +856,14 @@ static void ff_walk_entry_focus(void *node, int depth, bool in_doc, ff_entry_foc
 	}
 
 	if (now_in_doc && role && (strcmp(role, "entry") == 0 || strcmp(role, "combo box") == 0)) {
-		if (ff_node_has_state(node, 12)) {
+		if (ff_node_has_state(node, FF_ATSPI_STATE_FOCUSED)) {
 			ctx->any_entry_focused = true;
 		} else {
 			int nc = g_ff_atspi.get_child_count(node, &err);
 			for (int i = 0; i < nc && i < 4; i++) {
 				void *ch = g_ff_atspi.get_child_at_index(node, i, &err);
 				if (ch) {
-					if (ff_node_has_state(ch, 12)) ctx->any_entry_focused = true;
+					if (ff_node_has_state(ch, FF_ATSPI_STATE_FOCUSED)) ctx->any_entry_focused = true;
 					g_ff_atspi.g_unref(ch);
 				}
 			}
@@ -791,7 +906,7 @@ static void ff_walk_entry_focus(void *node, int depth, bool in_doc, ff_entry_foc
 	}
 }
 
-static void firefox_core_ensure_entry_focused(const firefox_core_ops_t *ops)
+static __attribute__((unused)) void firefox_core_ensure_entry_focused(const firefox_core_ops_t *ops)
 {
 	if (!ops || !ops->is_browser_focused || !ops->is_browser_focused(ops->ud)) return;
 	if (!ff_ensure_atspi_loaded()) return;
@@ -824,7 +939,7 @@ static void firefox_core_ensure_entry_focused(const firefox_core_ops_t *ops)
 	}
 }
 
-static bool firefox_core_click_element(
+static __attribute__((unused)) bool firefox_core_click_element(
 	const firefox_core_ops_t *ops,
 	const char *query, int btn,
 	char *out_role, size_t role_sz,
@@ -874,19 +989,24 @@ static bool firefox_core_click_element(
 	return true;
 }
 
-static void ff_extract_html_fallback(const char *file_url, char *out, size_t out_sz, size_t *off)
+static void ff_extract_html_fallback(
+	const char *file_url, size_t skip_chars,
+	char *out, size_t out_sz, size_t *off, bool *out_truncated)
 {
 	if (!file_url || strncmp(file_url, "file://", 7) != 0 || *off + 128 >= out_sz) return;
 	const char *path = file_url + 7;
 	FILE *fp = fopen(path, "r");
 	if (!fp) return;
-	char buf[4096];
+	char buf[16384];
 	size_t rd = fread(buf, 1, sizeof(buf) - 1, fp);
 	fclose(fp);
 	buf[rd] = '\0';
 
 	bool in_tag = false, in_script_or_style = false;
-	for (size_t i = 0; i < rd && *off + 2 < out_sz; i++) {
+	size_t seen = 0;
+	char prev_c = ' ';
+	size_t limit = (out_sz > 80) ? (out_sz - 80) : out_sz;
+	for (size_t i = 0; i < rd; i++) {
 		if (buf[i] == '<') {
 			if (strncasecmp(buf + i, "<script", 7) == 0 || strncasecmp(buf + i, "<style", 6) == 0) {
 				in_script_or_style = true;
@@ -898,45 +1018,69 @@ static void ff_extract_html_fallback(const char *file_url, char *out, size_t out
 		}
 		if (buf[i] == '>') {
 			in_tag = false;
-			if (!in_script_or_style && *off > 0 && out[*off - 1] != '\n' && out[*off - 1] != ' ') {
-				out[(*off)++] = ' ';
+			if (!in_script_or_style && seen > 0 && prev_c != '\n' && prev_c != ' ') {
+				prev_c = ' ';
+				if (seen >= skip_chars) {
+					if (*off >= limit) {
+						if (out_truncated) *out_truncated = true;
+						break;
+					}
+					out[(*off)++] = ' ';
+				}
+				seen++;
 			}
 			continue;
 		}
 		if (!in_tag && !in_script_or_style) {
 			char c = buf[i];
 			if (c == '\n' || c == '\r' || c == '\t') c = ' ';
-			if (c == ' ' && *off > 0 && out[*off - 1] == ' ') continue;
-			out[(*off)++] = c;
+			if (c == ' ' && prev_c == ' ') continue;
+			prev_c = c;
+			if (seen >= skip_chars) {
+				if (*off >= limit) {
+					if (out_truncated) *out_truncated = true;
+					break;
+				}
+				out[(*off)++] = c;
+			}
+			seen++;
 		}
 	}
 	out[*off] = '\0';
 }
 
-static bool firefox_core_inspect_a11y(
+static bool ff_collect_a11y(
 	const firefox_core_ops_t *ops,
 	const firefox_tab_t *tabs, size_t tab_count,
 	const char *filter_query,
+	bool read_mode, size_t skip_chars,
 	char *out, size_t out_sz)
 {
 	if (!out || out_sz == 0) return false;
 	out[0] = '\0';
-	size_t off = 0;
+
+	ff_walk_ctx_t ctx;
+	memset(&ctx, 0, sizeof(ctx));
+	ctx.ops = ops;
+	ctx.filter_query = filter_query;
+	ctx.read_mode = read_mode;
+	ctx.skip_chars = skip_chars;
+	ctx.out = out;
+	ctx.out_sz = out_sz;
 
 	if (ff_ensure_atspi_loaded()) {
 		void *desktop = g_ff_atspi.get_desktop(0);
 		if (desktop) {
 			void *err = NULL;
 			int n_apps = g_ff_atspi.get_child_count(desktop, &err);
-			for (int i = 0; i < n_apps && off + 128 < out_sz; i++) {
+			for (int i = 0; i < n_apps && !ctx.truncated; i++) {
 				err = NULL;
 				void *app = g_ff_atspi.get_child_at_index(desktop, i, &err);
 				if (!app) continue;
 				err = NULL;
 				char *aname = g_ff_atspi.get_name(app, &err);
 				if (ff_is_browser_name(aname)) {
-					int visited = 0;
-					ff_walk_browser_node(app, 0, false, filter_query, ops, out, out_sz, &off, &visited);
+					ff_walk_browser_node(app, 0, false, filter_query, &ctx);
 				}
 				if (aname) g_ff_atspi.g_free(aname);
 				g_ff_atspi.g_unref(app);
@@ -946,17 +1090,43 @@ static bool firefox_core_inspect_a11y(
 	}
 
 	if (!strstr(out, "[document web]") && tabs) {
-		for (size_t i = 0; i < tab_count && off + 128 < out_sz; i++) {
-			off += (size_t)snprintf(out + off, out_sz - off,
-			                        "[tab %d] %s (%s)\n",
-			                        tabs[i].index, tabs[i].title, tabs[i].url);
+		for (size_t i = 0; i < tab_count && !ctx.truncated && ctx.off + 128 < out_sz; i++) {
+			char hdr[800];
+			snprintf(hdr, sizeof(hdr), "[tab %d] %s (%s)\n",
+			         tabs[i].index, tabs[i].title, tabs[i].url);
+			ff_emit_line(&ctx, hdr);
 			if (strncmp(tabs[i].url, "file://", 7) == 0) {
-				ff_extract_html_fallback(tabs[i].url, out, out_sz, &off);
+				size_t rem_skip = (ctx.skip_chars > ctx.seen_chars) ? (ctx.skip_chars - ctx.seen_chars) : 0;
+				ff_extract_html_fallback(tabs[i].url, rem_skip, out, out_sz, &ctx.off, &ctx.truncated);
 			}
 		}
 	}
 
-	return off > 0;
+	if (ctx.truncated && ctx.off + 64 < out_sz) {
+		snprintf(out + ctx.off, out_sz - ctx.off,
+		         "\n[truncated; use 'browser read %zu' for more]",
+		         skip_chars + ctx.off);
+	}
+
+	return ctx.off > 0;
+}
+
+static __attribute__((unused)) bool firefox_core_inspect_a11y(
+	const firefox_core_ops_t *ops,
+	const firefox_tab_t *tabs, size_t tab_count,
+	const char *filter_query,
+	char *out, size_t out_sz)
+{
+	return ff_collect_a11y(ops, tabs, tab_count, filter_query, false, 0, out, out_sz);
+}
+
+static __attribute__((unused)) bool firefox_core_read_a11y(
+	const firefox_core_ops_t *ops,
+	const firefox_tab_t *tabs, size_t tab_count,
+	const char *filter_query, size_t skip_chars,
+	char *out, size_t out_sz)
+{
+	return ff_collect_a11y(ops, tabs, tab_count, filter_query, true, skip_chars, out, out_sz);
 }
 
 typedef struct {
@@ -984,7 +1154,7 @@ static void ff_walk_page_tab(void *node, int depth, ff_tab_switch_ctx_t *ctx)
 	}
 	if (role && strcmp(role, "page tab") == 0 && name && *name) {
 		if (ff_str_ci(name, ctx->query)) {
-			if (ff_node_has_state(node, 23)) {
+			if (ff_node_has_state(node, FF_ATSPI_STATE_SELECTED)) {
 				ctx->active_matches = true;
 				snprintf(ctx->matched_title, sizeof(ctx->matched_title), "%.120s", name);
 			} else if (!ctx->found_other) {
@@ -1034,7 +1204,8 @@ static void ff_walk_page_tab(void *node, int depth, ff_tab_switch_ctx_t *ctx)
 	}
 }
 
-static bool firefox_core_switch_tab(const firefox_core_ops_t *ops, const char *query, char *out_tab_title, size_t title_sz)
+static __attribute__((unused)) bool firefox_core_switch_tab(
+	const firefox_core_ops_t *ops, const char *query, char *out_tab_title, size_t title_sz)
 {
 	if (out_tab_title && title_sz > 0) out_tab_title[0] = '\0';
 	if (!query || !*query || !ff_ensure_atspi_loaded()) return false;
@@ -1082,7 +1253,7 @@ static bool firefox_core_switch_tab(const firefox_core_ops_t *ops, const char *q
 	return false;
 }
 
-static void firefox_core_extract_domain_kw(const char *url, char *out, size_t out_sz)
+static __attribute__((unused)) void firefox_core_extract_domain_kw(const char *url, char *out, size_t out_sz)
 {
 	if (!out || out_sz == 0) return;
 	out[0] = '\0';
@@ -1097,6 +1268,205 @@ static void firefox_core_extract_domain_kw(const char *url, char *out, size_t ou
 		dlen++;
 	}
 	out[dlen] = '\0';
+}
+
+static void ff_normalize_url(const char *url, char *out, size_t out_sz, bool host_only)
+{
+	if (!out || out_sz == 0) return;
+	out[0] = '\0';
+	if (!url) return;
+	while (*url && isspace((unsigned char)*url)) url++;
+	const char *p = strstr(url, "://");
+	p = p ? (p + 3) : url;
+	if (strncasecmp(p, "www.", 4) == 0) p += 4;
+
+	size_t w = 0;
+	bool in_host = true;
+	for (; *p && w + 1 < out_sz; p++) {
+		char c = *p;
+		if (host_only && (c == '/' || c == '?' || c == '#' || c == ':')) break;
+		if (c == '/' || c == '?' || c == '#') in_host = false;
+		out[w++] = in_host ? (char)tolower((unsigned char)c) : c;
+	}
+	while (w > 0 && out[w - 1] == '/') w--;
+	out[w] = '\0';
+}
+
+static __attribute__((unused)) bool firefox_core_url_matches(const char *a, const char *b)
+{
+	char na[512], nb[512];
+	ff_normalize_url(a, na, sizeof(na), false);
+	ff_normalize_url(b, nb, sizeof(nb), false);
+	return na[0] && nb[0] && strcmp(na, nb) == 0;
+}
+
+static __attribute__((unused)) bool firefox_core_url_host_matches(const char *a, const char *b)
+{
+	char ha[256], hb[256];
+	ff_normalize_url(a, ha, sizeof(ha), true);
+	ff_normalize_url(b, hb, sizeof(hb), true);
+	return ha[0] && hb[0] && strcmp(ha, hb) == 0;
+}
+
+static void ff_probe_doc_walk(void *node, int depth, int *visited, ff_doc_state_t *st)
+{
+	if (!node || !st || st->found || depth > 14 || *visited > 800) return;
+	(*visited)++;
+
+	void *err = NULL;
+	char *role = g_ff_atspi.get_role_name(node, &err);
+	if (role && (strcmp(role, "document web") == 0 || strcmp(role, "document frame") == 0)) {
+		bool showing = ff_node_has_state(node, FF_ATSPI_STATE_SHOWING);
+		bool defunct = ff_node_has_state(node, FF_ATSPI_STATE_DEFUNCT);
+		if (showing && !defunct) {
+			st->found = true;
+			st->showing = true;
+			st->defunct = false;
+			st->busy = ff_node_has_state(node, FF_ATSPI_STATE_BUSY);
+			err = NULL;
+			st->child_count = g_ff_atspi.get_child_count(node, &err);
+			err = NULL;
+			char *name = g_ff_atspi.get_name(node, &err);
+			if (name) {
+				snprintf(st->title, sizeof(st->title), "%s", name);
+				g_ff_atspi.g_free(name);
+			}
+			if (g_ff_atspi.get_document_iface && g_ff_atspi.doc_get_attr) {
+				void *doc_if = g_ff_atspi.get_document_iface(node);
+				if (doc_if) {
+					void *derr = NULL;
+					char *doc_url = g_ff_atspi.doc_get_attr(doc_if, "DocURL", &derr);
+					if (doc_url) {
+						snprintf(st->url, sizeof(st->url), "%s", doc_url);
+						g_ff_atspi.g_free(doc_url);
+					}
+					g_ff_atspi.g_unref(doc_if);
+				}
+			}
+		}
+		g_ff_atspi.g_free(role);
+		return;
+	}
+	if (role) g_ff_atspi.g_free(role);
+
+	err = NULL;
+	int n = g_ff_atspi.get_child_count(node, &err);
+	if (n > 40) n = 40;
+	for (int i = 0; i < n && !st->found; i++) {
+		err = NULL;
+		void *ch = g_ff_atspi.get_child_at_index(node, i, &err);
+		if (ch) {
+			ff_probe_doc_walk(ch, depth + 1, visited, st);
+			g_ff_atspi.g_unref(ch);
+		}
+	}
+}
+
+static __attribute__((unused)) bool firefox_core_probe_doc(ff_doc_state_t *out_doc)
+{
+	if (!out_doc) return false;
+	memset(out_doc, 0, sizeof(*out_doc));
+	if (!ff_ensure_atspi_loaded()) return false;
+	void *desktop = g_ff_atspi.get_desktop(0);
+	if (!desktop) return false;
+
+	void *err = NULL;
+	int n_apps = g_ff_atspi.get_child_count(desktop, &err);
+	for (int i = 0; i < n_apps && !out_doc->found; i++) {
+		err = NULL;
+		void *app = g_ff_atspi.get_child_at_index(desktop, i, &err);
+		if (!app) continue;
+		err = NULL;
+		char *aname = g_ff_atspi.get_name(app, &err);
+		if (ff_is_browser_name(aname)) {
+			int visited = 0;
+			ff_probe_doc_walk(app, 0, &visited, out_doc);
+		}
+		if (aname) g_ff_atspi.g_free(aname);
+		g_ff_atspi.g_unref(app);
+	}
+	g_ff_atspi.g_unref(desktop);
+	return out_doc->found;
+}
+
+/*
+ * Wait for active document web readiness (or optional text substring / URL transition).
+ * Returns:
+ *   1  ready
+ *   0  timeout (last probed doc state written to *out_doc)
+ *  -2  interrupted via ops->should_abort()
+ */
+static __attribute__((unused)) int firefox_core_wait_loaded(
+	const firefox_core_ops_t *ops,
+	const char *prev_url,
+	const char *expected_url,
+	const char *wait_text,
+	int timeout_ms,
+	bool click_settle,
+	ff_doc_state_t *out_doc,
+	char *out_reason, size_t reason_sz)
+{
+	if (timeout_ms <= 0) timeout_ms = 6000;
+	if (timeout_ms > 15000) timeout_ms = 15000;
+	if (out_doc) memset(out_doc, 0, sizeof(*out_doc));
+	if (out_reason && reason_sz > 0) snprintf(out_reason, reason_sz, "timeout");
+
+	const int step_ms = 120;
+	int elapsed = 0;
+	bool saw_busy = false;
+	int idle_same_ticks = 0;
+
+	while (elapsed <= timeout_ms) {
+		if (ops && ops->should_abort && ops->should_abort(ops->ud)) {
+			if (out_reason && reason_sz > 0) snprintf(out_reason, reason_sz, "interrupted");
+			return -2;
+		}
+
+		ff_doc_state_t doc;
+		firefox_core_probe_doc(&doc);
+		if (out_doc) *out_doc = doc;
+		if (doc.found && doc.busy) saw_busy = true;
+
+		bool doc_ready = doc.found && doc.showing && !doc.defunct && !doc.busy &&
+		                 doc.url[0] != '\0' && strcmp(doc.url, "about:blank") != 0 &&
+		                 doc.child_count > 0;
+
+		if (doc_ready) {
+			bool target_ok = true;
+			if (expected_url && *expected_url) {
+				bool exact = firefox_core_url_matches(doc.url, expected_url);
+				bool host = firefox_core_url_host_matches(doc.url, expected_url);
+				bool navigated = (!prev_url || !*prev_url || strcmp(doc.url, prev_url) != 0 || saw_busy);
+				target_ok = exact || (host && navigated);
+			} else if (click_settle) {
+				bool url_changed = (prev_url && *prev_url && strcmp(doc.url, prev_url) != 0);
+				if (!url_changed && !saw_busy) {
+					idle_same_ticks++;
+					/* For in-page clicks that neither navigate nor trigger BUSY, settle after ~360ms */
+					if (idle_same_ticks < 3) target_ok = false;
+				}
+			}
+
+			if (target_ok && wait_text && *wait_text) {
+				char snap[FF_INSPECT_BUF_SZ];
+				if (firefox_core_read_a11y(ops, NULL, 0, NULL, 0, snap, sizeof(snap)) &&
+				    ff_str_ci(snap, wait_text)) {
+					if (out_reason && reason_sz > 0) snprintf(out_reason, reason_sz, "text matched");
+					return 1;
+				}
+				target_ok = false;
+			} else if (target_ok) {
+				if (out_reason && reason_sz > 0) snprintf(out_reason, reason_sz, "loaded");
+				return 1;
+			}
+		}
+
+		if (elapsed >= timeout_ms) break;
+		usleep((useconds_t)step_ms * 1000U);
+		elapsed += step_ms;
+	}
+
+	return 0;
 }
 
 #endif /* JARVIS_FIREFOX_CORE_H */

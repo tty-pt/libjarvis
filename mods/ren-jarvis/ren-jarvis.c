@@ -111,9 +111,10 @@ XY_MODULE_API void xy_install(void)
 
 	ren_register_prompt_hint(
 		"You have live GUI, desktop, and browser control via 'browser', 'window', 'workspace', 'x11_windows', 'clipboard', 'input', 'open_app', 'open_terminal', 'media', 'system', 'terminal', 'recall', and 'record'. Never claim you cannot access or interact with browser tabs, WhatsApp Web, or desktop apps.\n"
-		"To interact with an open browser tab or send a message (e.g. on WhatsApp Web):\n"
-		"1. Run 'browser' with 'tab whatsapp' (a title/URL substring, NEVER a numeric index) or 'browser inspect' to focus the tab and inspect UI elements.\n"
-		"2. Prefer a single 'browser' call with 'send <contact_or_entry> | <message>' (or 'browser click <contact>' then 'browser send <message>') to select the conversation, type, and press Enter without extra sleeps.\n"
+		"To browse, read pages, or interact with an open browser tab:\n"
+		"1. 'browser url <https://...>', 'browser search <query>', 'browser tab <title>', and 'browser click <label>' automatically wait for page load and return a readable page snapshot. Use 'browser read [offset|filter]' to read more page text or paginate long articles, 'browser wait [ms|text]' if a dynamic page is still loading, and 'browser inspect [filter]' to list clickable UI controls with coordinates.\n"
+		"2. After navigating or clicking a link/button, always inspect the returned snapshot (or call 'browser read' / 'browser inspect') before deciding your next step or summarizing content.\n"
+		"3. For chat replies (e.g. WhatsApp Web), prefer a single 'browser' call with 'send <contact_or_entry> | <message>' (or 'browser click <contact>' then 'browser send <message>') without extra sleeps.\n"
 		"After receiving tool results that complete the user's request, always output a brief 1-sentence confirmation to the user (never an empty reply).\n"
 		"When answering the user directly, keep spoken replies concise, natural, and direct.");
 }

@@ -121,13 +121,21 @@ static void ren_ff_click_xy(void *ud, int x, int y, int btn)
 	ren_call_tool("input", arg, NULL);
 }
 
+static int ren_ff_should_abort(void *ud)
+{
+	(void)ud;
+	return ren_is_interrupted();
+}
+
 static firefox_core_ops_t ren_ff_ops(void)
 {
 	firefox_core_ops_t ops;
+	memset(&ops, 0, sizeof(ops));
 	ops.focus_browser        = ren_ff_focus_browser;
 	ops.is_browser_focused   = ren_ff_is_browser_focused;
 	ops.get_focused_geometry = ren_ff_get_geometry;
 	ops.click_xy             = ren_ff_click_xy;
+	ops.should_abort         = ren_ff_should_abort;
 	ops.ud                   = NULL;
 	return ops;
 }
@@ -141,13 +149,20 @@ static void spawn_browser_url(const char *url)
 	}
 }
 
+static void ff_trim_trailing_ws(char *s)
+{
+	if (!s) return;
+	size_t n = strlen(s);
+	while (n > 0 && isspace((unsigned char)s[n - 1])) s[--n] = '\0';
+}
+
 static int tool_browser(const char *args, char **out_result)
 {
 	firefox_core_ops_t ops = ren_ff_ops();
 	while (args && *args == ' ') args++;
 
-	if (!args || !*args || strncasecmp(args, "inspect", 7) == 0) {
-		const char *filter_q = (args && strlen(args) > 7) ? (args + 7) : NULL;
+	if (!args || !*args || strcasecmp(args, "inspect") == 0 || strncasecmp(args, "inspect ", 8) == 0) {
+		const char *filter_q = (args && strlen(args) > 8) ? (args + 8) : NULL;
 		while (filter_q && *filter_q == ' ') filter_q++;
 		if (filter_q && !*filter_q) filter_q = NULL;
 
@@ -157,10 +172,71 @@ static int tool_browser(const char *args, char **out_result)
 		}
 		firefox_tab_t tabs[FIREFOX_CORE_MAX_TABS];
 		size_t ntabs = firefox_core_populate_tabs(tabs, FIREFOX_CORE_MAX_TABS);
-		char out[2048] = {0};
+		char out[FF_INSPECT_BUF_SZ] = {0};
 		firefox_core_inspect_a11y(&ops, tabs, ntabs, filter_q, out, sizeof(out));
 		*out_result = strdup(out[0] ? out : "(no browser accessibility tree found)");
 		return 0;
+	}
+
+	if (strcasecmp(args, "read") == 0 || strncasecmp(args, "read ", 5) == 0) {
+		const char *arg = (strlen(args) > 5) ? (args + 5) : "";
+		while (*arg == ' ') arg++;
+		size_t skip_chars = 0;
+		const char *filter_q = NULL;
+		if (strncmp(arg, "offset=", 7) == 0 && isdigit((unsigned char)arg[7])) {
+			skip_chars = (size_t)strtoul(arg + 7, NULL, 10);
+		} else if (*arg && isdigit((unsigned char)*arg)) {
+			char *end = NULL;
+			unsigned long v = strtoul(arg, &end, 10);
+			while (end && *end == ' ') end++;
+			skip_chars = (size_t)v;
+			if (end && *end) filter_q = end;
+		} else if (*arg) {
+			filter_q = arg;
+		}
+
+		ren_ff_focus_browser(NULL);
+		firefox_tab_t tabs[FIREFOX_CORE_MAX_TABS];
+		size_t ntabs = firefox_core_populate_tabs(tabs, FIREFOX_CORE_MAX_TABS);
+		char out[FF_INSPECT_BUF_SZ] = {0};
+		firefox_core_read_a11y(&ops, tabs, ntabs, filter_q, skip_chars, out, sizeof(out));
+		*out_result = strdup(out[0] ? out : "(no readable page text found)");
+		return 0;
+	}
+
+	if (strcasecmp(args, "wait") == 0 || strncasecmp(args, "wait ", 5) == 0) {
+		const char *arg = (strlen(args) > 5) ? (args + 5) : "";
+		while (*arg == ' ') arg++;
+		int timeout_ms = 6000;
+		const char *wait_text = NULL;
+		if (*arg && isdigit((unsigned char)*arg)) {
+			char *end = NULL;
+			long v = strtol(arg, &end, 10);
+			if (v > 0) timeout_ms = (int)v;
+			while (end && *end == ' ') end++;
+			if (end && *end) wait_text = end;
+		} else if (*arg) {
+			wait_text = arg;
+		}
+
+		ren_ff_focus_browser(NULL);
+		ff_doc_state_t doc;
+		char reason[64] = {0};
+		int wrc = firefox_core_wait_loaded(&ops, NULL, NULL, wait_text, timeout_ms, false, &doc, reason, sizeof(reason));
+		if (wrc == -2) {
+			*out_result = strdup("Error: interrupted while waiting for browser page");
+			return -1;
+		}
+		firefox_tab_t tabs[FIREFOX_CORE_MAX_TABS];
+		size_t ntabs = firefox_core_populate_tabs(tabs, FIREFOX_CORE_MAX_TABS);
+		char page[FF_INSPECT_BUF_SZ] = {0};
+		firefox_core_read_a11y(&ops, tabs, ntabs, NULL, 0, page, sizeof(page));
+		char *out = (char *)malloc(FF_INSPECT_BUF_SZ + 512);
+		if (!out) return -1;
+		snprintf(out, FF_INSPECT_BUF_SZ + 512, "wait %s (url=%s):\n%s",
+		         reason, doc.url[0] ? doc.url : "(unknown)", page);
+		*out_result = out;
+		return (wrc == 1) ? 0 : -1;
 	}
 
 	if (strncasecmp(args, "tab ", 4) == 0) {
@@ -169,12 +245,21 @@ static int tool_browser(const char *args, char **out_result)
 		ren_ff_focus_browser(NULL);
 		char tab_title[128] = {0};
 		if (firefox_core_switch_tab(&ops, q, tab_title, sizeof(tab_title))) {
+			ff_doc_state_t doc;
+			char reason[64] = {0};
+			int wrc = firefox_core_wait_loaded(&ops, NULL, NULL, NULL, 1500, false, &doc, reason, sizeof(reason));
+			if (wrc == -2) {
+				*out_result = strdup("Error: interrupted after switching browser tab");
+				return -1;
+			}
 			firefox_tab_t tabs[FIREFOX_CORE_MAX_TABS];
 			size_t ntabs = firefox_core_populate_tabs(tabs, FIREFOX_CORE_MAX_TABS);
-			char page[1850] = {0}, out[2048] = {0};
-			firefox_core_inspect_a11y(&ops, tabs, ntabs, NULL, page, sizeof(page));
-			snprintf(out, sizeof(out), "switched to tab '%s':\n%.1850s", tab_title, page);
-			*out_result = strdup(out);
+			char page[FF_INSPECT_BUF_SZ] = {0};
+			firefox_core_read_a11y(&ops, tabs, ntabs, NULL, 0, page, sizeof(page));
+			char *out = (char *)malloc(FF_INSPECT_BUF_SZ + 256);
+			if (!out) return -1;
+			snprintf(out, FF_INSPECT_BUF_SZ + 256, "switched to tab '%s':\n%s", tab_title, page);
+			*out_result = out;
 			return 0;
 		}
 		char err[300];
@@ -186,20 +271,39 @@ static int tool_browser(const char *args, char **out_result)
 	if (strncasecmp(args, "click ", 6) == 0) {
 		const char *q = args + 6;
 		while (*q == ' ') q++;
+		ff_doc_state_t prev_doc;
+		firefox_core_probe_doc(&prev_doc);
+
 		char role[64] = {0}, msg[512] = {0};
 		if (firefox_core_click_element(&ops, q, 1, role, sizeof(role), msg, sizeof(msg))) {
-			char out[2048];
+			char *out = (char *)malloc(FF_INSPECT_BUF_SZ + 768);
+			if (!out) return -1;
 			if (strcmp(role, "table row") == 0 || strcmp(role, "page tab") == 0 || strcmp(role, "list item") == 0) {
 				usleep(120000);
 				firefox_tab_t tabs[FIREFOX_CORE_MAX_TABS];
 				size_t ntabs = firefox_core_populate_tabs(tabs, FIREFOX_CORE_MAX_TABS);
-				char page[1400] = {0};
+				char page[FF_INSPECT_BUF_SZ] = {0};
 				firefox_core_inspect_a11y(&ops, tabs, ntabs, "entry", page, sizeof(page));
-				snprintf(out, sizeof(out), "%s%s%s", msg, page[0] ? "\n" : "", page);
+				snprintf(out, FF_INSPECT_BUF_SZ + 768, "%s%s%s", msg, page[0] ? "\n" : "", page);
 			} else {
-				snprintf(out, sizeof(out), "%s", msg);
+				ff_doc_state_t after_doc;
+				char reason[64] = {0};
+				int wrc = firefox_core_wait_loaded(
+					&ops, prev_doc.found ? prev_doc.url : NULL, NULL, NULL,
+					2500, true, &after_doc, reason, sizeof(reason));
+				if (wrc == -2) {
+					free(out);
+					*out_result = strdup("Error: interrupted after browser click");
+					return -1;
+				}
+				firefox_tab_t tabs[FIREFOX_CORE_MAX_TABS];
+				size_t ntabs = firefox_core_populate_tabs(tabs, FIREFOX_CORE_MAX_TABS);
+				char page[FF_INSPECT_BUF_SZ] = {0};
+				firefox_core_read_a11y(&ops, tabs, ntabs, NULL, 0, page, sizeof(page));
+				snprintf(out, FF_INSPECT_BUF_SZ + 768, "%s (%s)%s%s",
+				         msg, reason, page[0] ? "\n" : "", page);
 			}
-			*out_result = strdup(out);
+			*out_result = out;
 			return 0;
 		}
 		char err[300];
@@ -254,51 +358,109 @@ static int tool_browser(const char *args, char **out_result)
 		return 0;
 	}
 
+	bool is_url_cmd = false;
+	bool is_search_cmd = false;
 	char url[768] = {0};
 	if (strncasecmp(args, "url ", 4) == 0) {
+		is_url_cmd = true;
 		const char *u = args + 4;
 		while (*u == ' ') u++;
-		if (strncmp(u, "http://", 7) == 0 || strncmp(u, "https://", 8) == 0) {
+		if (strncmp(u, "http://", 7) == 0 || strncmp(u, "https://", 8) == 0 || strncmp(u, "file://", 7) == 0) {
 			snprintf(url, sizeof(url), "%s", u);
 		} else {
 			snprintf(url, sizeof(url), "https://%s", u);
 		}
-	} else if (strncmp(args, "http://", 7) == 0 || strncmp(args, "https://", 8) == 0) {
+		ff_trim_trailing_ws(url);
+	} else if (strncmp(args, "http://", 7) == 0 || strncmp(args, "https://", 8) == 0 || strncmp(args, "file://", 7) == 0) {
+		is_url_cmd = true;
 		snprintf(url, sizeof(url), "%s", args);
+		ff_trim_trailing_ws(url);
 	} else if (strncasecmp(args, "search ", 7) == 0) {
+		is_search_cmd = true;
 		const char *q = args + 7;
 		while (*q == ' ') q++;
 		char enc[512];
 		ff_url_encode(q, enc, sizeof(enc));
 		snprintf(url, sizeof(url), "https://www.google.com/search?q=%s", enc);
 	} else {
+		is_search_cmd = true;
 		char enc[512];
 		ff_url_encode(args, enc, sizeof(enc));
 		snprintf(url, sizeof(url), "https://www.google.com/search?q=%s", enc);
 	}
 
-	if (strncasecmp(args, "url ", 4) == 0 || strncmp(args, "http://", 7) == 0 || strncmp(args, "https://", 8) == 0) {
-		char domain_kw[64] = {0};
-		firefox_core_extract_domain_kw(url, domain_kw, sizeof(domain_kw));
-		if (strlen(domain_kw) >= 3 && ren_ff_focus_browser(NULL)) {
-			char tab_title[128] = {0};
-			if (firefox_core_switch_tab(&ops, domain_kw, tab_title, sizeof(tab_title))) {
-				firefox_tab_t tabs[FIREFOX_CORE_MAX_TABS];
-				size_t ntabs = firefox_core_populate_tabs(tabs, FIREFOX_CORE_MAX_TABS);
-				char page[1850] = {0}, out[2048] = {0};
-				firefox_core_inspect_a11y(&ops, tabs, ntabs, NULL, page, sizeof(page));
-				snprintf(out, sizeof(out), "focused existing tab '%s':\n%.1850s", tab_title, page);
-				*out_result = strdup(out);
-				return 0;
+	ff_doc_state_t prev_doc;
+	firefox_core_probe_doc(&prev_doc);
+
+	if (is_url_cmd && url[0]) {
+		if (prev_doc.found && firefox_core_url_matches(prev_doc.url, url) && ren_ff_focus_browser(NULL)) {
+			ff_doc_state_t doc;
+			char reason[64] = {0};
+			int wrc = firefox_core_wait_loaded(&ops, NULL, url, NULL, 2500, false, &doc, reason, sizeof(reason));
+			if (wrc == -2) {
+				*out_result = strdup("Error: interrupted while reading active URL");
+				return -1;
+			}
+			firefox_tab_t tabs[FIREFOX_CORE_MAX_TABS];
+			size_t ntabs = firefox_core_populate_tabs(tabs, FIREFOX_CORE_MAX_TABS);
+			char page[FF_INSPECT_BUF_SZ] = {0};
+			firefox_core_read_a11y(&ops, tabs, ntabs, NULL, 0, page, sizeof(page));
+			char *out = (char *)malloc(FF_INSPECT_BUF_SZ + 1024);
+			if (!out) return -1;
+			snprintf(out, FF_INSPECT_BUF_SZ + 1024, "focused existing tab '%s' (%s):\n%s",
+			         doc.title[0] ? doc.title : url, reason, page);
+			*out_result = out;
+			return 0;
+		}
+		firefox_tab_t tabs[FIREFOX_CORE_MAX_TABS];
+		size_t ntabs = firefox_core_populate_tabs(tabs, FIREFOX_CORE_MAX_TABS);
+		for (size_t i = 0; i < ntabs; i++) {
+			if (firefox_core_url_matches(tabs[i].url, url) && tabs[i].title[0] && ren_ff_focus_browser(NULL)) {
+				char tab_title[128] = {0};
+				if (firefox_core_switch_tab(&ops, tabs[i].title, tab_title, sizeof(tab_title))) {
+					ff_doc_state_t doc;
+					char reason[64] = {0};
+					int wrc = firefox_core_wait_loaded(&ops, NULL, url, NULL, 2500, false, &doc, reason, sizeof(reason));
+					if (wrc == -2) {
+						*out_result = strdup("Error: interrupted while switching to existing tab");
+						return -1;
+					}
+					if (!doc.found || firefox_core_url_matches(doc.url, url)) {
+						char page[FF_INSPECT_BUF_SZ] = {0};
+						firefox_core_read_a11y(&ops, tabs, ntabs, NULL, 0, page, sizeof(page));
+						char *out = (char *)malloc(FF_INSPECT_BUF_SZ + 1024);
+						if (!out) return -1;
+						snprintf(out, FF_INSPECT_BUF_SZ + 1024, "focused existing tab '%s' (%s):\n%s",
+						         tab_title[0] ? tab_title : tabs[i].title, reason, page);
+						*out_result = out;
+						return 0;
+					}
+				}
+				break;
 			}
 		}
 	}
 
 	spawn_browser_url(url);
 	ren_ff_focus_browser(NULL);
-	char out[832];
-	snprintf(out, sizeof(out), "opened URL: %s", url);
-	*out_result = strdup(out);
+	ff_doc_state_t doc;
+	char reason[64] = {0};
+	int wrc = firefox_core_wait_loaded(
+		&ops, prev_doc.found ? prev_doc.url : NULL, url, NULL, 6000, false, &doc, reason, sizeof(reason));
+	if (wrc == -2) {
+		*out_result = strdup("Error: interrupted while loading URL");
+		return -1;
+	}
+	firefox_tab_t tabs[FIREFOX_CORE_MAX_TABS];
+	size_t ntabs = firefox_core_populate_tabs(tabs, FIREFOX_CORE_MAX_TABS);
+	char page[FF_INSPECT_BUF_SZ] = {0};
+	firefox_core_read_a11y(&ops, tabs, ntabs, NULL, 0, page, sizeof(page));
+	char *out = (char *)malloc(FF_INSPECT_BUF_SZ + 1024);
+	if (!out) return -1;
+	snprintf(out, FF_INSPECT_BUF_SZ + 1024, "%s: %s (%s)%s%s",
+	         is_search_cmd ? "searched" : "opened URL",
+	         url, reason, page[0] ? "\n" : "", page);
+	*out_result = out;
 	return 0;
 }
 
@@ -321,6 +483,6 @@ static char *ff_context_provider(void)
 
 XY_MODULE_API void xy_install(void)
 {
-	ren_register_tool("browser", "browser <inspect [filter] | tab <title_or_url_substring> | url <https://...> | search <query> | click <element_label> | send <element_label> | <text>>", tool_browser);
+	ren_register_tool("browser", "browser <inspect [filter] | read [offset|filter] | wait [ms|text] | tab <title_or_url_substring> | url <https://...> | search <query> | click <element_label> | send <element_label> | <text>>", tool_browser);
 	ren_register_context_provider(ff_context_provider);
 }
