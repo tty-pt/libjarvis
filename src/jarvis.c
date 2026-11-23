@@ -1277,9 +1277,20 @@ static int do_jarvis_doctor(bool as_json)
 	bool has_ffmpeg   = cmd_in_path("ffmpeg");
 	bool has_espeak   = cmd_in_path("espeak-ng");
 	bool has_edge_py  = false;
-	if (cmd_in_path("python3")) {
-		char *const py_argv[] = { "python3", "-c", "import edge_tts", NULL };
-		has_edge_py = (run_argv_sync(py_argv) == 0);
+	{
+		char venv1[768], venv2[768];
+		snprintf(venv1, sizeof(venv1), "%s/.local/share/dwm-voice/venv/bin/python", home);
+		snprintf(venv2, sizeof(venv2), "%s/.venv/bin/python", home);
+		const char *py_cands[3] = {
+			cmd_in_path("python3") ? "python3" : NULL,
+			access(venv1, X_OK) == 0 ? venv1 : NULL,
+			access(venv2, X_OK) == 0 ? venv2 : NULL
+		};
+		for (int i = 0; i < 3 && !has_edge_py; i++) {
+			if (!py_cands[i]) continue;
+			char *const py_argv[] = { (char *)py_cands[i], "-c", "import edge_tts", NULL };
+			has_edge_py = (run_argv_sync(py_argv) == 0);
+		}
 	}
 	bool has_local_onnx = has_piper_or_kokoro_model(home);
 

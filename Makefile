@@ -110,29 +110,24 @@ ${DESTDIR}${PREFIX}/lib/ren/ren-jarvis.so: mods/ren-jarvis/ren-jarvis.so
 	install -m 755 mods/ren-jarvis/ren-jarvis.so $@
 
 install-extra: ${DESTDIR}${PREFIX}/lib/pkgconfig/jarvis.pc ${DESTDIR}${PREFIX}/lib/ren/ren-sway.so ${DESTDIR}${PREFIX}/lib/ren/ren-hyprland.so ${DESTDIR}${PREFIX}/lib/ren/ren-x11.so ${DESTDIR}${PREFIX}/lib/ren/ren-firefox.so ${DESTDIR}${PREFIX}/lib/ren/ren-desktop.so ${DESTDIR}${PREFIX}/lib/ren/ren-jarvis.so
-	@rm -f ${DESTDIR}${PREFIX}/lib/mod_sway.so ${DESTDIR}${PREFIX}/lib/mod_hyprland.so ${DESTDIR}${PREFIX}/lib/mod_tts.so ${DESTDIR}${PREFIX}/lib/ren/mod_jarvis.so $(HOME)/.local/lib/mod_sway.so $(HOME)/.local/lib/mod_hyprland.so $(HOME)/.local/lib/mod_tts.so
-	@rm -f ${DESTDIR}${PREFIX}/lib/jarvis/jarvis-*.so $(HOME)/.local/lib/jarvis/jarvis-*.so
-	@rmdir ${DESTDIR}${PREFIX}/lib/jarvis $(HOME)/.local/lib/jarvis 2>/dev/null || true
-	@mkdir -p $(HOME)/.local/lib $(HOME)/.local/bin $(HOME)/.config/jarvis
-	@install -d ${DESTDIR}${PREFIX}/share/jarvis
+	@rm -f ${DESTDIR}${PREFIX}/lib/mod_sway.so ${DESTDIR}${PREFIX}/lib/mod_hyprland.so ${DESTDIR}${PREFIX}/lib/mod_tts.so ${DESTDIR}${PREFIX}/lib/ren/mod_jarvis.so
+	@rm -f ${DESTDIR}${PREFIX}/lib/jarvis/jarvis-*.so
+	@rmdir ${DESTDIR}${PREFIX}/lib/jarvis 2>/dev/null || true
+	@install -d ${DESTDIR}${PREFIX}/bin ${DESTDIR}${PREFIX}/share/jarvis
 	@install -m 644 data/ontology.json ${DESTDIR}${PREFIX}/share/jarvis/ontology.json
 	@if [ -f data/99-jarvis-aec.conf ]; then \
 		install -m 644 data/99-jarvis-aec.conf ${DESTDIR}${PREFIX}/share/jarvis/99-jarvis-aec.conf; \
 	fi
-	@install -m 644 data/ontology.json $(HOME)/.config/jarvis/ontology.json
-	@if [ -f bin/jarvis ]; then \
-		install -m 755 bin/jarvis $(HOME)/.local/bin/jarvis; \
+	@if [ -z "${DESTDIR}" ]; then \
+		mkdir -p "$(HOME)/.config/jarvis"; \
+		install -m 644 data/ontology.json "$(HOME)/.config/jarvis/ontology.json"; \
 	fi
 	@if [ -f scripts/edge-tts-pcm ]; then \
-		install -d ${DESTDIR}${PREFIX}/bin; \
 		install -m 755 scripts/edge-tts-pcm ${DESTDIR}${PREFIX}/bin/edge-tts-pcm; \
-		install -m 755 scripts/edge-tts-pcm $(HOME)/.local/bin/edge-tts-pcm; \
 	fi
 	@if [ -f bin/jarvisd ]; then \
-		install -d ${DESTDIR}${PREFIX}/bin; \
 		install -m 755 bin/jarvisd ${DESTDIR}${PREFIX}/bin/jarvisd; \
-		install -m 755 bin/jarvisd $(HOME)/.local/bin/jarvisd; \
-		ln -sf jarvisd $(HOME)/.local/bin/dwm-whisperd; \
+		ln -sf jarvisd ${DESTDIR}${PREFIX}/bin/dwm-whisperd; \
 	fi
 
 install: install-extra install-services
@@ -142,10 +137,11 @@ install-services:
 	@if [ "${uname}" = "Linux" ] || [ -d /run/systemd/system ]; then \
 		echo "[INFO] Installing systemd services for jarvisd..."; \
 		install -d ${DESTDIR}${PREFIX}/lib/systemd/user; \
-		sed 's|@PREFIX@|${PREFIX}|g' services/systemd/jarvisd.service > ${DESTDIR}${PREFIX}/lib/systemd/user/jarvisd.service; \
-		if [ -d $(HOME)/.config/systemd/user ] || [ -n "$$(echo "${PREFIX}" | grep -E '^($(HOME)|~)')" ]; then \
-			mkdir -p $(HOME)/.config/systemd/user; \
-			sed 's|@PREFIX@|${PREFIX}|g' services/systemd/jarvisd.service > $(HOME)/.config/systemd/user/jarvisd.service; \
+		UNIT_PREFIX="$$(echo "${PREFIX}" | sed "s|^$(HOME)|%h|")"; \
+		sed "s|@PREFIX@|$${UNIT_PREFIX}|g" services/systemd/jarvisd.service > ${DESTDIR}${PREFIX}/lib/systemd/user/jarvisd.service; \
+		if [ -z "${DESTDIR}" ] && { [ -d "$(HOME)/.config/systemd/user" ] || [ -n "$$(echo "${PREFIX}" | grep -E '^($(HOME)|~)')" ]; }; then \
+			mkdir -p "$(HOME)/.config/systemd/user"; \
+			ln -sf "${PREFIX}/lib/systemd/user/jarvisd.service" "$(HOME)/.config/systemd/user/jarvisd.service"; \
 		fi; \
 	fi
 	@if [ -d /etc/init.d ] || [ -x /sbin/openrc-run ] || [ "${distro}" = "alpine" ] || [ "${distro}" = "gentoo" ]; then \
@@ -153,7 +149,7 @@ install-services:
 		install -d ${DESTDIR}${PREFIX}/share/examples/openrc; \
 		sed 's|@PREFIX@|${PREFIX}|g' services/openrc/jarvisd > ${DESTDIR}${PREFIX}/share/examples/openrc/jarvisd; \
 		chmod 755 ${DESTDIR}${PREFIX}/share/examples/openrc/jarvisd; \
-		if [ -w /etc/init.d ]; then \
+		if [ -z "${DESTDIR}" ] && [ -w /etc/init.d ]; then \
 			install -m 755 ${DESTDIR}${PREFIX}/share/examples/openrc/jarvisd /etc/init.d/jarvisd; \
 		fi; \
 	fi
@@ -169,15 +165,15 @@ install-services:
 		install -d ${DESTDIR}${PREFIX}/share/examples/rc.d; \
 		sed 's|@PREFIX@|${PREFIX}|g' services/rc.d/jarvisd > ${DESTDIR}${PREFIX}/share/examples/rc.d/jarvisd; \
 		chmod 755 ${DESTDIR}${PREFIX}/share/examples/rc.d/jarvisd; \
-		if [ -w /etc/rc.d ]; then \
+		if [ -z "${DESTDIR}" ] && [ -w /etc/rc.d ]; then \
 			install -m 755 ${DESTDIR}${PREFIX}/share/examples/rc.d/jarvisd /etc/rc.d/jarvisd; \
 		fi; \
 	elif [ "${uname}" = "Darwin" ]; then \
 		echo "[INFO] Installing launchd service for jarvisd..."; \
 		install -d ${DESTDIR}${PREFIX}/share/launchd; \
 		sed 's|@PREFIX@|${PREFIX}|g' services/launchd/pt.tty.jarvisd.plist > ${DESTDIR}${PREFIX}/share/launchd/pt.tty.jarvisd.plist; \
-		if [ -d $(HOME)/Library/LaunchAgents ]; then \
-			sed 's|@PREFIX@|${PREFIX}|g' services/launchd/pt.tty.jarvisd.plist > $(HOME)/Library/LaunchAgents/pt.tty.jarvisd.plist; \
+		if [ -z "${DESTDIR}" ] && [ -d "$(HOME)/Library/LaunchAgents" ]; then \
+			sed 's|@PREFIX@|${PREFIX}|g' services/launchd/pt.tty.jarvisd.plist > "$(HOME)/Library/LaunchAgents/pt.tty.jarvisd.plist"; \
 		fi; \
 	elif [ "${SYS}" = "Windows" ] || [ "${uname}" = "MinGW64" ] || [ "${uname}" = "Msys" ] || [ "${uname}" = "MingW" ]; then \
 		echo "[INFO] Installing Windows services for jarvisd..."; \
@@ -189,9 +185,9 @@ install-services:
 		install -d ${DESTDIR}${PREFIX}/etc/xdg/autostart ${DESTDIR}${PREFIX}/share/applications; \
 		sed 's|@PREFIX@|${PREFIX}|g' services/xdg/jarvisd.desktop > ${DESTDIR}${PREFIX}/etc/xdg/autostart/jarvisd.desktop; \
 		sed 's|@PREFIX@|${PREFIX}|g' services/xdg/jarvisd.desktop > ${DESTDIR}${PREFIX}/share/applications/jarvisd.desktop; \
-		if [ -d $(HOME)/.config/autostart ] || [ -n "$$(echo "${PREFIX}" | grep -E '^($(HOME)|~)')" ]; then \
-			mkdir -p $(HOME)/.config/autostart; \
-			sed 's|@PREFIX@|${PREFIX}|g' services/xdg/jarvisd.desktop > $(HOME)/.config/autostart/jarvisd.desktop; \
+		if [ -z "${DESTDIR}" ] && { [ -d "$(HOME)/.config/autostart" ] || [ -n "$$(echo "${PREFIX}" | grep -E '^($(HOME)|~)')" ]; }; then \
+			mkdir -p "$(HOME)/.config/autostart"; \
+			sed 's|@PREFIX@|${PREFIX}|g' services/xdg/jarvisd.desktop > "$(HOME)/.config/autostart/jarvisd.desktop"; \
 		fi; \
 	fi
 
