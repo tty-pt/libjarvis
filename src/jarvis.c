@@ -719,6 +719,32 @@ static void write_voice_state(const char *state)
 
 static int do_jarvis_listen(bool as_json, bool quiet, const char *wm_override, const char *extra_mod)
 {
+	const char *u = get_cli_username();
+	char pid_path[256];
+	snprintf(pid_path, sizeof(pid_path), "/tmp/jarvis-listen-%s.pid", u);
+
+	FILE *pfp = fopen(pid_path, "r");
+	if (pfp) {
+		int old_pid = 0;
+		if (fscanf(pfp, "%d", &old_pid) == 1 && old_pid > 1 && kill((pid_t)old_pid, 0) == 0) {
+			fclose(pfp);
+			char cresp[64];
+			daemon_cmd("CANCEL", cresp, sizeof(cresp));
+			unlink(pid_path);
+			write_voice_state(is_daemon_listening() ? "jarvis-idle" : NULL);
+			notify_status_bar();
+			if (as_json) printf("{\"ok\":false,\"cancelled\":true}\n");
+			return 0;
+		}
+		fclose(pfp);
+	}
+
+	pfp = fopen(pid_path, "w");
+	if (pfp) {
+		fprintf(pfp, "%d\n", (int)getpid());
+		fclose(pfp);
+	}
+
 	char *const unmute[] = { "wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", "0", NULL };
 	run_argv_sync(unmute);
 
@@ -732,7 +758,7 @@ static int do_jarvis_listen(bool as_json, bool quiet, const char *wm_override, c
 	char lang[32], wake[64], state_path[256], stream_cmd[512];
 	get_cli_default_lang(ont, lang, sizeof(lang));
 	get_cli_wake_word(ont, wake, sizeof(wake));
-	snprintf(state_path, sizeof(state_path), "/tmp/jarvis-voice-%s.state", get_cli_username());
+	snprintf(state_path, sizeof(state_path), "/tmp/jarvis-voice-%s.state", u);
 
 	int silence_ms = jarvis_rc_get_int("cmd_silence_ms", 750);
 	int wait_ms = jarvis_rc_get_int("listen_wait_ms", 6000);
@@ -741,6 +767,16 @@ static int do_jarvis_listen(bool as_json, bool quiet, const char *wm_override, c
 
 	write_voice_state("jarvis-cmd");
 	notify_status_bar();
+
+	char chime_wav[256];
+	snprintf(chime_wav, sizeof(chime_wav), "/tmp/jarvis-chime-%s.wav", u);
+	if (access(chime_wav, R_OK) != 0) {
+		jarvis_voice_write_earcon_wav(chime_wav, false);
+	}
+	if (access(chime_wav, R_OK) == 0) {
+		char *const chime_argv[] = { "pw-play", "--volume=0.75", chime_wav, NULL };
+		desktop_core_spawn_detached_argv(chime_argv);
+	}
 
 	if (!quiet) {
 		char ltitle[128], lbody[256];
@@ -759,6 +795,8 @@ static int do_jarvis_listen(bool as_json, bool quiet, const char *wm_override, c
 		usleep(80000);
 		ok = daemon_cmd_timeout(stream_cmd, 25, resp, sizeof(resp));
 	}
+
+	unlink(pid_path);
 
 	if (ok && strncmp(resp, "OK|", 3) == 0) {
 		char *transcript = resp + 3;
@@ -936,8 +974,8 @@ static void open_ren_terminal(const char *wm_override, const char *extra_mod)
 
 	char *const search[] = { "xdotool", "search", "--class", "jarvis-ren", NULL };
 	if (run_argv_sync(search) == 0) {
-		char *const focus[] = { "dwm-msg", "focus-class", "jarvis-ren", NULL };
-		if (run_argv_sync(focus) == 0) return;
+		char *const pull[] = { "dwm-msg", "pull-class", "jarvis-ren", NULL };
+		if (run_argv_sync(pull) == 0) return;
 	}
 
 	char *const term_argv[] = {
