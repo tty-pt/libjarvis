@@ -4118,12 +4118,16 @@ resolve_default_whisper_models(char *main_out, size_t main_sz, char *wake_out, s
 
 	if (!have_main) {
 		static const char *const multi_cands[] = {
+			"ggml-large-v3-turbo-q5_0.bin",
+			"ggml-large-v3-turbo-q8_0.bin",
+			"ggml-large-v3-turbo.bin",
+			"ggml-large-v3-q5_0.bin",
+			"ggml-large-v3.bin",
 			"ggml-small-q8_0.bin",
 			"ggml-small-q5_1.bin",
 			"ggml-base-q8_0.bin",
 			"ggml-base-q5_1.bin",
 			"ggml-base.bin",
-			"ggml-large-v3-turbo-q5_0.bin",
 			NULL
 		};
 		static const char *const en_cands[] = {

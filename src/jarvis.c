@@ -32,11 +32,13 @@ static void print_usage(const char *prog)
 		"  stop | off                                Disable wake-word listener\n"
 		"  restart                                   Restart jarvisd daemon to apply config changes\n"
 		"  toggle                                    Toggle wake-word listener on/off\n"
+		"  listen                                    Capture a single voice command now (no wake word) -> ren\n"
 		"  status                                    Print listener status ('on' or 'off')\n"
 		"  doctor                                    Check audio, Whisper, GPU, TTS, ren, and daemon health\n"
 		"  setup                                     Install missing defaults (Whisper model, PipeWire AEC)\n"
 		"  lockdown | lock                           Disable listener and lock screen\n"
 		"  menu                                      Open interactive voice & daemon settings menu\n"
+		"  ren                                       Open/focus the tmux 'jarvis' ren terminal session\n"
 		"  config [key [value] | unset <key>]        Get, set, or unset ~/.jarvisrc configuration values\n"
 		"  tts-on [voice]                            Enable neural TTS (optionally setting voice or 'auto')\n"
 		"  tts-off                                   Disable neural TTS (0 KB idle RAM)\n"
@@ -216,10 +218,35 @@ static int run_menu_program(
 static int cli_dmenu(const char *prompt, const char *items, char *out_sel, size_t out_sz)
 {
 	const char *p = (prompt && *prompt) ? prompt : "Jarvis:";
-	char *const dmenu_argv[] = { "dmenu", "-i", "-p", (char *)p, NULL };
+	char fn[128], nb[32], nf[32], sb[32], sf[32], lines_buf[16];
+	jarvis_rc_get("dmenu_font", "Ubuntu Sans:style=Medium:size=12:antialias=true:autohint=true", fn, sizeof(fn));
+	jarvis_rc_get("dmenu_nb", "#11111b", nb, sizeof(nb));
+	jarvis_rc_get("dmenu_nf", "#a6adc8", nf, sizeof(nf));
+	jarvis_rc_get("dmenu_sb", "#7c6ff2", sb, sizeof(sb));
+	jarvis_rc_get("dmenu_sf", "#ffffff", sf, sizeof(sf));
+
+	int max_lines = jarvis_rc_get_int("dmenu_lines", 12);
+	if (max_lines < 4) max_lines = 4;
+	if (max_lines > 24) max_lines = 24;
+	int nlines = 0;
+	if (items && *items) {
+		nlines = 1;
+		for (const char *c = items; *c; c++) {
+			if (*c == '\n' && c[1] != '\0') nlines++;
+		}
+	}
+	int lines = (nlines > 0 && nlines < max_lines) ? nlines : max_lines;
+	if (lines < 4) lines = 4;
+	snprintf(lines_buf, sizeof(lines_buf), "%d", lines);
+
+	char *const dmenu_argv[] = {
+		"dmenu", "-i", "-l", lines_buf,
+		"-fn", fn, "-nb", nb, "-nf", nf, "-sb", sb, "-sf", sf,
+		"-p", (char *)p, NULL
+	};
 	int rc = run_menu_program(dmenu_argv, items, out_sel, out_sz);
 	if (rc == -127 && getenv("WAYLAND_DISPLAY")) {
-		char *const bemenu_argv[] = { "bemenu", "-i", "-p", (char *)p, NULL };
+		char *const bemenu_argv[] = { "bemenu", "-i", "-l", lines_buf, "-p", (char *)p, NULL };
 		rc = run_menu_program(bemenu_argv, items, out_sel, out_sz);
 		if (rc == -127) {
 			char *const wofi_argv[] = { "wofi", "--dmenu", "-i", "-p", (char *)p, NULL };
@@ -247,14 +274,14 @@ static void notify_status_bar(void)
 
 static int g_cli_port_override = 0;
 
-static bool daemon_cmd(const char *cmd, char *out_resp, size_t resp_sz)
+static bool daemon_cmd_timeout(const char *cmd, int timeout_sec, char *out_resp, size_t resp_sz)
 {
 	if (out_resp && resp_sz > 0) out_resp[0] = '\0';
 	int port = (g_cli_port_override > 0) ? g_cli_port_override : jarvis_rc_get_int("port", 8179);
 	int s = socket(AF_INET, SOCK_STREAM, 0);
 	if (s < 0) return false;
 
-	struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
+	struct timeval tv = { .tv_sec = timeout_sec > 0 ? timeout_sec : 2, .tv_usec = 0 };
 	setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 	setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
@@ -274,15 +301,25 @@ static bool daemon_cmd(const char *cmd, char *out_resp, size_t resp_sz)
 		write_all_fd(s, req, (size_t)n);
 	}
 	if (out_resp && resp_sz > 0) {
-		ssize_t rd = read(s, out_resp, resp_sz - 1);
-		if (rd > 0) {
-			out_resp[rd] = '\0';
-			size_t l = strlen(out_resp);
-			while (l > 0 && isspace((unsigned char)out_resp[l - 1])) out_resp[--l] = '\0';
+		size_t total = 0;
+		while (total + 1 < resp_sz) {
+			ssize_t rd = read(s, out_resp + total, resp_sz - 1 - total);
+			if (rd < 0 && errno == EINTR) continue;
+			if (rd <= 0) break;
+			total += (size_t)rd;
+			if (memchr(out_resp, '\n', total) != NULL) break;
 		}
+		out_resp[total] = '\0';
+		size_t l = total;
+		while (l > 0 && isspace((unsigned char)out_resp[l - 1])) out_resp[--l] = '\0';
 	}
 	close(s);
 	return true;
+}
+
+static bool daemon_cmd(const char *cmd, char *out_resp, size_t resp_sz)
+{
+	return daemon_cmd_timeout(cmd, 2, out_resp, resp_sz);
 }
 
 static bool is_daemon_listening(void)
@@ -662,6 +699,102 @@ static void do_jarvis_stop(bool quiet)
 	}
 }
 
+static void write_voice_state(const char *state)
+{
+	const char *u = get_cli_username();
+	char path[256], tmp[272];
+	snprintf(path, sizeof(path), "/tmp/jarvis-voice-%s.state", u);
+	if (!state || !*state) {
+		unlink(path);
+		return;
+	}
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	FILE *fp = fopen(tmp, "w");
+	if (fp) {
+		fprintf(fp, "%s\n", state);
+		fclose(fp);
+		rename(tmp, path);
+	}
+}
+
+static int do_jarvis_listen(bool as_json, bool quiet, const char *wm_override, const char *extra_mod)
+{
+	char *const unmute[] = { "wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", "0", NULL };
+	run_argv_sync(unmute);
+
+	bool was_listening = is_daemon_listening();
+	ensure_daemon_running(was_listening);
+
+	char resp[4300];
+	daemon_cmd("TTS_INTERRUPT", resp, sizeof(resp));
+
+	const jarvis_ontology_t *ont = get_cli_ont();
+	char lang[32], wake[64], state_path[256], stream_cmd[512];
+	get_cli_default_lang(ont, lang, sizeof(lang));
+	get_cli_wake_word(ont, wake, sizeof(wake));
+	snprintf(state_path, sizeof(state_path), "/tmp/jarvis-voice-%s.state", get_cli_username());
+
+	int silence_ms = jarvis_rc_get_int("cmd_silence_ms", 750);
+	int wait_ms = jarvis_rc_get_int("listen_wait_ms", 6000);
+	if (silence_ms < 400) silence_ms = 400;
+	if (wait_ms < 1000) wait_ms = 1000;
+
+	write_voice_state("jarvis-cmd");
+	notify_status_bar();
+
+	if (!quiet) {
+		char ltitle[128], lbody[256];
+		jarvis_ontology_format_ui(ont, "listening_title", wake, "  {Wake} Listening...", ltitle, sizeof(ltitle));
+		jarvis_ontology_format_ui(ont, "listening_body", wake, "Speak your command now.", lbody, sizeof(lbody));
+		cli_notify(ltitle, lbody);
+	}
+
+	snprintf(stream_cmd, sizeof(stream_cmd), "STREAM|cmd|%s|-36|%d|%d|%s",
+	         lang[0] ? lang : "auto", silence_ms, wait_ms, state_path);
+
+	bool ok = daemon_cmd_timeout(stream_cmd, 25, resp, sizeof(resp));
+	if (ok && resp[0] == '\0' && was_listening) {
+		char cancel_resp[64];
+		daemon_cmd("CANCEL", cancel_resp, sizeof(cancel_resp));
+		usleep(80000);
+		ok = daemon_cmd_timeout(stream_cmd, 25, resp, sizeof(resp));
+	}
+
+	if (ok && strncmp(resp, "OK|", 3) == 0) {
+		char *transcript = resp + 3;
+		desktop_core_trim_trailing(transcript);
+		while (*transcript && isspace((unsigned char)*transcript)) transcript++;
+		if (*transcript) {
+			write_voice_state("processing");
+			notify_status_bar();
+			if (!quiet && !as_json) {
+				char hdr[128];
+				jarvis_ontology_format_ui(ont, "notify_title", wake, "  {Wake}", hdr, sizeof(hdr));
+				cli_notify(hdr, transcript);
+			}
+			int rc = dispatch_ren_query(transcript, as_json, quiet, wm_override, extra_mod);
+			write_voice_state(was_listening ? "jarvis-idle" : NULL);
+			notify_status_bar();
+			return rc;
+		}
+	}
+
+	write_voice_state(was_listening ? "jarvis-idle" : NULL);
+	notify_status_bar();
+
+	const char *reason = (!ok) ? "jarvisd unavailable" : (resp[0] ? resp : "EMPTY");
+	if (as_json) {
+		char er[128];
+		desktop_core_json_escape(reason, er, sizeof(er));
+		printf("{\"ok\":false,\"error\":\"%s\"}\n", er);
+	} else if (!quiet && strcmp(reason, "CANCELLED") != 0) {
+		char ntitle[128];
+		jarvis_ontology_format_ui(ont, "notify_title", wake, "  {Wake}", ntitle, sizeof(ntitle));
+		cli_notify(ntitle, !ok ? "Voice daemon unavailable." : "No speech detected.");
+	}
+	return 1;
+}
+
 static void do_jarvis_lockdown(bool quiet)
 {
 	do_jarvis_stop(true);
@@ -823,7 +956,13 @@ static void do_jarvis_menu(const char *wm_override, const char *extra_mod)
 	char voice[64], lang[32], model_path[512], wake[64];
 	get_cli_default_voice(ont, voice, sizeof(voice));
 	get_cli_default_lang(ont, lang, sizeof(lang));
-	jarvis_rc_get("whisper_model", "ggml-base-q8_0.bin", model_path, sizeof(model_path));
+	if (!jarvis_rc_get("whisper_model", NULL, model_path, sizeof(model_path)) || !model_path[0]) {
+		const char *home = getenv("HOME");
+		snprintf(model_path, sizeof(model_path), "%s/.local/share/whisper/ggml-large-v3-turbo-q5_0.bin",
+		         home ? home : "");
+		if (access(model_path, R_OK) != 0)
+			snprintf(model_path, sizeof(model_path), "ggml-large-v3-turbo-q5_0.bin");
+	}
 	get_cli_wake_word(ont, wake, sizeof(wake));
 	int fms = jarvis_rc_get_int("followup_ms", 8000);
 
@@ -885,12 +1024,14 @@ static void do_jarvis_menu(const char *wm_override, const char *extra_mod)
 		if (running) do_jarvis_stop(false);
 		else do_jarvis_start(false);
 	} else if (strncmp(choice, "2.", 2) == 0) {
-		char v_auto[128], v_off[128], vprompt[128], vitems[1664];
+		char v_auto[128], v_off[128], vprompt[128], vitems[2048];
 		jarvis_ontology_format_ui(ont, "menu_voice_auto", wake, "auto                         (Automatic neural voice for active language)", v_auto, sizeof(v_auto));
 		jarvis_ontology_format_ui(ont, "menu_voice_off", wake, "off                          (Disable Neural TTS Voice)", v_off, sizeof(v_off));
 		jarvis_ontology_format_ui(ont, "voice_prompt", wake, "🗣 TTS Voice:", vprompt, sizeof(vprompt));
 		snprintf(vitems, sizeof(vitems),
 			"%s\n"
+			"edge:pt-PT-RaquelNeural      (Português de Portugal — Neural, Raquel)\n"
+			"edge:pt-PT-DuarteNeural      (Português de Portugal — Neural, Duarte)\n"
 			"pm_tuga                      (Português de Portugal — Male, Tuga)\n"
 			"pm_alex                      (Português — Male, Alex)\n"
 			"pm_santa                     (Português — Male, Santa)\n"
@@ -921,7 +1062,8 @@ static void do_jarvis_menu(const char *wm_override, const char *extra_mod)
 						jarvis_rc_unset("tts_lang");
 						jarvis_resolve_tts_voice(ont, resolved_v, sizeof(resolved_v));
 					} else {
-						const char *tlang = (vid[0] == 'p') ? "pt-pt" : ((vid[0] == 'a') ? "en-us" : "en-gb-x-rp");
+						const char *tlang = (strncmp(vid, "edge:pt", 7) == 0 || vid[0] == 'p') ? "pt-pt"
+							: ((strncmp(vid, "edge:en-US", 10) == 0 || vid[0] == 'a') ? "en-us" : "en-gb-x-rp");
 						jarvis_rc_set("tts_lang", tlang);
 						snprintf(resolved_v, sizeof(resolved_v), "%s", vid);
 					}
@@ -983,13 +1125,14 @@ static void do_jarvis_menu(const char *wm_override, const char *extra_mod)
 			}
 		}
 	} else if (strncmp(choice, "6.", 2) == 0) {
-		char m1[128], m2[128], m3[128], m4[128], wprompt[128], mitems[640];
+		char m0[128], m1[128], m2[128], m3[128], m4[128], wprompt[128], mitems[768];
+		jarvis_ontology_format_ui(ont, "menu_model_large_turbo", wake, "ggml-large-v3-turbo-q5_0.bin (548 MB - Large v3 Turbo Multilingual Q5)", m0, sizeof(m0));
 		jarvis_ontology_format_ui(ont, "menu_model_base_q8", wake, "ggml-base-q8_0.bin           (78 MB  - Fast Multilingual Q8)", m1, sizeof(m1));
 		jarvis_ontology_format_ui(ont, "menu_model_small_q8", wake, "ggml-small-q8_0.bin          (252 MB - High-Accuracy Multilingual Q8)", m2, sizeof(m2));
 		jarvis_ontology_format_ui(ont, "menu_model_small_q5", wake, "ggml-small-q5_1.bin          (182 MB - Multilingual Q5)", m3, sizeof(m3));
 		jarvis_ontology_format_ui(ont, "menu_model_en_q8", wake, "ggml-base.en-q8_0.bin        (78 MB  - English-Only Fast Q8)", m4, sizeof(m4));
 		jarvis_ontology_format_ui(ont, "whisper_prompt", wake, "🧠 Whisper Model:", wprompt, sizeof(wprompt));
-		snprintf(mitems, sizeof(mitems), "%s\n%s\n%s\n%s", m1, m2, m3, m4);
+		snprintf(mitems, sizeof(mitems), "%s\n%s\n%s\n%s\n%s", m0, m1, m2, m3, m4);
 		char mchoice[256] = {0};
 		if (cli_dmenu(wprompt, mitems, mchoice, sizeof(mchoice)) > 0 && mchoice[0]) {
 			char mfile[128] = {0};
@@ -1117,9 +1260,11 @@ static bool find_any_whisper_model(const char *home, bool allow_en_only, char *o
 	}
 	out[0] = '\0';
 	static const char *const multi[] = {
-		"ggml-small-q8_0.bin", "ggml-small-q5_1.bin",
-		"ggml-base-q8_0.bin",  "ggml-base-q5_1.bin",
-		"ggml-base.bin",       "ggml-large-v3-turbo-q5_0.bin", NULL
+		"ggml-large-v3-turbo-q5_0.bin", "ggml-large-v3-turbo-q8_0.bin",
+		"ggml-large-v3-turbo.bin",      "ggml-large-v3-q5_0.bin",
+		"ggml-large-v3.bin",            "ggml-small-q8_0.bin",
+		"ggml-small-q5_1.bin",          "ggml-base-q8_0.bin",
+		"ggml-base-q5_1.bin",           "ggml-base.bin", NULL
 	};
 	static const char *const en[] = {
 		"ggml-base.en-q8_0.bin", "ggml-small.en-q5_1.bin", NULL
@@ -1398,9 +1543,9 @@ static int do_jarvis_setup(bool dry_run, bool as_json)
 	                                        model_path, sizeof(model_path));
 	const char *model_action = "present";
 	if (!has_model) {
-		snprintf(model_path, sizeof(model_path), "%s/ggml-base-q8_0.bin", wdir);
+		snprintf(model_path, sizeof(model_path), "%s/ggml-large-v3-turbo-q5_0.bin", wdir);
 		static const char *const url =
-			"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q8_0.bin";
+			"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin";
 		if (dry_run) {
 			model_action = "would-download";
 		} else {
@@ -1561,10 +1706,12 @@ int main(int argc, char **argv)
 			    strcmp(argv[i], "stop") == 0 || strcmp(argv[i], "off") == 0 ||
 			    strcmp(argv[i], "jarvis-stop") == 0 || strcmp(argv[i], "restart") == 0 ||
 			    strcmp(argv[i], "toggle") == 0 || strcmp(argv[i], "jarvis-toggle") == 0 ||
+			    strcmp(argv[i], "listen") == 0 ||
 			    strcmp(argv[i], "status") == 0 || strcmp(argv[i], "doctor") == 0 ||
 			    strcmp(argv[i], "setup") == 0 ||
 			    strcmp(argv[i], "lockdown") == 0 || strcmp(argv[i], "lock") == 0 ||
-			    strcmp(argv[i], "menu") == 0 || strcmp(argv[i], "tts-off") == 0) {
+			    strcmp(argv[i], "menu") == 0 || strcmp(argv[i], "ren") == 0 ||
+			    strcmp(argv[i], "ren-show") == 0 || strcmp(argv[i], "tts-off") == 0) {
 				subcmd = argv[i];
 				continue;
 			}
@@ -1631,6 +1778,9 @@ int main(int argc, char **argv)
 			else do_jarvis_start(quiet);
 			return 0;
 		}
+		if (strcmp(subcmd, "listen") == 0) {
+			return do_jarvis_listen(as_json, quiet, wm_override, extra_mod);
+		}
 		if (strcmp(subcmd, "status") == 0) {
 			bool on = is_daemon_listening();
 			if (as_json) printf("{\"listening\":%s}\n", on ? "true" : "false");
@@ -1649,6 +1799,10 @@ int main(int argc, char **argv)
 		}
 		if (strcmp(subcmd, "menu") == 0) {
 			do_jarvis_menu(wm_override, extra_mod);
+			return 0;
+		}
+		if (strcmp(subcmd, "ren") == 0 || strcmp(subcmd, "ren-show") == 0) {
+			open_ren_terminal(wm_override, extra_mod);
 			return 0;
 		}
 		if (strcmp(subcmd, "tts-on") == 0) {
