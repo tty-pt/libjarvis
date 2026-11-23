@@ -333,6 +333,18 @@ static void x11_core_get_geometry(const char *wid_str, int *out_x, int *out_y, i
 	XCloseDisplay(dpy);
 }
 
+static __attribute__((unused)) void x11_core_get_screen_size(int *out_w, int *out_h)
+{
+	if (out_w) *out_w = 0;
+	if (out_h) *out_h = 0;
+	Display *dpy = XOpenDisplay(NULL);
+	if (!dpy) return;
+	int scr = DefaultScreen(dpy);
+	if (out_w) *out_w = DisplayWidth(dpy, scr);
+	if (out_h) *out_h = DisplayHeight(dpy, scr);
+	XCloseDisplay(dpy);
+}
+
 static __attribute__((unused)) void x11_core_get_mouse_location(int *out_x, int *out_y)
 {
 	*out_x = 0; *out_y = 0;

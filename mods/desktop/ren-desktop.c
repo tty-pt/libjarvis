@@ -17,6 +17,58 @@
 #include "../../include/ttypt/desktop-core.h"
 #include <ttypt/xy.h>
 
+static bool desktop_extract_json_str(const char *json, const char *key, char *out, size_t out_sz)
+{
+	if (!json || !key || !out || out_sz == 0) return false;
+	out[0] = '\0';
+	char pat[64];
+	snprintf(pat, sizeof(pat), "\"%s\":\"", key);
+	const char *p = strstr(json, pat);
+	if (!p) return false;
+	p += strlen(pat);
+	size_t w = 0;
+	while (*p && *p != '"' && w + 1 < out_sz) {
+		if (*p == '\\' && p[1]) p++;
+		out[w++] = *p++;
+	}
+	out[w] = '\0';
+	return w > 0;
+}
+
+static bool desktop_find_new_window(
+	const char *before_json, const char *after_json, char *out_desc, size_t out_sz)
+{
+	if (!after_json || !out_desc || out_sz == 0) return false;
+	out_desc[0] = '\0';
+	const char *p = after_json;
+	while ((p = strstr(p, "{\"id\":\"")) != NULL) {
+		const char *id_start = p + 7;
+		const char *id_end = strchr(id_start, '"');
+		if (!id_end || id_end == id_start || (size_t)(id_end - id_start) > 32) {
+			p += 7;
+			continue;
+		}
+		char needle[48];
+		snprintf(needle, sizeof(needle), "\"id\":\"%.*s\"", (int)(id_end - id_start), id_start);
+		if (!before_json || !strstr(before_json, needle)) {
+			const char *obj_end = strchr(p, '}');
+			size_t obj_len = obj_end ? (size_t)(obj_end - p + 1) : strlen(p);
+			char obj[512];
+			if (obj_len >= sizeof(obj)) obj_len = sizeof(obj) - 1;
+			memcpy(obj, p, obj_len);
+			obj[obj_len] = '\0';
+
+			char cls[96] = {0}, title[128] = {0};
+			desktop_extract_json_str(obj, "class", cls, sizeof(cls));
+			desktop_extract_json_str(obj, "title", title, sizeof(title));
+			snprintf(out_desc, out_sz, "%s '%.64s'", cls[0] ? cls : "window", title);
+			return true;
+		}
+		p = id_end;
+	}
+	return false;
+}
+
 static int tool_open_app(const char *args, char **out_result)
 {
 	while (args && *args == ' ') args++;
@@ -31,12 +83,59 @@ static int tool_open_app(const char *args, char **out_result)
 		*out_result = strdup(err);
 		return -1;
 	}
+
+	char *before_wins = NULL;
+	bool have_x11 = (ren_call_tool("x11_windows", "", &before_wins) == 0 && before_wins != NULL);
+
 	if (desktop_core_spawn_detached_sh(resolved) < 0) {
+		free(before_wins);
 		*out_result = strdup("Error: failed to launch application");
 		return -1;
 	}
-	char buf[384];
-	snprintf(buf, sizeof(buf), "launched %.320s", resolved);
+
+	char mapped_desc[256] = {0}, focused_desc[256] = {0};
+	if (have_x11) {
+		for (int i = 0; i < 12; i++) {
+			if (ren_is_interrupted()) break;
+			usleep(100000);
+			char *now_wins = NULL;
+			if (ren_call_tool("x11_windows", "", &now_wins) == 0 && now_wins) {
+				bool found = desktop_find_new_window(before_wins, now_wins, mapped_desc, sizeof(mapped_desc));
+				free(now_wins);
+				if (found) {
+					usleep(60000);
+					break;
+				}
+			} else {
+				free(now_wins);
+				break;
+			}
+		}
+		char *foc_json = NULL;
+		if (ren_call_tool("x11_windows", "focused", &foc_json) == 0 && foc_json) {
+			char fcls[96] = {0}, ftitle[128] = {0};
+			desktop_extract_json_str(foc_json, "class", fcls, sizeof(fcls));
+			desktop_extract_json_str(foc_json, "title", ftitle, sizeof(ftitle));
+			if (fcls[0] || ftitle[0]) {
+				snprintf(focused_desc, sizeof(focused_desc), "%s '%.64s'",
+				         fcls[0] ? fcls : "window", ftitle);
+			}
+		}
+		free(foc_json);
+	}
+	free(before_wins);
+
+	char buf[768];
+	if (mapped_desc[0] && focused_desc[0]) {
+		snprintf(buf, sizeof(buf), "launched %.200s (mapped: %s; focused: %s)",
+		         resolved, mapped_desc, focused_desc);
+	} else if (mapped_desc[0]) {
+		snprintf(buf, sizeof(buf), "launched %.240s (mapped: %s)", resolved, mapped_desc);
+	} else if (focused_desc[0]) {
+		snprintf(buf, sizeof(buf), "launched %.240s (focused: %s)", resolved, focused_desc);
+	} else {
+		snprintf(buf, sizeof(buf), "launched %.320s", resolved);
+	}
 	*out_result = strdup(buf);
 	return 0;
 }
