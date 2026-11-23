@@ -13,13 +13,13 @@ jobs:
     with:
       name: libjarvis
       run_tests: true
-      deps: "libstele,libcorm,libxylem"
-      deps_apk: "libstele,libcorm,libxylem"
-      deps_rpm: "libstele,libcorm,libxylem"
-      deps_pacman: "libstele,libcorm,libxylem"
-      deps_brew: "libstele,libcorm,libxylem"
-      deps_openbsd: "libstele,libcorm,libxylem"
-      deps_winget_tty: "libstele,libcorm,libxylem"
+      deps: "libstele,libcorm,libxylem,axil-auren"
+      deps_apk: "libstele,libcorm,libxylem,axil-auren"
+      deps_rpm: "libstele,libcorm,libxylem,axil-auren"
+      deps_pacman: "libstele,libcorm,libxylem,axil-auren"
+      deps_brew: "libstele,libcorm,libxylem,axil-auren"
+      deps_openbsd: "libstele,libcorm,libxylem,axil-auren"
+      deps_winget_tty: "libstele,libcorm,libxylem,axil-auren"
       publish_to: ${{ github.event_name == 'workflow_dispatch' && 'rpm,brew' || 'deb,apk,rpm,pacman,brew,openbsd,winget' }}
       run_publish: ${{ startsWith(github.ref, 'refs/tags/') }}
     secrets: inherit

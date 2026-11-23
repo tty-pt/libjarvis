@@ -203,6 +203,22 @@ static void test_load_all_ren_modules(void)
 	assert(atspi_score_text_field("File Save", "save", 100, 70, 45) == 45);
 	assert(atspi_score_text_field("Cancel", "save", 100, 70, 45) == 0);
 
+	/* Verify pure-C YouTube videoId extraction helper */
+	{
+		char vid[16] = {0};
+		const char *html_ok = "{\"videoId\":\"bad\",\"x\":1},\"videoId\":\"not$valid12\",\"videoId\":\"dQw4w9WgXcQ\",\"videoId\":\"9bZkp7q19f0\"";
+		assert(desktop_core_find_yt_video_id(html_ok, strlen(html_ok), vid, sizeof(vid)));
+		assert(strcmp(vid, "dQw4w9WgXcQ") == 0);
+
+		const char *html_long = "{\"videoId\":\"123456789012\"}";
+		assert(!desktop_core_find_yt_video_id(html_long, strlen(html_long), vid, sizeof(vid)));
+		assert(vid[0] == '\0');
+
+		const char *html_none = "<html><body>no video key here</body></html>";
+		assert(!desktop_core_find_yt_video_id(html_none, strlen(html_none), vid, sizeof(vid)));
+		assert(!desktop_core_find_yt_video_id(html_ok, strlen(html_ok), vid, 8));
+	}
+
 	/* Verify ren-desktop ui tool validates args, @win, and missing targets cleanly */
 	rc = ren_call_tool("ui", "", &out);
 	assert(rc != 0 && out != NULL && strstr(out, "usage:") != NULL);

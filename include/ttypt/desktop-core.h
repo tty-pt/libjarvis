@@ -253,6 +253,91 @@ static __attribute__((unused)) void desktop_core_url_encode(const char *src, cha
 	dst[w] = '\0';
 }
 
+static __attribute__((unused)) bool desktop_core_find_yt_video_id(const char *buf, size_t len, char *out_id, size_t id_sz)
+{
+	static const char key[] = "\"videoId\":\"";
+	const size_t klen = sizeof(key) - 1; /* 10 */
+	const size_t min_len = klen + 11 + 1; /* "videoId":"XXXXXXXXXXX" */
+	if (!out_id || id_sz < 12) return false;
+	out_id[0] = '\0';
+	if (!buf || len < min_len) return false;
+
+	for (size_t i = 0; i + min_len <= len; i++) {
+		if (memcmp(buf + i, key, klen) != 0) continue;
+		const char *id = buf + i + klen;
+		bool valid = true;
+		for (size_t j = 0; j < 11; j++) {
+			unsigned char c = (unsigned char)id[j];
+			if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			      (c >= '0' && c <= '9') || c == '_' || c == '-')) {
+				valid = false;
+				break;
+			}
+		}
+		if (valid && id[11] == '"') {
+			memcpy(out_id, id, 11);
+			out_id[11] = '\0';
+			return true;
+		}
+	}
+	return false;
+}
+
+static __attribute__((unused)) bool desktop_core_extract_youtube_vid(const char *enc_query, char *out_id, size_t id_sz)
+{
+	if (!out_id || id_sz < 12) return false;
+	out_id[0] = '\0';
+	if (!enc_query || !*enc_query) return false;
+
+	/* Reject anything outside URL-encoded safe characters before passing to shell */
+	for (const unsigned char *p = (const unsigned char *)enc_query; *p; p++) {
+		if (!(isalnum(*p) || *p == '-' || *p == '_' || *p == '.' ||
+		      *p == '~' || *p == '+' || *p == '%')) {
+			return false;
+		}
+	}
+
+	char cmd[1024];
+#ifdef _WIN32
+	snprintf(cmd, sizeof(cmd),
+	         "curl.exe -s -L --max-time 3.5 "
+	         "-A \"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0\" "
+	         "\"https://www.youtube.com/results?search_query=%s\" 2>NUL",
+	         enc_query);
+	FILE *fp = _popen(cmd, "rb");
+#else
+	snprintf(cmd, sizeof(cmd),
+	         "curl -s -L --max-time 3.5 "
+	         "-A 'Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0' "
+	         "'https://www.youtube.com/results?search_query=%s' 2>/dev/null",
+	         enc_query);
+	FILE *fp = popen(cmd, "r");
+#endif
+	if (!fp) return false;
+
+	char buf[4096 + 32];
+	size_t carry = 0;
+	bool found = false;
+	for (;;) {
+		size_t rd = fread(buf + carry, 1, 4096, fp);
+		if (rd == 0) break;
+		size_t total = carry + rd;
+		if (desktop_core_find_yt_video_id(buf, total, out_id, id_sz)) {
+			found = true;
+			break;
+		}
+		carry = total > 24 ? 24 : total;
+		memmove(buf, buf + total - carry, carry);
+	}
+
+#ifdef _WIN32
+	_pclose(fp);
+#else
+	pclose(fp);
+#endif
+	return found;
+}
+
 static __attribute__((unused)) void desktop_core_json_escape(const char *src, char *dst, size_t dst_sz)
 {
 	if (!dst || dst_sz == 0) return;

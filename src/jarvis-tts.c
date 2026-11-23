@@ -1120,24 +1120,50 @@ static bool resolve_edge_bin_and_python(char *bin_out, size_t bin_sz, char *py_o
 		snprintf(bin_out, bin_sz, "edge-tts-pcm");
 	}
 
-	if (home && *home && !env_bin) {
-		static const char *const venvs[] = {
+	if (!env_bin) {
+		if (home && *home) {
+			static const char *const venvs[] = {
 #ifdef _WIN32
-			"%s/.local/share/dwm-voice/venv/Scripts/python.exe",
-			"%s/.venv/Scripts/python.exe",
+				"%s/.local/share/dwm-voice/venv/Scripts/python.exe",
+				"%s/.venv/Scripts/python.exe",
 #else
-			"%s/.local/share/dwm-voice/venv/bin/python",
-			"%s/.venv/bin/python",
+				"%s/.local/share/dwm-voice/venv/bin/python",
+				"%s/.venv/bin/python",
 #endif
-			NULL
-		};
-		for (size_t i = 0; venvs[i]; i++) {
-			snprintf(py_out, py_sz, venvs[i], home);
-			if (jarvis_plat_is_exec(py_out)) {
-				return true;
+				NULL
+			};
+			for (size_t i = 0; venvs[i]; i++) {
+				snprintf(py_out, py_sz, venvs[i], home);
+				if (jarvis_plat_is_exec(py_out)) {
+					return true;
+				}
 			}
+			py_out[0] = '\0';
 		}
-		py_out[0] = '\0';
+
+		bool bin_is_exe = false;
+#ifdef _WIN32
+		size_t blen = strlen(bin_out);
+		if (blen >= 4 && _stricmp(bin_out + blen - 4, ".exe") == 0)
+			bin_is_exe = true;
+#endif
+		if (!bin_is_exe) {
+			static const char *const py_names[] = {
+				"python3",
+				"python",
+#ifdef _WIN32
+				"py",
+#endif
+				NULL
+			};
+			for (size_t i = 0; py_names[i]; i++) {
+				if (jarvis_plat_find_in_path(py_names[i], py_out, py_sz) == 0 &&
+				    jarvis_plat_is_exec(py_out)) {
+					return true;
+				}
+			}
+			py_out[0] = '\0';
+		}
 	}
 	return bin_out[0] != '\0';
 }

@@ -204,28 +204,17 @@ static int tool_media(const char *args, char **out_result)
 		while (*q == ' ') q++;
 		if (*q) {
 			desktop_core_mpris_control("Pause");
-			char enc[512], yt_url[768];
+			char enc[512], yt_url[768], vid_id[16] = {0};
 			desktop_core_url_encode(q, enc, sizeof(enc));
-#if defined(_WIN32)
-			snprintf(yt_url, sizeof(yt_url), "https://www.youtube.com/results?search_query=%s", enc);
-			char *const argv[] = { "cmd.exe", "/c", "start", "", yt_url, NULL };
-			desktop_core_spawn_detached_argv(argv);
-#else
-			char resolve_cmd[1024], vid_id[64] = {0};
-			snprintf(
-				resolve_cmd, sizeof(resolve_cmd),
-				"curl -s -L --max-time 3.5 -A 'Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0' "
-				"'https://www.youtube.com/results?search_query=%s' 2>/dev/null | "
-				"grep -o '\"videoId\":\"[a-zA-Z0-9_-]\\{11\\}\"' | head -n 1 | cut -d'\"' -f4",
-				enc
-			);
-			desktop_core_run_cmd_capture(resolve_cmd, vid_id, sizeof(vid_id));
-			if (strlen(vid_id) == 11) {
+			if (desktop_core_extract_youtube_vid(enc, vid_id, sizeof(vid_id))) {
 				snprintf(yt_url, sizeof(yt_url), "https://www.youtube.com/watch?v=%s&autoplay=1", vid_id);
 			} else {
 				snprintf(yt_url, sizeof(yt_url), "https://www.youtube.com/results?search_query=%s", enc);
 			}
-#ifdef __APPLE__
+#if defined(_WIN32)
+			char *const argv[] = { "cmd.exe", "/c", "start", "", yt_url, NULL };
+			desktop_core_spawn_detached_argv(argv);
+#elif defined(__APPLE__)
 			char *const argv[] = { "open", yt_url, NULL };
 			desktop_core_spawn_detached_argv(argv);
 #else
@@ -234,7 +223,6 @@ static int tool_media(const char *args, char **out_result)
 				char *const xdg[] = { "xdg-open", yt_url, NULL };
 				desktop_core_spawn_detached_argv(xdg);
 			}
-#endif
 #endif
 			char buf[384];
 			snprintf(buf, sizeof(buf), "playing: %.320s", q);

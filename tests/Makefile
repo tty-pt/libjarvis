@@ -9,8 +9,15 @@ endif
 
 all: test_jarvis test_ren_mods test_tts test_seams
 
+TEST_SYS_LIBS :=
+ifeq (${SYS},Unix)
+TEST_SYS_LIBS := -lpthread -ldl
+else ifeq (${SYS},Windows)
+TEST_SYS_LIBS := -lws2_32
+endif
+
 test_jarvis: test_jarvis.c ../lib/libjarvis.$(SO)
-	$(CC) $(CFLAGS) -o $@ test_jarvis.c -L../lib -L../../libstele/lib -Wl,-rpath,${CURDIR}/../lib -Wl,-rpath,${CURDIR}/../../libstele/lib -ljarvis -lstele -lm
+	$(CC) $(CFLAGS) -o $@ test_jarvis.c $(LDFLAGS) -ljarvis -lstele -lm $(if $(filter Windows,$(SYS)),-lws2_32)
 
 ifeq (${uname},Darwin)
 test_ren_mods: test_ren_mods.c ../../axil-auren/lib/libren.$(SO) ../mods/desktop/ax_core.m
@@ -24,10 +31,10 @@ test_ren_mods: test_ren_mods.c ../../axil-auren/lib/libren.$(SO)
 endif
 
 test_tts: test_tts.c ../src/jarvis-tts.c ../src/jarvis-tts.h ../lib/libjarvis.$(SO)
-	$(CC) $(CFLAGS) -I../src -o $@ test_tts.c ../src/jarvis-tts.c $(LDFLAGS) -ljarvis -lstele -lpthread -ldl -lm
+	$(CC) $(CFLAGS) -I../src -o $@ test_tts.c ../src/jarvis-tts.c $(LDFLAGS) -ljarvis -lstele $(TEST_SYS_LIBS) -lm
 
 test_seams: test_seams.c ../lib/libjarvis.$(SO)
-	$(CC) $(CFLAGS) -I../src -o $@ test_seams.c $(LDFLAGS) -ljarvis -lstele -lpthread -lm
+	$(CC) $(CFLAGS) -I../src -o $@ test_seams.c $(LDFLAGS) -ljarvis -lstele $(if $(filter Unix,$(SYS)),-lpthread) $(if $(filter Windows,$(SYS)),-lws2_32) -lm
 
 test: all
 	LD_LIBRARY_PATH=../lib:../../libstele/lib:../../axil-auren/lib:../../libxylem/lib:${HOME}/.local/lib:$${LD_LIBRARY_PATH:-} ./test_seams

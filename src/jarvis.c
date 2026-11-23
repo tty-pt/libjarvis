@@ -205,42 +205,68 @@ static int cli_dmenu(const char *prompt, const char *items, char *out_sel, size_
 	desktop_core_trim_trailing(out_sel);
 	return (int)strlen(out_sel);
 #elif defined(__APPLE__)
-	char script[4096];
-	char clean_items[3072];
+	if (!items || !*items) return 0;
+	size_t ilen = strlen(items);
+	size_t plen = strlen(p);
+	size_t ci_cap = ilen * 2 + 64 * 4 + 16;
+	char *clean_items = (char *)malloc(ci_cap);
+	char *esc_prompt = (char *)malloc(plen * 2 + 1);
+	if (!clean_items || !esc_prompt) {
+		free(clean_items);
+		free(esc_prompt);
+		return -1;
+	}
+
 	size_t ci = 0;
-	if (items && *items) {
-		size_t n_it = 0;
-		const char *line = items;
-		while (*line && n_it < 16 && ci + 4 < sizeof(clean_items)) {
-			const char *nl = strchr(line, '\n');
-			size_t len = nl ? (size_t)(nl - line) : strlen(line);
-			if (len > 0) {
-				if (n_it > 0 && ci + 2 < sizeof(clean_items)) {
-					clean_items[ci++] = ',';
-					clean_items[ci++] = ' ';
-				}
-				clean_items[ci++] = '"';
-				for (size_t k = 0; k < len && ci + 4 < sizeof(clean_items); k++) {
-					if (line[k] == '"' || line[k] == '\\') clean_items[ci++] = '\\';
-					clean_items[ci++] = line[k];
-				}
-				clean_items[ci++] = '"';
-				n_it++;
+	size_t n_it = 0;
+	const char *line = items;
+	while (*line && n_it < 64 && ci + 4 < ci_cap) {
+		const char *nl = strchr(line, '\n');
+		size_t len = nl ? (size_t)(nl - line) : strlen(line);
+		if (len > 0) {
+			if (n_it > 0 && ci + 2 < ci_cap) {
+				clean_items[ci++] = ',';
+				clean_items[ci++] = ' ';
 			}
-			if (!nl) break;
-			line = nl + 1;
+			clean_items[ci++] = '"';
+			for (size_t k = 0; k < len && ci + 4 < ci_cap; k++) {
+				if (line[k] == '"' || line[k] == '\\') clean_items[ci++] = '\\';
+				clean_items[ci++] = line[k];
+			}
+			clean_items[ci++] = '"';
+			n_it++;
 		}
+		if (!nl) break;
+		line = nl + 1;
 	}
 	clean_items[ci] = '\0';
+
+	int rc = 0;
 	if (clean_items[0]) {
-		snprintf(script, sizeof(script),
-		         "choose from list {%s} with prompt \"%s\"", clean_items, p);
+		size_t ep = 0;
+		for (size_t k = 0; k < plen; k++) {
+			if (p[k] == '"' || p[k] == '\\') esc_prompt[ep++] = '\\';
+			esc_prompt[ep++] = p[k];
+		}
+		esc_prompt[ep] = '\0';
+
+		size_t sc_cap = ci + ep + 64;
+		char *script = (char *)malloc(sc_cap);
+		if (!script) {
+			free(clean_items);
+			free(esc_prompt);
+			return -1;
+		}
+		snprintf(script, sc_cap,
+		         "choose from list {%s} with prompt \"%s\"", clean_items, esc_prompt);
 		char *const osa[] = { "osascript", "-e", script, NULL };
-		int rc = run_menu_program(osa, NULL, out_sel, out_sz);
+		rc = run_menu_program(osa, NULL, out_sel, out_sz);
 		if (strcmp(out_sel, "false") == 0) out_sel[0] = '\0';
-		return rc;
+		free(script);
 	}
-	return 0;
+	free(clean_items);
+	free(esc_prompt);
+	return rc;
 #else
 	char fn[128], nb[32], nf[32], sb[32], sf[32], lines_buf[16];
 	jarvis_rc_get("dmenu_font", "Ubuntu Sans:style=Medium:size=12:antialias=true:autohint=true", fn, sizeof(fn));
@@ -1410,7 +1436,9 @@ static int do_jarvis_doctor(bool as_json)
 #ifdef __APPLE__
 	bool has_vulkan = true; /* Apple Metal / CoreML backend */
 #elif defined(_WIN32)
-	bool has_vulkan = false;
+	HMODULE vk_dll = LoadLibraryA("vulkan-1.dll");
+	bool has_vulkan = (vk_dll != NULL);
+	if (vk_dll) FreeLibrary(vk_dll);
 #else
 	bool has_vulkan = (jarvis_plat_is_readable("/dev/dri/renderD128") != 0);
 #endif
@@ -1514,7 +1542,8 @@ static int do_jarvis_doctor(bool as_json)
 #ifdef __APPLE__
 		printf("    %-18s %s\n", "GPU backend:", "Apple Metal / CoreML");
 #elif defined(_WIN32)
-		printf("    %-18s %s\n", "GPU backend:", "CPU / Win32");
+		printf("    %-18s %s\n", "GPU backend:",
+		       has_vulkan ? "Vulkan GPU (vulkan-1.dll)" : "CPU / Win32 (vulkan-1.dll not found)");
 #else
 		printf("    %-18s %s\n", "vulkan GPU:", has_vulkan ? "/dev/dri/renderD128 OK" : "not detected (CPU fallback)");
 #endif

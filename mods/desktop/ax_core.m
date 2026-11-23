@@ -128,6 +128,13 @@ static int ax_score_label(const char *label, const char *query)
 	return 0;
 }
 
+static void ax_enable_app_a11y(AXUIElementRef app)
+{
+	if (!app) return;
+	AXUIElementSetAttributeValue(app, CFSTR("AXManualAccessibility"), kCFBooleanTrue);
+	AXUIElementSetAttributeValue(app, CFSTR("AXEnhancedUserInterface"), kCFBooleanTrue);
+}
+
 static AXUIElementRef ax_resolve_root(const a11y_win_ctx_t *win, char *out_err, size_t err_sz)
 {
 	if (!AXIsProcessTrusted()) {
@@ -151,6 +158,7 @@ static AXUIElementRef ax_resolve_root(const a11y_win_ctx_t *win, char *out_err, 
 
 	AXUIElementRef app = AXUIElementCreateApplication(pid);
 	if (!app) return NULL;
+	ax_enable_app_a11y(app);
 
 	if (win && win->title && win->title[0]) {
 		CFTypeRef wins_ref = NULL;
@@ -628,6 +636,7 @@ static AXUIElementRef ax_resolve_browser_root(int *out_wx, int *out_wy, int *out
 
 	AXUIElementRef app = AXUIElementCreateApplication(pid);
 	if (!app) return NULL;
+	ax_enable_app_a11y(app);
 	CFTypeRef foc_win = NULL;
 	if (AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute, &foc_win) == kAXErrorSuccess &&
 	    foc_win && CFGetTypeID(foc_win) == AXUIElementGetTypeID()) {

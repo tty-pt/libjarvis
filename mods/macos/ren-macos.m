@@ -491,9 +491,26 @@ static int tool_window(const char *args, char **out_result)
 					if (AXUIElementCopyAttributeValue(ax_app, kAXWindowsAttribute, &ax_wins) == kAXErrorSuccess &&
 					    ax_wins && CFGetTypeID(ax_wins) == CFArrayGetTypeID() &&
 					    CFArrayGetCount((CFArrayRef)ax_wins) > 0) {
-						AXUIElementRef w = (AXUIElementRef)CFArrayGetValueAtIndex((CFArrayRef)ax_wins, 0);
+						CFIndex wcnt = CFArrayGetCount((CFArrayRef)ax_wins);
+						AXUIElementRef target_w = (AXUIElementRef)CFArrayGetValueAtIndex((CFArrayRef)ax_wins, 0);
+						if (wins[i].title[0]) {
+							for (CFIndex wi = 0; wi < wcnt; wi++) {
+								AXUIElementRef cand = (AXUIElementRef)CFArrayGetValueAtIndex((CFArrayRef)ax_wins, wi);
+								CFTypeRef t = NULL;
+								char tbuf[256] = {0};
+								if (AXUIElementCopyAttributeValue(cand, kAXTitleAttribute, &t) == kAXErrorSuccess && t) {
+									if (CFGetTypeID(t) == CFStringGetTypeID())
+										CFStringGetCString((CFStringRef)t, tbuf, sizeof(tbuf), kCFStringEncodingUTF8);
+									CFRelease(t);
+								}
+								if (tbuf[0] && desktop_core_str_contains_ci(tbuf, wins[i].title)) {
+									target_w = cand;
+									break;
+								}
+							}
+						}
 						CFTypeRef btn = NULL;
-						if (AXUIElementCopyAttributeValue(w, kAXCloseButtonAttribute, &btn) == kAXErrorSuccess && btn) {
+						if (AXUIElementCopyAttributeValue(target_w, kAXCloseButtonAttribute, &btn) == kAXErrorSuccess && btn) {
 							ok = (AXUIElementPerformAction((AXUIElementRef)btn, kAXPressAction) == kAXErrorSuccess);
 							CFRelease(btn);
 						}

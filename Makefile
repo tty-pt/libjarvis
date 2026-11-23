@@ -159,7 +159,7 @@ mods/ren-jarvis/ren-jarvis.$(SO): mods/ren-jarvis/ren-jarvis.c
 $(WHISPER_A): $(whispercpp)/Makefile
 	$(MAKE) -C $(whispercpp) -j4 whisper
 
-GGML_STATIC_LIBS := $(whispercpp)/ggml/src/libggml.a \
+GGML_STATIC_LIBS = $(whispercpp)/ggml/src/libggml.a \
 	$(shell [ -f "$(whispercpp)/ggml/src/ggml-vulkan/libggml-vulkan.a" ] && echo "$(whispercpp)/ggml/src/ggml-vulkan/libggml-vulkan.a") \
 	$(shell [ -f "$(whispercpp)/ggml/src/ggml-metal/libggml-metal.a" ] && echo "$(whispercpp)/ggml/src/ggml-metal/libggml-metal.a") \
 	$(shell [ -f "$(whispercpp)/ggml/src/ggml-blas/libggml-blas.a" ] && echo "$(whispercpp)/ggml/src/ggml-blas/libggml-blas.a") \
