@@ -48,6 +48,25 @@ static __attribute__((unused)) void desktop_core_trim_trailing(char *s)
 	}
 }
 
+static __attribute__((unused)) void desktop_core_cap_lines(char *s, int max_lines)
+{
+	if (!s || max_lines <= 0) {
+		if (s && max_lines <= 0) s[0] = '\0';
+		return;
+	}
+	int lines = 0;
+	for (size_t i = 0; s[i]; i++) {
+		if (s[i] == '\n') {
+			lines++;
+			if (lines >= max_lines) {
+				s[i] = '\0';
+				break;
+			}
+		}
+	}
+	desktop_core_trim_trailing(s);
+}
+
 static __attribute__((unused)) bool desktop_core_str_contains_ci(const char *haystack, const char *needle)
 {
 	if (!haystack || !needle || !*needle) return false;
@@ -520,7 +539,7 @@ static __attribute__((unused)) void desktop_core_populate_system_health(char *ou
 
 typedef struct {
 	char phrase[128];
-	char exec_cmd[256];
+	char exec_cmd[512];
 } desktop_core_app_entry_t;
 
 #define DESKTOP_CORE_MAX_CACHED_APPS 256
@@ -528,6 +547,42 @@ typedef struct {
 static desktop_core_app_entry_t g_dc_apps[DESKTOP_CORE_MAX_CACHED_APPS];
 static size_t                   g_dc_app_count = 0;
 static bool                     g_dc_apps_loaded = false;
+
+#ifdef _WIN32
+static void desktop_core_scan_win32_start_dir(const char *dir_path, int depth)
+{
+	if (!dir_path || !*dir_path || depth > 3 || g_dc_app_count >= DESKTOP_CORE_MAX_CACHED_APPS)
+		return;
+	char pat[512];
+	snprintf(pat, sizeof(pat), "%.490s\\*", dir_path);
+	WIN32_FIND_DATAA ffd;
+	HANDLE hFind = FindFirstFileA(pat, &ffd);
+	if (hFind == INVALID_HANDLE_VALUE) return;
+	do {
+		if (strcmp(ffd.cFileName, ".") == 0 || strcmp(ffd.cFileName, "..") == 0)
+			continue;
+		if (g_dc_app_count >= DESKTOP_CORE_MAX_CACHED_APPS)
+			break;
+		char full[512];
+		snprintf(full, sizeof(full), "%.240s\\%.240s", dir_path, ffd.cFileName);
+		if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+			desktop_core_scan_win32_start_dir(full, depth + 1);
+			continue;
+		}
+		size_t nlen = strlen(ffd.cFileName);
+		if (nlen > 4 && _stricmp(ffd.cFileName + nlen - 4, ".lnk") == 0) {
+			desktop_core_app_entry_t *ae = &g_dc_apps[g_dc_app_count++];
+			size_t b = nlen - 4;
+			if (b >= sizeof(ae->phrase)) b = sizeof(ae->phrase) - 1;
+			for (size_t i = 0; i < b; i++)
+				ae->phrase[i] = (char)tolower((unsigned char)ffd.cFileName[i]);
+			ae->phrase[b] = '\0';
+			snprintf(ae->exec_cmd, sizeof(ae->exec_cmd), "start \"\" \"%.495s\"", full);
+		}
+	} while (FindNextFileA(hFind, &ffd));
+	FindClose(hFind);
+}
+#endif
 
 static __attribute__((unused)) void desktop_core_scan_desktop_dir(const char *dir_path)
 {
@@ -544,7 +599,7 @@ static __attribute__((unused)) void desktop_core_scan_desktop_dir(const char *di
 			if (b >= sizeof(ae->phrase)) b = sizeof(ae->phrase) - 1;
 			for (size_t i = 0; i < b; i++) ae->phrase[i] = (char)tolower((unsigned char)ent->d_name[i]);
 			ae->phrase[b] = '\0';
-			snprintf(ae->exec_cmd, sizeof(ae->exec_cmd), "open -a \"%s/%s\"", dir_path, ent->d_name);
+			snprintf(ae->exec_cmd, sizeof(ae->exec_cmd), "open -a \"%.220s/%.220s\"", dir_path, ent->d_name);
 			continue;
 		}
 #endif
@@ -619,7 +674,20 @@ static __attribute__((unused)) void desktop_core_ensure_apps_loaded(void)
 	}
 	desktop_core_scan_desktop_dir("/Applications");
 	desktop_core_scan_desktop_dir("/System/Applications");
-#elif !defined(_WIN32)
+#elif defined(_WIN32)
+	const char *appdata = getenv("APPDATA");
+	if (appdata && *appdata) {
+		char user_sm[512];
+		snprintf(user_sm, sizeof(user_sm), "%.400s\\Microsoft\\Windows\\Start Menu\\Programs", appdata);
+		desktop_core_scan_win32_start_dir(user_sm, 0);
+	}
+	const char *progdata = getenv("ProgramData");
+	if (progdata && *progdata) {
+		char sys_sm[512];
+		snprintf(sys_sm, sizeof(sys_sm), "%.400s\\Microsoft\\Windows\\Start Menu\\Programs", progdata);
+		desktop_core_scan_win32_start_dir(sys_sm, 0);
+	}
+#else
 	const char *home = getenv("HOME");
 	if (home && *home) {
 		char user_apps[512];
@@ -762,6 +830,18 @@ static __attribute__((unused)) bool desktop_core_is_terminal_class(const char *w
 	if (!wm_class || !*wm_class) return false;
 	for (size_t i = 0; TERMS[i]; i++) {
 		if (desktop_core_str_contains_ci(wm_class, TERMS[i])) return true;
+	}
+	return false;
+}
+
+static __attribute__((unused)) bool desktop_core_is_browser_name(const char *name)
+{
+	static const char *const BROWSERS[] = {
+		"firefox", "chromium", "chrome", "brave", "safari", "edge", "msedge", "qutebrowser", NULL
+	};
+	if (!name || !*name) return false;
+	for (size_t i = 0; BROWSERS[i]; i++) {
+		if (desktop_core_str_contains_ci(name, BROWSERS[i])) return true;
 	}
 	return false;
 }

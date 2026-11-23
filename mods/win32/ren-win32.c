@@ -146,12 +146,12 @@ static WORD vk_for_name(const char *tok)
 	if (_stricmp(tok, "End") == 0) return VK_END;
 	if (_stricmp(tok, "Page_Up") == 0 || _stricmp(tok, "Prior") == 0) return VK_PRIOR;
 	if (_stricmp(tok, "Page_Down") == 0 || _stricmp(tok, "Next") == 0) return VK_NEXT;
-	if (_stricmp(tok, "MediaPlayPause") == 0) return VK_MEDIA_PLAY_PAUSE;
-	if (_stricmp(tok, "MediaNext") == 0) return VK_MEDIA_NEXT_TRACK;
-	if (_stricmp(tok, "MediaPrev") == 0) return VK_MEDIA_PREV_TRACK;
-	if (_stricmp(tok, "VolumeUp") == 0) return VK_VOLUME_UP;
-	if (_stricmp(tok, "VolumeDown") == 0) return VK_VOLUME_DOWN;
-	if (_stricmp(tok, "VolumeMute") == 0) return VK_VOLUME_MUTE;
+	if (_stricmp(tok, "MediaPlayPause") == 0 || _stricmp(tok, "XF86AudioPlay") == 0) return VK_MEDIA_PLAY_PAUSE;
+	if (_stricmp(tok, "MediaNext") == 0 || _stricmp(tok, "MediaNextTrack") == 0 || _stricmp(tok, "XF86AudioNext") == 0) return VK_MEDIA_NEXT_TRACK;
+	if (_stricmp(tok, "MediaPrev") == 0 || _stricmp(tok, "MediaPrevTrack") == 0 || _stricmp(tok, "XF86AudioPrev") == 0) return VK_MEDIA_PREV_TRACK;
+	if (_stricmp(tok, "VolumeUp") == 0 || _stricmp(tok, "XF86AudioRaiseVolume") == 0) return VK_VOLUME_UP;
+	if (_stricmp(tok, "VolumeDown") == 0 || _stricmp(tok, "XF86AudioLowerVolume") == 0) return VK_VOLUME_DOWN;
+	if (_stricmp(tok, "VolumeMute") == 0 || _stricmp(tok, "XF86AudioMute") == 0) return VK_VOLUME_MUTE;
 	if ((tok[0] == 'F' || tok[0] == 'f') && isdigit((unsigned char)tok[1])) {
 		int fn = atoi(tok + 1);
 		if (fn >= 1 && fn <= 24) return (WORD)(VK_F1 + fn - 1);

@@ -23,6 +23,25 @@ typedef struct {
 	void *ud;
 } a11y_ops_t;
 
+typedef struct {
+	bool found;
+	bool showing;
+	bool defunct;
+	bool busy;
+	int  child_count;
+	char url[512];
+	char title[256];
+} a11y_browser_doc_t;
+
+typedef struct {
+	bool found;
+	bool editable;
+	char role[64];
+	char label[128];
+	int  cx;
+	int  cy;
+} a11y_browser_input_t;
+
 #if defined(__APPLE__)
 #include "ax_core.h"
 
@@ -60,6 +79,38 @@ static inline bool a11y_core_set(const a11y_win_ctx_t *win, const a11y_ops_t *op
 	return ax_core_set(win, ops, query, value, out_msg, out_sz);
 }
 
+static inline bool a11y_core_browser_probe_doc(a11y_browser_doc_t *out_doc)
+{
+	return ax_core_browser_probe_doc(out_doc);
+}
+
+static inline bool a11y_core_browser_collect(const a11y_ops_t *ops, const char *filter_query,
+                                             bool read_mode, size_t skip_chars,
+                                             char *out, size_t out_sz)
+{
+	return ax_core_browser_collect(ops, filter_query, read_mode, skip_chars, out, out_sz);
+}
+
+static inline bool a11y_core_browser_switch_tab(const a11y_ops_t *ops, const char *query,
+                                                char *out_tab_title, size_t title_sz)
+{
+	return ax_core_browser_switch_tab(ops, query, out_tab_title, title_sz);
+}
+
+static inline bool a11y_core_browser_click(const a11y_ops_t *ops, const char *query, int btn,
+                                           char *out_role, size_t role_sz,
+                                           char *out_msg, size_t out_sz)
+{
+	return ax_core_browser_click(ops, query, btn, out_role, role_sz, out_msg, out_sz);
+}
+
+static inline bool a11y_core_browser_ensure_editable(const a11y_ops_t *ops, bool focus_if_needed,
+                                                     a11y_browser_input_t *out_info,
+                                                     char *out_err, size_t err_sz)
+{
+	return ax_core_browser_ensure_editable(ops, focus_if_needed, out_info, out_err, err_sz);
+}
+
 #elif defined(_WIN32)
 #include "uia_core.h"
 
@@ -95,6 +146,38 @@ static inline bool a11y_core_set(const a11y_win_ctx_t *win, const a11y_ops_t *op
                                  const char *query, const char *value, char *out_msg, size_t out_sz)
 {
 	return uia_core_set(win, ops, query, value, out_msg, out_sz);
+}
+
+static inline bool a11y_core_browser_probe_doc(a11y_browser_doc_t *out_doc)
+{
+	return uia_core_browser_probe_doc(out_doc);
+}
+
+static inline bool a11y_core_browser_collect(const a11y_ops_t *ops, const char *filter_query,
+                                             bool read_mode, size_t skip_chars,
+                                             char *out, size_t out_sz)
+{
+	return uia_core_browser_collect(ops, filter_query, read_mode, skip_chars, out, out_sz);
+}
+
+static inline bool a11y_core_browser_switch_tab(const a11y_ops_t *ops, const char *query,
+                                                char *out_tab_title, size_t title_sz)
+{
+	return uia_core_browser_switch_tab(ops, query, out_tab_title, title_sz);
+}
+
+static inline bool a11y_core_browser_click(const a11y_ops_t *ops, const char *query, int btn,
+                                           char *out_role, size_t role_sz,
+                                           char *out_msg, size_t out_sz)
+{
+	return uia_core_browser_click(ops, query, btn, out_role, role_sz, out_msg, out_sz);
+}
+
+static inline bool a11y_core_browser_ensure_editable(const a11y_ops_t *ops, bool focus_if_needed,
+                                                     a11y_browser_input_t *out_info,
+                                                     char *out_err, size_t err_sz)
+{
+	return uia_core_browser_ensure_editable(ops, focus_if_needed, out_info, out_err, err_sz);
 }
 
 #else

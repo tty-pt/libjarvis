@@ -188,6 +188,12 @@ static bool keycode_for_name(const char *tok, CGKeyCode *out_kc)
 		case '9': *out_kc = kVK_ANSI_9; return true;
 		case '-': *out_kc = kVK_ANSI_Minus; return true;
 		case '=': *out_kc = kVK_ANSI_Equal; return true;
+		case '[': *out_kc = kVK_ANSI_LeftBracket; return true;
+		case ']': *out_kc = kVK_ANSI_RightBracket; return true;
+		case '\\': *out_kc = kVK_ANSI_Backslash; return true;
+		case ';': *out_kc = kVK_ANSI_Semicolon; return true;
+		case '\'': *out_kc = kVK_ANSI_Quote; return true;
+		case '`': *out_kc = kVK_ANSI_Grave; return true;
 		case '/': *out_kc = kVK_ANSI_Slash; return true;
 		case '.': *out_kc = kVK_ANSI_Period; return true;
 		case ',': *out_kc = kVK_ANSI_Comma; return true;

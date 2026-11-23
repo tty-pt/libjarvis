@@ -127,7 +127,7 @@ static int tool_open_app(const char *args, char **out_result)
 		*out_result = strdup("Error: usage: open_app <application_name>");
 		return -1;
 	}
-	char resolved[256];
+	char resolved[512];
 	if (!desktop_core_resolve_known_app(args, resolved, sizeof(resolved))) {
 		char err[320];
 		snprintf(err, sizeof(err), "Error: unknown application: %.240s", args);
@@ -361,7 +361,8 @@ static int tool_system(const char *args, char **out_result)
 	    strcasecmp(aspect, "ram") == 0 || strcasecmp(aspect, "processes") == 0 ||
 	    strcasecmp(aspect, "cpu") == 0) {
 #ifdef _WIN32
-		desktop_core_run_cmd_capture("tasklist /FO CSV /NH | head -n 8", top_cpu, sizeof(top_cpu));
+		desktop_core_run_cmd_capture("tasklist /FO CSV /NH", top_cpu, sizeof(top_cpu));
+		desktop_core_cap_lines(top_cpu, 8);
 		snprintf(top_mem, sizeof(top_mem), "%s", top_cpu);
 #elif defined(__APPLE__)
 		desktop_core_run_cmd_capture("ps -Ao pid,comm,%cpu,%mem -r | head -n 7", top_cpu, sizeof(top_cpu));

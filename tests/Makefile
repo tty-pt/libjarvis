@@ -1,20 +1,32 @@
-CC ?= cc
+include ../../mk/portable.mk
+
+CC ?= $(cc)
 CFLAGS := -g -O2 -Wall -Wextra -Wpedantic -fPIC -I../include -I../../libstele/include -I../../axil-auren/include -I../../libxylem/include
-LDFLAGS := -rdynamic -L../lib -L../../libstele/lib -L../../axil-auren/lib -L../../libxylem/lib \
-           -Wl,-rpath,${CURDIR}/../lib -Wl,-rpath,${CURDIR}/../../libstele/lib -Wl,-rpath,${CURDIR}/../../axil-auren/lib -Wl,-rpath,${CURDIR}/../../libxylem/lib
+LDFLAGS := -L../lib -L../../libstele/lib -L../../axil-auren/lib -L../../libxylem/lib
+ifeq (${SYS},Unix)
+LDFLAGS += -rdynamic -Wl,-rpath,${CURDIR}/../lib -Wl,-rpath,${CURDIR}/../../libstele/lib -Wl,-rpath,${CURDIR}/../../axil-auren/lib -Wl,-rpath,${CURDIR}/../../libxylem/lib
+endif
 
 all: test_jarvis test_ren_mods test_tts test_seams
 
-test_jarvis: test_jarvis.c ../lib/libjarvis.so
+test_jarvis: test_jarvis.c ../lib/libjarvis.$(SO)
 	$(CC) $(CFLAGS) -o $@ test_jarvis.c -L../lib -L../../libstele/lib -Wl,-rpath,${CURDIR}/../lib -Wl,-rpath,${CURDIR}/../../libstele/lib -ljarvis -lstele -lm
 
-test_ren_mods: test_ren_mods.c ../../axil-auren/lib/libren.so
+ifeq (${uname},Darwin)
+test_ren_mods: test_ren_mods.c ../../axil-auren/lib/libren.$(SO) ../mods/desktop/ax_core.m
+	$(CC) $(CFLAGS) -o $@ test_ren_mods.c $(CFLAGS-m-Darwin) ../mods/desktop/ax_core.m $(LDFLAGS) -lren -lxylem -lstele -framework ApplicationServices -framework CoreFoundation -framework AppKit -framework Carbon -lobjc -ldl -lpthread
+else ifeq (${SYS},Windows)
+test_ren_mods: test_ren_mods.c ../../axil-auren/lib/libren.$(SO) ../mods/desktop/uia_core.c
+	$(CC) $(CFLAGS) -o $@ test_ren_mods.c ../mods/desktop/uia_core.c $(LDFLAGS) -lren -lxylem -lstele -lole32 -loleaut32 -luuid -luser32 -lpsapi
+else
+test_ren_mods: test_ren_mods.c ../../axil-auren/lib/libren.$(SO)
 	$(CC) $(CFLAGS) -o $@ test_ren_mods.c $(LDFLAGS) -lren -lxylem -lstele -ldl -lpthread
+endif
 
-test_tts: test_tts.c ../src/jarvis-tts.c ../src/jarvis-tts.h ../lib/libjarvis.so
+test_tts: test_tts.c ../src/jarvis-tts.c ../src/jarvis-tts.h ../lib/libjarvis.$(SO)
 	$(CC) $(CFLAGS) -I../src -o $@ test_tts.c ../src/jarvis-tts.c $(LDFLAGS) -ljarvis -lstele -lpthread -ldl -lm
 
-test_seams: test_seams.c ../lib/libjarvis.so
+test_seams: test_seams.c ../lib/libjarvis.$(SO)
 	$(CC) $(CFLAGS) -I../src -o $@ test_seams.c $(LDFLAGS) -ljarvis -lstele -lpthread -lm
 
 test: all

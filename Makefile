@@ -60,20 +60,20 @@ whispercpp := submodules/whisper.cpp/build
 WHISPER_A := $(whispercpp)/src/libwhisper.a
 JARVISD_BIN := bin/jarvisd$(EXE)
 
-VULKAN_SDK := third_party/1.4.328.1
+LINUX_VULKAN_SDK := third_party/1.4.328.1
 VULKAN_SDK_URL := https://sdk.lunarg.com/sdk/download/1.4.328.1/linux/vulkansdk-linux-x86_64-1.4.328.1.tar.xz
 
-$(VULKAN_SDK)/x86_64/share/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake:
+$(LINUX_VULKAN_SDK)/x86_64/share/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake:
 	mkdir -p third_party
 	(curl -fsSL "$(VULKAN_SDK_URL)" -o third_party/vulkan-sdk.tar.xz || wget -qO third_party/vulkan-sdk.tar.xz "$(VULKAN_SDK_URL)")
 	tar -xf third_party/vulkan-sdk.tar.xz -C third_party
 
 ifeq (${uname},Linux)
-$(whispercpp)/Makefile: $(VULKAN_SDK)/x86_64/share/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake
-	@echo "[INFO] Vulkan SDK extracted at $(VULKAN_SDK)"
+$(whispercpp)/Makefile: $(LINUX_VULKAN_SDK)/x86_64/share/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake
+	@echo "[INFO] Vulkan SDK extracted at $(LINUX_VULKAN_SDK)"
 	@mkdir -p $(whispercpp)
 	cd $(whispercpp) && cmake .. \
-		-DCMAKE_PREFIX_PATH=$(CURDIR)/$(VULKAN_SDK)/x86_64 \
+		-DCMAKE_PREFIX_PATH=$(CURDIR)/$(LINUX_VULKAN_SDK)/x86_64 \
 		-DGGML_VULKAN=ON \
 		-DBUILD_SHARED_LIBS=OFF \
 		-DCMAKE_POSITION_INDEPENDENT_CODE=ON \
@@ -85,6 +85,18 @@ $(whispercpp)/Makefile:
 	@mkdir -p $(whispercpp)
 	cd $(whispercpp) && cmake .. \
 		-DGGML_METAL=ON \
+		-DGGML_OPENMP=OFF \
+		-DBUILD_SHARED_LIBS=OFF \
+		-DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+		-DWHISPER_BUILD_EXAMPLES=OFF \
+		-DWHISPER_BUILD_TESTS=OFF \
+		-DWHISPER_BUILD_SERVER=OFF
+else ifeq (${SYS},Windows)
+$(whispercpp)/Makefile:
+	@mkdir -p $(whispercpp)
+	cd $(whispercpp) && cmake .. \
+		-G "MSYS Makefiles" \
+		-DGGML_VULKAN=$(if $(VULKAN_SDK),ON,OFF) \
 		-DGGML_OPENMP=OFF \
 		-DBUILD_SHARED_LIBS=OFF \
 		-DCMAKE_POSITION_INDEPENDENT_CODE=ON \
@@ -120,16 +132,22 @@ mods/macos/ren-macos.$(SO): mods/macos/ren-macos.m include/ttypt/desktop-core.h
 mods/win32/ren-win32.$(SO): mods/win32/ren-win32.c include/ttypt/desktop-core.h
 	$(cc) $(CFLAGS) -I../axil-auren/include -I../libxylem/include -shared -o $@ mods/win32/ren-win32.c $(LDFLAGS) $(MOD_DEPS_LDFLAGS) -luser32 -lgdi32 -lshell32 -lpsapi
 
-mods/firefox/ren-firefox.$(SO): mods/firefox/ren-firefox.c mods/firefox/firefox_core.h
-	$(cc) $(CFLAGS) -I../axil-auren/include -I../libxylem/include -fPIC -shared -o $@ mods/firefox/ren-firefox.c $(LDFLAGS) $(MOD_DEPS_LDFLAGS) $(if $(filter Unix,$(SYS)),-ldl) $(MOD_RPATH_${SYS})
-
 ifeq (${uname},Darwin)
+mods/firefox/ren-firefox.$(SO): mods/firefox/ren-firefox.c mods/firefox/firefox_core.h mods/desktop/ax_core.m mods/desktop/ax_core.h mods/desktop/a11y_core.h
+	$(cc) $(CFLAGS) -I../axil-auren/include -I../libxylem/include -fPIC -shared -o $@ mods/firefox/ren-firefox.c $(CFLAGS-m-Darwin) mods/desktop/ax_core.m $(LDFLAGS) $(MOD_DEPS_LDFLAGS) -framework ApplicationServices -framework CoreFoundation -framework AppKit -framework Carbon -lobjc -ldl $(MOD_RPATH_Darwin)
+
 mods/desktop/ren-desktop.$(SO): mods/desktop/ren-desktop.c mods/desktop/ax_core.m mods/desktop/ax_core.h mods/desktop/a11y_core.h include/ttypt/desktop-core.h
 	$(cc) $(CFLAGS) -I../axil-auren/include -I../libxylem/include -fPIC -shared -o $@ mods/desktop/ren-desktop.c $(CFLAGS-m-Darwin) mods/desktop/ax_core.m $(LDFLAGS) $(MOD_DEPS_LDFLAGS) -framework ApplicationServices -framework CoreFoundation -framework AppKit -framework Carbon -lobjc -ldl $(MOD_RPATH_Darwin)
 else ifeq (${SYS},Windows)
+mods/firefox/ren-firefox.$(SO): mods/firefox/ren-firefox.c mods/firefox/firefox_core.h mods/desktop/uia_core.c mods/desktop/uia_core.h mods/desktop/a11y_core.h
+	$(cc) $(CFLAGS) -I../axil-auren/include -I../libxylem/include -shared -o $@ mods/firefox/ren-firefox.c mods/desktop/uia_core.c $(LDFLAGS) $(MOD_DEPS_LDFLAGS) -lole32 -loleaut32 -luuid -luser32 -lpsapi
+
 mods/desktop/ren-desktop.$(SO): mods/desktop/ren-desktop.c mods/desktop/uia_core.c mods/desktop/uia_core.h mods/desktop/a11y_core.h include/ttypt/desktop-core.h
 	$(cc) $(CFLAGS) -I../axil-auren/include -I../libxylem/include -shared -o $@ mods/desktop/ren-desktop.c mods/desktop/uia_core.c $(LDFLAGS) $(MOD_DEPS_LDFLAGS) -lole32 -loleaut32 -luuid -luser32 -lpsapi
 else
+mods/firefox/ren-firefox.$(SO): mods/firefox/ren-firefox.c mods/firefox/firefox_core.h
+	$(cc) $(CFLAGS) -I../axil-auren/include -I../libxylem/include -fPIC -shared -o $@ mods/firefox/ren-firefox.c $(LDFLAGS) $(MOD_DEPS_LDFLAGS) $(if $(filter Unix,$(SYS)),-ldl) $(MOD_RPATH_${SYS})
+
 mods/desktop/ren-desktop.$(SO): mods/desktop/ren-desktop.c mods/desktop/atspi_core.h mods/desktop/a11y_core.h include/ttypt/desktop-core.h
 	$(cc) $(CFLAGS) -I../axil-auren/include -I../libxylem/include -fPIC -shared -o $@ mods/desktop/ren-desktop.c $(LDFLAGS) $(MOD_DEPS_LDFLAGS) -ldl $(MOD_RPATH_${SYS})
 endif
@@ -150,8 +168,8 @@ GGML_STATIC_LIBS := $(whispercpp)/ggml/src/libggml.a \
 
 JARVISD_LIBS-Linux := -lvulkan -lstdc++ -lgomp -lpthread -ldl -lm
 JARVISD_LIBS-Darwin := -lc++ -framework Accelerate -framework Metal -framework Foundation -framework CoreFoundation -framework AudioUnit -framework AudioToolbox -framework CoreAudio -framework ApplicationServices -framework Carbon -lpthread -ldl -lm
-JARVISD_LIBS-Windows := -lstdc++ -lws2_32 -lwinmm -lole32 -luuid -lm
-JARVISD_LIBS := $(JARVISD_LIBS-${uname})
+JARVISD_LIBS-Windows := $(if $(VULKAN_SDK),-L"$(VULKAN_SDK)/Lib" -lvulkan-1) -lstdc++ -lws2_32 -lwinmm -lole32 -luuid -lm
+JARVISD_LIBS := $(or $(JARVISD_LIBS-${uname}),$(JARVISD_LIBS-${SYS}))
 ifeq ($(JARVISD_LIBS),)
 JARVISD_LIBS := -lstdc++ -lpthread -ldl -lm
 endif
@@ -160,7 +178,7 @@ $(JARVISD_BIN): src/jarvisd.c src/jarvis-tts.c src/jarvis-tts.h $(WHISPER_A) lib
 	@mkdir -p bin
 	$(cc) -Iinclude -Isrc -I$(whispercpp)/../include -I$(whispercpp)/../ggml/include $(CFLAGS) -o $@ src/jarvisd.c src/jarvis-tts.c \
 		$(WHISPER_A) $(GGML_STATIC_LIBS) \
-		-Llib -ljarvis -L../libstele/lib -lstele $(LDFLAGS) $(JARVISD_LIBS) $(LDFLAGS-jarvis-${uname})
+		-Llib -ljarvis -L../libstele/lib -lstele $(LDFLAGS) $(JARVISD_LIBS) $(or $(LDFLAGS-jarvis-${uname}),$(LDFLAGS-jarvis-${SYS}))
 
 test: all
 	$(MAKE) -C tests test

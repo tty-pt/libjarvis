@@ -168,6 +168,23 @@ static void test_load_all_ren_modules(void)
 	assert(desktop_core_is_terminal_class("st-256color"));
 	assert(desktop_core_is_terminal_class("Alacritty"));
 	assert(!desktop_core_is_terminal_class("firefox_firefox"));
+	assert(desktop_core_is_browser_name("firefox"));
+	assert(desktop_core_is_browser_name("Google Chrome"));
+	assert(desktop_core_is_browser_name("msedge"));
+	assert(desktop_core_is_browser_name("Safari"));
+	assert(!desktop_core_is_browser_name("Alacritty"));
+	assert(!desktop_core_is_browser_name(""));
+	assert(!desktop_core_is_browser_name(NULL));
+	{
+		char cap_lines[64];
+		snprintf(cap_lines, sizeof(cap_lines), "l1\nl2\nl3\n");
+		desktop_core_cap_lines(cap_lines, 2);
+		assert(strcmp(cap_lines, "l1\nl2") == 0);
+		desktop_core_cap_lines(cap_lines, 5);
+		assert(strcmp(cap_lines, "l1\nl2") == 0);
+		desktop_core_cap_lines(cap_lines, 0);
+		assert(strcmp(cap_lines, "") == 0);
+	}
 	{
 		char cap_buf[64] = {0};
 		char *const argv_echo[] = { "/bin/echo", "ok-capture", NULL };

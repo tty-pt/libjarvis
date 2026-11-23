@@ -94,7 +94,7 @@ static bool ren_ff_focus_browser(void *ud)
 	(void)ud;
 	if (ren_ff_is_browser_focused(NULL)) return true;
 
-	static const char *const BROWSERS[] = { "firefox", "chromium", "chrome", "brave", "safari", "edge", "qutebrowser", NULL };
+	static const char *const BROWSERS[] = { "firefox", "chromium", "chrome", "brave", "safari", "edge", "msedge", "qutebrowser", NULL };
 	for (size_t i = 0; BROWSERS[i]; i++) {
 		char arg[64], *out = NULL;
 		snprintf(arg, sizeof(arg), "focus %s", BROWSERS[i]);
@@ -358,7 +358,9 @@ static int tool_browser(const char *args, char **out_result)
 		if (firefox_core_click_element(&ops, q, 1, role, sizeof(role), msg, sizeof(msg))) {
 			char *out = (char *)malloc(FF_INSPECT_BUF_SZ + 1024);
 			if (!out) return -1;
-			if (strcmp(role, "table row") == 0 || strcmp(role, "page tab") == 0 || strcmp(role, "list item") == 0) {
+			if (strcmp(role, "table row") == 0 || strcmp(role, "page tab") == 0 || strcmp(role, "list item") == 0 ||
+			    strcmp(role, "TabItem") == 0 || strcmp(role, "ListItem") == 0 || strcmp(role, "DataItem") == 0 ||
+			    strcmp(role, "AXRow") == 0 || strcmp(role, "AXTab") == 0 || strcmp(role, "AXRadioButton") == 0) {
 				stl_sleep_ms(160);
 				firefox_tab_t tabs[FIREFOX_CORE_MAX_TABS];
 				size_t ntabs = firefox_core_populate_tabs(tabs, FIREFOX_CORE_MAX_TABS);
@@ -442,7 +444,12 @@ static int tool_browser(const char *args, char **out_result)
 				}
 				return -1;
 			}
-			if (strcmp(role, "entry") != 0 && strcmp(role, "combo box") != 0) stl_sleep_ms(160);
+			if (strcmp(role, "entry") != 0 && strcmp(role, "combo box") != 0 &&
+			    strcmp(role, "Edit") != 0 && strcmp(role, "ComboBox") != 0 &&
+			    strcmp(role, "AXTextField") != 0 && strcmp(role, "AXTextArea") != 0 &&
+			    strcmp(role, "AXComboBox") != 0) {
+				stl_sleep_ms(160);
+			}
 		}
 
 		if (!ren_ff_is_browser_focused(NULL)) {

@@ -87,6 +87,40 @@ typedef struct {
 	void *ud;
 } firefox_core_ops_t;
 
+#if defined(__APPLE__) || defined(_WIN32)
+#include "../desktop/a11y_core.h"
+
+static bool ff_bridge_focus_win(void *ud)
+{
+	const firefox_core_ops_t *f = (const firefox_core_ops_t *)ud;
+	return (f && f->focus_browser) ? f->focus_browser(f->ud) : true;
+}
+
+static bool ff_bridge_is_focused(void *ud)
+{
+	const firefox_core_ops_t *f = (const firefox_core_ops_t *)ud;
+	return (f && f->is_browser_focused) ? f->is_browser_focused(f->ud) : true;
+}
+
+static bool ff_bridge_click_xy(void *ud, int x, int y, int btn)
+{
+	const firefox_core_ops_t *f = (const firefox_core_ops_t *)ud;
+	if (!f || !f->click_xy) return false;
+	f->click_xy(f->ud, x, y, btn);
+	return true;
+}
+
+static void ff_to_a11y_ops(const firefox_core_ops_t *f, a11y_ops_t *ao)
+{
+	memset(ao, 0, sizeof(*ao));
+	if (!f) return;
+	ao->focus_win      = f->focus_browser ? ff_bridge_focus_win : NULL;
+	ao->is_win_focused = f->is_browser_focused ? ff_bridge_is_focused : NULL;
+	ao->click_xy       = f->click_xy ? ff_bridge_click_xy : NULL;
+	ao->ud             = (void *)f;
+}
+#endif
+
 static firefox_tab_t g_ff_tabs_cache[FIREFOX_CORE_MAX_TABS];
 static size_t        g_ff_tabs_count = 0;
 static time_t        g_ff_tabs_mtime = 0;
@@ -115,6 +149,7 @@ static bool ff_is_browser_name(const char *name)
 	       ff_str_ci(name, "Brave") ||
 	       ff_str_ci(name, "Safari") ||
 	       ff_str_ci(name, "Edge") ||
+	       ff_str_ci(name, "msedge") ||
 	       ff_str_ci(name, "qutebrowser");
 }
 
@@ -345,6 +380,67 @@ static __attribute__((unused)) size_t firefox_core_populate_tabs(firefox_tab_t *
 	return c;
 }
 
+static __attribute__((unused)) bool ff_point_in_viewport(
+	int x, int y,
+	bool has_win, int wx, int wy, int ww, int wh,
+	bool has_scr, int sw, int sh)
+{
+	if (x < 0 || y < 0) return false;
+	if (has_win && ww > 0 && wh > 0) {
+		if (x < wx || x >= wx + ww || y < wy || y >= wy + wh) return false;
+	}
+	if (has_scr && sw > 0 && sh > 0) {
+		if (x >= sw || y >= sh) return false;
+	}
+	if (!has_win && !has_scr) {
+		if (x >= 16384 || y >= 16384) return false;
+	}
+	return true;
+}
+
+typedef struct {
+	const firefox_core_ops_t *ops;
+	const char               *filter_query;
+	bool                      read_mode;
+	size_t                    skip_chars;
+	size_t                    seen_chars;
+	bool                      truncated;
+	char                     *out;
+	size_t                    out_sz;
+	size_t                    off;
+	int                       visited;
+} ff_walk_ctx_t;
+
+static void ff_emit_line(ff_walk_ctx_t *ctx, const char *line)
+{
+	if (!ctx || !line || !*line || ctx->truncated || ctx->out_sz < 96) return;
+	size_t len = strlen(line);
+	if (ctx->seen_chars + len <= ctx->skip_chars) {
+		ctx->seen_chars += len;
+		return;
+	}
+	size_t start = (ctx->skip_chars > ctx->seen_chars) ? (ctx->skip_chars - ctx->seen_chars) : 0;
+	ctx->seen_chars += len;
+	size_t rem = len - start;
+	size_t limit = ctx->out_sz - 80;
+	if (ctx->off >= limit) {
+		ctx->truncated = true;
+		return;
+	}
+	size_t avail = limit - ctx->off;
+	if (rem > avail) {
+		memcpy(ctx->out + ctx->off, line + start, avail);
+		ctx->off += avail;
+		ctx->out[ctx->off] = '\0';
+		ctx->truncated = true;
+		return;
+	}
+	memcpy(ctx->out + ctx->off, line + start, rem);
+	ctx->off += rem;
+	ctx->out[ctx->off] = '\0';
+}
+
+#if !defined(__APPLE__) && !defined(_WIN32)
 typedef struct {
 	int x;
 	int y;
@@ -457,24 +553,6 @@ static bool ff_is_interactive_role(const char *role)
 	       strcmp(role, "table row") == 0;
 }
 
-static __attribute__((unused)) bool ff_point_in_viewport(
-	int x, int y,
-	bool has_win, int wx, int wy, int ww, int wh,
-	bool has_scr, int sw, int sh)
-{
-	if (x < 0 || y < 0) return false;
-	if (has_win && ww > 0 && wh > 0) {
-		if (x < wx || x >= wx + ww || y < wy || y >= wy + wh) return false;
-	}
-	if (has_scr && sw > 0 && sh > 0) {
-		if (x >= sw || y >= sh) return false;
-	}
-	if (!has_win && !has_scr) {
-		if (x >= 16384 || y >= 16384) return false;
-	}
-	return true;
-}
-
 static bool ff_get_node_center_checked(
 	void *node, const firefox_core_ops_t *ops,
 	int *out_cx, int *out_cy, bool *out_in_vp)
@@ -566,48 +644,6 @@ static void ff_clean_atspi_text(const char *raw, char *clean_txt, size_t clean_s
 	}
 	while (cw > 0 && clean_txt[cw - 1] == ' ') cw--;
 	clean_txt[cw] = '\0';
-}
-
-typedef struct {
-	const firefox_core_ops_t *ops;
-	const char               *filter_query;
-	bool                      read_mode;
-	size_t                    skip_chars;
-	size_t                    seen_chars;
-	bool                      truncated;
-	char                     *out;
-	size_t                    out_sz;
-	size_t                    off;
-	int                       visited;
-} ff_walk_ctx_t;
-
-static void ff_emit_line(ff_walk_ctx_t *ctx, const char *line)
-{
-	if (!ctx || !line || !*line || ctx->truncated || ctx->out_sz < 96) return;
-	size_t len = strlen(line);
-	if (ctx->seen_chars + len <= ctx->skip_chars) {
-		ctx->seen_chars += len;
-		return;
-	}
-	size_t start = (ctx->skip_chars > ctx->seen_chars) ? (ctx->skip_chars - ctx->seen_chars) : 0;
-	ctx->seen_chars += len;
-	size_t rem = len - start;
-	size_t limit = ctx->out_sz - 80;
-	if (ctx->off >= limit) {
-		ctx->truncated = true;
-		return;
-	}
-	size_t avail = limit - ctx->off;
-	if (rem > avail) {
-		memcpy(ctx->out + ctx->off, line + start, avail);
-		ctx->off += avail;
-		ctx->out[ctx->off] = '\0';
-		ctx->truncated = true;
-		return;
-	}
-	memcpy(ctx->out + ctx->off, line + start, rem);
-	ctx->off += rem;
-	ctx->out[ctx->off] = '\0';
 }
 
 static bool ff_is_readable_text_role(const char *role)
@@ -1110,15 +1146,33 @@ static void ff_probe_editable_inputs(const firefox_core_ops_t *ops, ff_input_pro
 	}
 	g_ff_atspi.g_unref(desktop);
 }
+#endif /* !__APPLE__ && !_WIN32 */
 
 static __attribute__((unused)) bool firefox_core_get_focused_input(
 	const firefox_core_ops_t *ops, ff_focused_input_t *out_info)
 {
 	if (out_info) memset(out_info, 0, sizeof(*out_info));
+#if defined(__APPLE__) || defined(_WIN32)
+	a11y_ops_t aops;
+	ff_to_a11y_ops(ops, &aops);
+	a11y_browser_input_t in;
+	if (!a11y_core_browser_ensure_editable(&aops, false, &in, NULL, 0))
+		return false;
+	if (out_info) {
+		out_info->found = in.found;
+		out_info->editable = in.editable;
+		snprintf(out_info->role, sizeof(out_info->role), "%s", in.role);
+		snprintf(out_info->label, sizeof(out_info->label), "%s", in.label);
+		out_info->cx = in.cx;
+		out_info->cy = in.cy;
+	}
+	return in.found;
+#else
 	ff_input_probe_ctx_t ctx;
 	ff_probe_editable_inputs(ops, &ctx);
 	if (ctx.focused.found && out_info) *out_info = ctx.focused;
 	return ctx.focused.found;
+#endif
 }
 
 static __attribute__((unused)) bool firefox_core_ensure_editable_focused(
@@ -1129,6 +1183,22 @@ static __attribute__((unused)) bool firefox_core_ensure_editable_focused(
 	if (out_info) memset(out_info, 0, sizeof(*out_info));
 	if (out_err && err_sz > 0) out_err[0] = '\0';
 
+#if defined(__APPLE__) || defined(_WIN32)
+	a11y_ops_t aops;
+	ff_to_a11y_ops(ops, &aops);
+	a11y_browser_input_t in;
+	if (!a11y_core_browser_ensure_editable(&aops, true, &in, out_err, err_sz))
+		return false;
+	if (out_info) {
+		out_info->found = in.found;
+		out_info->editable = in.editable;
+		snprintf(out_info->role, sizeof(out_info->role), "%s", in.role);
+		snprintf(out_info->label, sizeof(out_info->label), "%s", in.label);
+		out_info->cx = in.cx;
+		out_info->cy = in.cy;
+	}
+	return true;
+#else
 	if (ops && ops->is_browser_focused && !ops->is_browser_focused(ops->ud)) {
 		if (ops->focus_browser) ops->focus_browser(ops->ud);
 		ff_sleep_ms(40);
@@ -1198,6 +1268,7 @@ static __attribute__((unused)) bool firefox_core_ensure_editable_focused(
 		snprintf(out_err + off, err_sz - off, "); click or specify target first");
 	}
 	return false;
+#endif
 }
 
 static __attribute__((unused)) void firefox_core_ensure_entry_focused(const firefox_core_ops_t *ops)
@@ -1213,6 +1284,11 @@ static __attribute__((unused)) bool firefox_core_click_element(
 {
 	if (out_role && role_sz > 0) out_role[0] = '\0';
 	if (out_msg && out_sz > 0) out_msg[0] = '\0';
+#if defined(__APPLE__) || defined(_WIN32)
+	a11y_ops_t aops;
+	ff_to_a11y_ops(ops, &aops);
+	return a11y_core_browser_click(&aops, query, btn, out_role, role_sz, out_msg, out_sz);
+#else
 	if (!query || !*query || !ff_ensure_atspi_loaded()) return false;
 	if (ops && ops->focus_browser) ops->focus_browser(ops->ud);
 	void *desktop = g_ff_atspi.get_desktop(0);
@@ -1330,6 +1406,7 @@ static __attribute__((unused)) bool firefox_core_click_element(
 	}
 	if (ctx.best_node && g_ff_atspi.g_unref) g_ff_atspi.g_unref(ctx.best_node);
 	return true;
+#endif
 }
 
 static void ff_extract_html_fallback(
@@ -1411,6 +1488,14 @@ static bool ff_collect_a11y(
 	ctx.out = out;
 	ctx.out_sz = out_sz;
 
+#if defined(__APPLE__) || defined(_WIN32)
+	a11y_ops_t aops;
+	ff_to_a11y_ops(ops, &aops);
+	bool live_ok = a11y_core_browser_collect(&aops, filter_query, read_mode, skip_chars, out, out_sz);
+	ctx.off = strlen(out);
+	if (live_ok && (strstr(out, "[document web]") != NULL || ctx.off + 128 >= out_sz))
+		return true;
+#else
 	if (ff_ensure_atspi_loaded()) {
 		void *desktop = g_ff_atspi.get_desktop(0);
 		if (desktop) {
@@ -1431,6 +1516,7 @@ static bool ff_collect_a11y(
 			g_ff_atspi.g_unref(desktop);
 		}
 	}
+#endif
 
 	if (!strstr(out, "[document web]") && tabs) {
 		for (size_t i = 0; i < tab_count && !ctx.truncated && ctx.off + 128 < out_sz; i++) {
@@ -1472,6 +1558,7 @@ static __attribute__((unused)) bool firefox_core_read_a11y(
 	return ff_collect_a11y(ops, tabs, tab_count, filter_query, true, skip_chars, out, out_sz);
 }
 
+#if !defined(__APPLE__) && !defined(_WIN32)
 typedef struct {
 	const char               *query;
 	const firefox_core_ops_t *ops;
@@ -1546,11 +1633,17 @@ static void ff_walk_page_tab(void *node, int depth, ff_tab_switch_ctx_t *ctx)
 		}
 	}
 }
+#endif
 
 static __attribute__((unused)) bool firefox_core_switch_tab(
 	const firefox_core_ops_t *ops, const char *query, char *out_tab_title, size_t title_sz)
 {
 	if (out_tab_title && title_sz > 0) out_tab_title[0] = '\0';
+#if defined(__APPLE__) || defined(_WIN32)
+	a11y_ops_t aops;
+	ff_to_a11y_ops(ops, &aops);
+	return a11y_core_browser_switch_tab(&aops, query, out_tab_title, title_sz);
+#else
 	if (!query || !*query || !ff_ensure_atspi_loaded()) return false;
 	for (int attempt = 0; attempt < 2; attempt++) {
 		void *desktop = g_ff_atspi.get_desktop(0);
@@ -1594,6 +1687,7 @@ static __attribute__((unused)) bool firefox_core_switch_tab(
 		ff_sleep_ms(45);
 	}
 	return false;
+#endif
 }
 
 static __attribute__((unused)) void firefox_core_extract_domain_kw(const char *url, char *out, size_t out_sz)
@@ -1651,6 +1745,7 @@ static __attribute__((unused)) bool firefox_core_url_host_matches(const char *a,
 	return ha[0] && hb[0] && strcmp(ha, hb) == 0;
 }
 
+#if !defined(__APPLE__) && !defined(_WIN32)
 static void ff_probe_doc_walk(void *node, int depth, int *visited, ff_doc_state_t *st)
 {
 	if (!node || !st || st->found || depth > 14 || *visited > 800) return;
@@ -1704,11 +1799,25 @@ static void ff_probe_doc_walk(void *node, int depth, int *visited, ff_doc_state_
 		}
 	}
 }
+#endif
 
 static __attribute__((unused)) bool firefox_core_probe_doc(ff_doc_state_t *out_doc)
 {
 	if (!out_doc) return false;
 	memset(out_doc, 0, sizeof(*out_doc));
+#if defined(__APPLE__) || defined(_WIN32)
+	a11y_browser_doc_t bd;
+	if (!a11y_core_browser_probe_doc(&bd))
+		return false;
+	out_doc->found = bd.found;
+	out_doc->showing = bd.showing;
+	out_doc->defunct = bd.defunct;
+	out_doc->busy = bd.busy;
+	out_doc->child_count = bd.child_count;
+	snprintf(out_doc->url, sizeof(out_doc->url), "%s", bd.url);
+	snprintf(out_doc->title, sizeof(out_doc->title), "%s", bd.title);
+	return out_doc->found;
+#else
 	if (!ff_ensure_atspi_loaded()) return false;
 	void *desktop = g_ff_atspi.get_desktop(0);
 	if (!desktop) return false;
@@ -1730,6 +1839,7 @@ static __attribute__((unused)) bool firefox_core_probe_doc(ff_doc_state_t *out_d
 	}
 	g_ff_atspi.g_unref(desktop);
 	return out_doc->found;
+#endif
 }
 
 /*

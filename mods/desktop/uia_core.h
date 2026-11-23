@@ -26,6 +26,19 @@ bool uia_core_prepare_input(const a11y_win_ctx_t *win, const a11y_ops_t *ops,
 bool uia_core_set(const a11y_win_ctx_t *win, const a11y_ops_t *ops,
                   const char *query, const char *value, char *out_msg, size_t out_sz);
 
+bool uia_core_browser_probe_doc(a11y_browser_doc_t *out_doc);
+bool uia_core_browser_collect(const a11y_ops_t *ops, const char *filter_query,
+                              bool read_mode, size_t skip_chars,
+                              char *out, size_t out_sz);
+bool uia_core_browser_switch_tab(const a11y_ops_t *ops, const char *query,
+                                 char *out_tab_title, size_t title_sz);
+bool uia_core_browser_click(const a11y_ops_t *ops, const char *query, int btn,
+                            char *out_role, size_t role_sz,
+                            char *out_msg, size_t out_sz);
+bool uia_core_browser_ensure_editable(const a11y_ops_t *ops, bool focus_if_needed,
+                                      a11y_browser_input_t *out_info,
+                                      char *out_err, size_t err_sz);
+
 #ifdef __cplusplus
 }
 #endif
