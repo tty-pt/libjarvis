@@ -28,10 +28,12 @@ async def synth_pcm_bytes(text, voice):
                 mp3.extend(data)
     if not mp3:
         return b""
-    cmd = ["ffmpeg", "-loglevel", "quiet", "-i", "pipe:0", "-f", "s16le", "-ar", "24000", "-ac", "1", "pipe:1"]
+    cmd = ["ffmpeg", "-loglevel", "error", "-i", "pipe:0", "-f", "s16le", "-ar", "24000", "-ac", "1", "pipe:1"]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     out, _ = proc.communicate(input=bytes(mp3))
     if proc.returncode != 0:
+        sys.stderr.write(f"edge-tts-pcm: ffmpeg failed rc={proc.returncode}\n")
+        sys.stderr.flush()
         return b""
     return out or b""
 
@@ -59,7 +61,9 @@ def serve_loop():
             if text:
                 try:
                     pcm = loop.run_until_complete(synth_pcm_bytes(text, voice))
-                except Exception:
+                except Exception as exc:
+                    sys.stderr.write(f"edge-tts-pcm: synthesis error ({voice}): {exc}\n")
+                    sys.stderr.flush()
                     pcm = b""
             out_buf.write(struct.pack("<I", len(pcm)))
             if pcm:

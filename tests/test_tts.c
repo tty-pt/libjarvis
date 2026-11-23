@@ -67,14 +67,17 @@ int main(void)
 		fclose(fp);
 	}
 
-	/* Stub pw-cat that consumes raw PCM quickly and logs invocations */
+	char pw_bytes_log[512];
+	snprintf(pw_bytes_log, sizeof(pw_bytes_log), "%s/pw.bytes", tmpdir);
+
+	/* Stub pw-cat that consumes raw PCM quickly and logs invocations + byte counts */
 	{
 		char pw_body[2048];
 		snprintf(pw_body, sizeof(pw_body),
 		         "#!/bin/sh\n"
 		         "echo \"$*\" >> '%s'\n"
-		         "cat >/dev/null\n",
-		         pw_log);
+		         "wc -c >> '%s'\n",
+		         pw_log, pw_bytes_log);
 		write_exec_script(pw_path, pw_body);
 	}
 
@@ -82,19 +85,25 @@ int main(void)
 	 * - logs worker launch to starts_log
 	 * - logs each request to reqs_log
 	 * - sleeps 0.5s cleanly if text contains 'Hang' so timeout path triggers deterministically
+	 * - returns 0 bytes once if text contains 'EmptyOnce' (using marker file) to test attempt-1 retry
+	 * - emits 1s leading silence + 100ms active + 1s trailing silence if text contains 'Padded'
 	 * - otherwise emits 4-byte LE len (4800 bytes = 100ms @ 24kHz) + non-zero s16le PCM
 	 */
+	char empty_marker[512];
+	snprintf(empty_marker, sizeof(empty_marker), "%s/empty.once", tmpdir);
 	{
 		char edge_body[4096];
 		snprintf(edge_body, sizeof(edge_body),
 		         "#!/usr/bin/env python3\n"
-		         "import sys, struct, time\n"
+		         "import os, sys, struct, time\n"
 		         "if len(sys.argv) < 2 or sys.argv[1] != '--serve':\n"
 		         "    sys.exit(2)\n"
 		         "with open('%s', 'a') as sf:\n"
 		         "    sf.write('start\\n')\n"
 		         "payload = b'\\x10\\x00' * 2400\n"
 		         "hdr = struct.pack('<I', len(payload))\n"
+		         "padded = (b'\\x00\\x00' * 24000) + (b'\\xe8\\x03' * 2400) + (b'\\x00\\x00' * 24000)\n"
+		         "padded_hdr = struct.pack('<I', len(padded))\n"
 		         "for line in sys.stdin:\n"
 		         "    line = line.rstrip('\\r\\n')\n"
 		         "    if not line: continue\n"
@@ -105,9 +114,19 @@ int main(void)
 		         "        sys.stdout.buffer.write(struct.pack('<I', 0))\n"
 		         "        sys.stdout.buffer.flush()\n"
 		         "        continue\n"
+		         "    if 'EmptyOnce' in line and not os.path.exists('%s'):\n"
+		         "        with open('%s', 'w') as ef:\n"
+		         "            ef.write('1')\n"
+		         "        sys.stdout.buffer.write(struct.pack('<I', 0))\n"
+		         "        sys.stdout.buffer.flush()\n"
+		         "        continue\n"
+		         "    if 'Padded' in line:\n"
+		         "        sys.stdout.buffer.write(padded_hdr + padded)\n"
+		         "        sys.stdout.buffer.flush()\n"
+		         "        continue\n"
 		         "    sys.stdout.buffer.write(hdr + payload)\n"
 		         "    sys.stdout.buffer.flush()\n",
-		         starts_log, reqs_log);
+		         starts_log, reqs_log, empty_marker, empty_marker);
 		write_exec_script(edge_path, edge_body);
 	}
 
@@ -148,9 +167,32 @@ int main(void)
 	assert(count_file_lines(reqs_log) == 4);
 	printf("  [PASS] Timeout/fallback path bounded (%ldms) and uncached under edge: key\n", fb_ms);
 
-	/* 4. Immediate recovery on next healthy call, busy barge-in interrupt, & clean shutdown */
+	/* 4. Transient empty-PCM (pcm_len == 0) retries once and recovers without falling back,
+	 *    and multi-segment fallback -> Edge recovery (22050 -> 24000 Hz) does not deadlock pw-cat pipe.
+	 */
+	size_t starts_before = count_file_lines(starts_log);
+	size_t reqs_before = count_file_lines(reqs_log);
+	assert(jarvis_tts_speak_clause("s1", "EmptyOnce recovery.", 1) == 0);
+	assert(count_file_lines(reqs_log) == reqs_before + 2);
+	assert(count_file_lines(starts_log) == starts_before + 2);
+	assert(jarvis_tts_speak_clause("s1", "Hang one. Recovered two.", 1) == 0);
+	assert(count_file_lines(reqs_log) == reqs_before + 4);
+	printf("  [PASS] Transient empty-PCM retry & multi-segment fallback->Edge recovery verified!\n");
+
+	/* 5. Immediate recovery on next healthy call & silence trimming check */
 	assert(jarvis_tts_speak_clause("s1", "Recuperado.", 1) == 0);
-	assert(count_file_lines(reqs_log) == 5);
+	assert(count_file_lines(reqs_log) == reqs_before + 5);
+	assert(jarvis_tts_speak_clause("s1", "Padded phrase.", 1) == 0);
+	assert(count_file_lines(reqs_log) == reqs_before + 6);
+	{
+		FILE *bfp = fopen(pw_bytes_log, "r");
+		assert(bfp != NULL);
+		long last_bytes = 0, cur_bytes = 0;
+		while (fscanf(bfp, "%ld", &cur_bytes) == 1) last_bytes = cur_bytes;
+		fclose(bfp);
+		assert(last_bytes >= 4800 && last_bytes <= 12000);
+		printf("  [PASS] Edge PCM silence trim reduced 100800B -> %ldB!\n", last_bytes);
+	}
 
 	/* Start slow hanging Edge synthesis asynchronously and barge-in cancel immediately */
 	setenv("JARVIS_EDGE_TTS_TIMEOUT_MS", "2000", 1);
@@ -266,9 +308,11 @@ int main(void)
 	unlink(rc_path);
 	unlink(pw_path);
 	unlink(edge_path);
+	unlink(empty_marker);
 	unlink(starts_log);
 	unlink(reqs_log);
 	unlink(pw_log);
+	unlink(pw_bytes_log);
 	rmdir(tmpdir);
 	return 0;
 }

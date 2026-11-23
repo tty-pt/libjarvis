@@ -193,7 +193,7 @@ static const cp_id_t PIPER_VOCAB[] = {
 #define TTS_CACHE_SLOTS 32
 #define TTS_CACHE_MAX_TEXT 96
 #define TTS_CACHE_MAX_BYTES (24000 * 2 * 4)
-#define EDGE_TTS_TIMEOUT_MS 3800
+#define EDGE_TTS_TIMEOUT_MS 8000
 
 typedef struct {
 	char text[512];
@@ -257,6 +257,7 @@ static struct {
 	.mtx = PTHREAD_MUTEX_INITIALIZER,
 	.cond = PTHREAD_COND_INITIALIZER,
 	.done_cond = PTHREAD_COND_INITIALIZER,
+	.cancel_gen = 1,
 	.player_pid = -1,
 	.draining_pid = -1,
 	.edge_pid = -1,
@@ -1110,11 +1111,6 @@ static bool ensure_edge_worker_locked(void)
 		dup2(out_p[1], STDOUT_FILENO);
 		if (in_p[0] > STDERR_FILENO) close(in_p[0]);
 		if (out_p[1] > STDERR_FILENO) close(out_p[1]);
-		int devnull = open("/dev/null", O_WRONLY);
-		if (devnull >= 0) {
-			dup2(devnull, STDERR_FILENO);
-			if (devnull > STDERR_FILENO) close(devnull);
-		}
 		if (py_path[0]) {
 			execl(py_path, py_path, bin_path, "--serve", (char *)NULL);
 		}
@@ -1548,6 +1544,57 @@ static void resolve_edge_fallback_voice(bool is_pt, char *out_voice, size_t out_
 	resolve_local_voice(is_pt ? "pt" : "en", out_voice, out_sz);
 }
 
+static size_t trim_edge_pcm_silence(int16_t *pcm, size_t n_samples, const char *text)
+{
+	if (!pcm || n_samples < 480) return n_samples;
+	const int16_t thresh = 160;
+	size_t first = n_samples, last = 0;
+	for (size_t i = 0; i < n_samples; i++) {
+		int v = pcm[i] < 0 ? -(int)pcm[i] : (int)pcm[i];
+		if (v > thresh) {
+			first = i;
+			break;
+		}
+	}
+	if (first >= n_samples) return n_samples;
+	for (size_t i = n_samples; i > first; i--) {
+		int v = pcm[i - 1] < 0 ? -(int)pcm[i - 1] : (int)pcm[i - 1];
+		if (v > thresh) {
+			last = i;
+			break;
+		}
+	}
+
+	size_t lead_pad = (KOKORO_SAMPLE_RATE * 20) / 1000;
+	size_t tl = text ? strlen(text) : 0;
+	while (tl > 0 && isspace((unsigned char)text[tl - 1])) tl--;
+	bool sent_end = (tl > 0 && strchr(".!?;:", text[tl - 1]) != NULL);
+	size_t trail_pad = sent_end ? ((KOKORO_SAMPLE_RATE * 120) / 1000)
+	                            : ((KOKORO_SAMPLE_RATE * 45) / 1000);
+
+	size_t start = (first > lead_pad) ? (first - lead_pad) : 0;
+	size_t end = (last + trail_pad < n_samples) ? (last + trail_pad) : n_samples;
+	if (end <= start) return n_samples;
+
+	size_t new_n = end - start;
+	if (start > 0 && new_n > 0) {
+		memmove(pcm, pcm + start, new_n * sizeof(int16_t));
+	}
+	size_t fade = (KOKORO_SAMPLE_RATE * 2) / 1000;
+	if (start > 0 && new_n > fade) {
+		for (size_t i = 0; i < fade; i++) {
+			pcm[i] = (int16_t)((int32_t)pcm[i] * (int32_t)i / (int32_t)fade);
+		}
+	}
+	if (end < n_samples && new_n > fade) {
+		for (size_t i = 0; i < fade; i++) {
+			size_t idx = new_n - 1 - i;
+			pcm[idx] = (int16_t)((int32_t)pcm[idx] * (int32_t)i / (int32_t)fade);
+		}
+	}
+	return new_n;
+}
+
 static int16_t *synthesize_edge_tts(const char *seg_text, const char *voice, size_t *out_samples, int *out_rate, uint64_t my_gen)
 {
 	*out_samples = 0;
@@ -1603,6 +1650,10 @@ static int16_t *synthesize_edge_tts(const char *seg_text, const char *voice, siz
 			close_edge_worker_locked(true);
 			bool canceled = (my_gen != 0 && g_tts.cancel_gen != my_gen);
 			pthread_mutex_unlock(&g_tts.mtx);
+			if (!canceled && rc == -3) {
+				fprintf(stderr, "jarvis-tts: edge-tts timed out after %d ms (voice='%s')\n",
+				        timeout_ms, ev);
+			}
 			if (canceled || rc == -2 || rc == -3) return NULL;
 			continue;
 		}
@@ -1614,10 +1665,13 @@ static int16_t *synthesize_edge_tts(const char *seg_text, const char *voice, siz
 		if (pcm_len == 0 || pcm_len > (32U * 1024U * 1024U) || (pcm_len % sizeof(int16_t)) != 0) {
 			pthread_mutex_lock(&g_tts.mtx);
 			g_tts.edge_busy = false;
-			if (pcm_len > (32U * 1024U * 1024U) || (pcm_len % sizeof(int16_t)) != 0) {
-				close_edge_worker_locked(true);
-			}
+			close_edge_worker_locked(pcm_len != 0);
 			pthread_mutex_unlock(&g_tts.mtx);
+			if (pcm_len == 0 && attempt == 0) {
+				fprintf(stderr, "jarvis-tts: edge-tts returned empty PCM (attempt 1, voice='%s'); retrying\n", ev);
+				continue;
+			}
+			fprintf(stderr, "jarvis-tts: edge-tts invalid/empty PCM (len=%u, voice='%s')\n", pcm_len, ev);
 			return NULL;
 		}
 
@@ -1643,9 +1697,10 @@ static int16_t *synthesize_edge_tts(const char *seg_text, const char *voice, siz
 		}
 		pthread_mutex_unlock(&g_tts.mtx);
 
-		*out_samples = pcm_len / sizeof(int16_t);
+		int16_t *pcm16 = (int16_t *)pcm_buf;
+		*out_samples = trim_edge_pcm_silence(pcm16, pcm_len / sizeof(int16_t), sp);
 		*out_rate = KOKORO_SAMPLE_RATE;
-		return (int16_t *)pcm_buf;
+		return pcm16;
 	}
 	return NULL;
 }
@@ -1928,6 +1983,8 @@ static int16_t *synthesize_segment_pcm(const char *seg_text, const char *voice, 
 		/* Local neural ONNX fallback when Edge TTS fails or times out (never cached under edge: key) */
 		char fb_voice[64];
 		resolve_edge_fallback_voice(is_pt, fb_voice, sizeof(fb_voice));
+		fprintf(stderr, "jarvis-tts: edge voice '%s' unavailable, using local fallback '%s'\n",
+		        voice, fb_voice);
 		pcm = synthesize_onnx_pcm(seg_text, fb_voice, out_samples, out_rate);
 		if (pcm && *out_samples > 0) return pcm;
 
@@ -2024,6 +2081,8 @@ static int ensure_persistent_player_locked(int sample_rate)
 
 	int pfd[2];
 	if (pipe(pfd) < 0) return -1;
+	(void)fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
+	(void)fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
 #ifdef F_SETPIPE_SZ
 	(void)fcntl(pfd[1], F_SETPIPE_SZ, 1048576);
 #endif
@@ -2033,8 +2092,13 @@ static int ensure_persistent_player_locked(int sample_rate)
 	pid_t pid = fork();
 	if (pid == 0) {
 		close(pfd[1]);
-		dup2(pfd[0], STDIN_FILENO);
-		if (pfd[0] != STDIN_FILENO) close(pfd[0]);
+		if (pfd[0] != STDIN_FILENO) {
+			dup2(pfd[0], STDIN_FILENO);
+			close(pfd[0]);
+		} else {
+			int fl = fcntl(STDIN_FILENO, F_GETFD);
+			if (fl >= 0) (void)fcntl(STDIN_FILENO, F_SETFD, fl & ~FD_CLOEXEC);
+		}
 		int devnull = open("/dev/null", O_RDWR);
 		if (devnull >= 0) {
 			dup2(devnull, STDOUT_FILENO);
