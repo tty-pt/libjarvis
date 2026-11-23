@@ -15,6 +15,7 @@
 
 #include "ttypt/libren.h"
 #include "../../include/ttypt/desktop-core.h"
+#include "atspi_core.h"
 #include <ttypt/xy.h>
 
 static bool desktop_extract_json_str(const char *json, const char *key, char *out, size_t out_sz)
@@ -33,6 +34,28 @@ static bool desktop_extract_json_str(const char *json, const char *key, char *ou
 	}
 	out[w] = '\0';
 	return w > 0;
+}
+
+static bool desktop_extract_json_int(const char *json, const char *key, int *out_val)
+{
+	if (!json || !key || !out_val) return false;
+	char pat[64];
+	snprintf(pat, sizeof(pat), "\"%s\":", key);
+	const char *p = strstr(json, pat);
+	if (!p) return false;
+	p += strlen(pat);
+	*out_val = atoi(p);
+	return true;
+}
+
+static unsigned long desktop_extract_json_ulong(const char *json, const char *key)
+{
+	if (!json || !key) return 0;
+	char pat[64];
+	snprintf(pat, sizeof(pat), "\"%s\":", key);
+	const char *p = strstr(json, pat);
+	if (!p) return 0;
+	return strtoul(p + strlen(pat), NULL, 10);
 }
 
 static bool desktop_find_new_window(
@@ -273,16 +296,147 @@ static int tool_system(const char *args, char **out_result)
 	return 0;
 }
 
+static void desktop_query_focused_window(
+	unsigned long *out_pid, char *out_cls, size_t cls_sz,
+	char *out_title, size_t title_sz,
+	int *out_x, int *out_y, int *out_w, int *out_h, bool *out_has_win)
+{
+	if (out_pid) *out_pid = 0;
+	if (out_cls && cls_sz > 0) out_cls[0] = '\0';
+	if (out_title && title_sz > 0) out_title[0] = '\0';
+	if (out_has_win) *out_has_win = false;
+
+	char *foc_json = NULL;
+	if (ren_call_tool("x11_windows", "focused", &foc_json) != 0 || !foc_json) {
+		free(foc_json);
+		return;
+	}
+	if (out_pid) *out_pid = desktop_extract_json_ulong(foc_json, "pid");
+	if (out_cls && cls_sz > 0) desktop_extract_json_str(foc_json, "class", out_cls, cls_sz);
+	if (out_title && title_sz > 0) desktop_extract_json_str(foc_json, "title", out_title, title_sz);
+	int gx = 0, gy = 0, gw = 0, gh = 0;
+	if (desktop_extract_json_int(foc_json, "x", &gx) &&
+	    desktop_extract_json_int(foc_json, "y", &gy) &&
+	    desktop_extract_json_int(foc_json, "w", &gw) &&
+	    desktop_extract_json_int(foc_json, "h", &gh) &&
+	    gw > 0 && gh > 0) {
+		if (out_x) *out_x = gx;
+		if (out_y) *out_y = gy;
+		if (out_w) *out_w = gw;
+		if (out_h) *out_h = gh;
+		if (out_has_win) *out_has_win = true;
+	}
+	free(foc_json);
+}
+
 static int tool_terminal(const char *args, char **out_result)
 {
 	while (args && *args == ' ') args++;
-	int lines = (args && *args) ? atoi(args) : 25;
-	if (lines <= 0) lines = 25;
+	int lines = (args && *args) ? atoi(args) : 40;
+	if (lines <= 0) lines = 40;
 	if (lines > 200) lines = 200;
-	char cmd[128], out[2048] = {0};
-	snprintf(cmd, sizeof(cmd), "tmux capture-pane -p -S -%d 2>/dev/null | tail -n %d", lines, lines);
-	desktop_core_run_cmd_capture(cmd, out, sizeof(out));
-	*out_result = strdup(out[0] ? out : "(no active tmux pane output)");
+
+	unsigned long foc_pid = 0;
+	desktop_query_focused_window(&foc_pid, NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL);
+
+	char target[128] = {0};
+	char *cap = (char *)malloc(8192);
+	if (!cap) return -1;
+	cap[0] = '\0';
+
+	if (desktop_core_find_tmux_target(foc_pid, target, sizeof(target)) &&
+	    desktop_core_capture_tmux_target(target, lines, cap, 8192)) {
+		size_t out_sz = strlen(cap) + 192;
+		char *out = (char *)malloc(out_sz);
+		if (!out) {
+			free(cap);
+			return -1;
+		}
+		snprintf(out, out_sz, "[tmux %s]\n%s", target, cap);
+		free(cap);
+		*out_result = out;
+		return 0;
+	}
+
+	free(cap);
+	*out_result = strdup("(no active user tmux pane output)");
+	return 0;
+}
+
+static int tool_read_window(const char *args, char **out_result)
+{
+	while (args && *args == ' ') args++;
+	bool inspect_mode = false;
+	const char *filter = NULL;
+	if (args && *args) {
+		if (strcasecmp(args, "inspect") == 0) {
+			inspect_mode = true;
+		} else if (strncasecmp(args, "inspect ", 8) == 0) {
+			inspect_mode = true;
+			filter = args + 8;
+			while (*filter == ' ') filter++;
+			if (!*filter) filter = NULL;
+		} else if (strcasecmp(args, "read") == 0) {
+			inspect_mode = false;
+		} else if (strncasecmp(args, "read ", 5) == 0) {
+			filter = args + 5;
+			while (*filter == ' ') filter++;
+			if (!*filter) filter = NULL;
+		} else {
+			filter = args;
+		}
+	}
+
+	unsigned long foc_pid = 0;
+	char cls[128] = {0}, title[256] = {0};
+	int wx = 0, wy = 0, ww = 0, wh = 0;
+	bool has_win = false;
+	desktop_query_focused_window(&foc_pid, cls, sizeof(cls), title, sizeof(title),
+	                             &wx, &wy, &ww, &wh, &has_win);
+
+	char *buf = (char *)malloc(8192);
+	if (!buf) return -1;
+	buf[0] = '\0';
+
+	if (desktop_core_is_terminal_class(cls)) {
+		char target[128] = {0};
+		if (desktop_core_find_tmux_target(foc_pid, target, sizeof(target)) &&
+		    desktop_core_capture_tmux_target(target, 60, buf, 8192)) {
+			size_t out_sz = strlen(buf) + 384;
+			char *out = (char *)malloc(out_sz);
+			if (!out) {
+				free(buf);
+				return -1;
+			}
+			snprintf(out, out_sz, "[terminal tmux=%s class='%s' title='%.80s']\n%s",
+			         target, cls, title, buf);
+			free(buf);
+			*out_result = out;
+			return 0;
+		}
+	}
+
+	if (atspi_core_read_window(foc_pid, cls, title, wx, wy, ww, wh, has_win,
+	                           inspect_mode, filter, buf, 8192)) {
+		size_t out_sz = strlen(buf) + 384;
+		char *out = (char *)malloc(out_sz);
+		if (!out) {
+			free(buf);
+			return -1;
+		}
+		snprintf(out, out_sz, "[window class='%s' title='%.80s' pid=%lu]\n%s",
+		         cls[0] ? cls : "unknown", title, foc_pid, buf);
+		free(buf);
+		*out_result = out;
+		return 0;
+	}
+
+	free(buf);
+	char msg[512];
+	snprintf(msg, sizeof(msg),
+	         "(no AT-SPI2 or tmux text tree available for focused window class='%s' title='%.120s' pid=%lu)",
+	         cls[0] ? cls : "none", title, foc_pid);
+	*out_result = strdup(msg);
 	return 0;
 }
 
@@ -292,4 +446,5 @@ XY_MODULE_API void xy_install(void)
 	ren_register_tool("media", "media <play [query] | pause | next | prev | volume_up | volume_down | mute>", tool_media);
 	ren_register_tool("system", "system [all | memory | cpu | disk | ports]", tool_system);
 	ren_register_tool("terminal", "terminal [lines]", tool_terminal);
+	ren_register_tool("read_window", "read_window [inspect [filter] | <filter>]", tool_read_window);
 }

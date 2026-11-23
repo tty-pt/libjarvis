@@ -120,18 +120,18 @@ static int tool_x11_windows(const char *args, char **out_result)
 	if (args && strcasecmp(args, "focused") == 0) {
 		x11_win_info_t foc;
 		if (!x11_core_get_focused(&foc)) {
-			*out_result = strdup("{\"id\":\"\",\"class\":\"\",\"title\":\"\",\"x\":0,\"y\":0,\"w\":0,\"h\":0}");
+			*out_result = strdup("{\"id\":\"\",\"pid\":0,\"class\":\"\",\"title\":\"\",\"x\":0,\"y\":0,\"w\":0,\"h\":0}");
 			return 0;
 		}
 		int wx = 0, wy = 0, ww = 0, wh = 0, sw = 0, sh = 0;
 		x11_core_get_geometry(NULL, &wx, &wy, &ww, &wh);
 		x11_core_get_screen_size(&sw, &sh);
-		char ec[128], et[200], buf[560];
+		char ec[128], et[200], buf[600];
 		x11_core_json_escape(foc.wm_class, ec, sizeof(ec));
 		x11_core_json_escape(foc.title, et, sizeof(et));
 		snprintf(buf, sizeof(buf),
-		         "{\"id\":\"%s\",\"class\":\"%s\",\"title\":\"%s\",\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"sw\":%d,\"sh\":%d}",
-		         foc.id, ec, et, wx, wy, ww, wh, sw, sh);
+		         "{\"id\":\"%s\",\"pid\":%lu,\"class\":\"%s\",\"title\":\"%s\",\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"sw\":%d,\"sh\":%d}",
+		         foc.id, foc.pid, ec, et, wx, wy, ww, wh, sw, sh);
 		*out_result = strdup(buf);
 		return 0;
 	}

@@ -58,8 +58,8 @@ mods/x11/ren-x11.so: mods/x11/ren-x11.c mods/x11/x11_core.h include/ttypt/deskto
 mods/firefox/ren-firefox.so: mods/firefox/ren-firefox.c mods/firefox/firefox_core.h
 	$(CC) $(CFLAGS) -I../axil-auren/include -I../libxylem/include -fPIC -shared -o $@ mods/firefox/ren-firefox.c $(LDFLAGS) -L../axil-auren/lib -lren -ldl -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
 
-mods/desktop/ren-desktop.so: mods/desktop/ren-desktop.c include/ttypt/desktop-core.h
-	$(CC) $(CFLAGS) -I../axil-auren/include -I../libxylem/include -fPIC -shared -o $@ mods/desktop/ren-desktop.c $(LDFLAGS) -L../axil-auren/lib -lren -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
+mods/desktop/ren-desktop.so: mods/desktop/ren-desktop.c mods/desktop/atspi_core.h include/ttypt/desktop-core.h
+	$(CC) $(CFLAGS) -I../axil-auren/include -I../libxylem/include -fPIC -shared -o $@ mods/desktop/ren-desktop.c $(LDFLAGS) -L../axil-auren/lib -lren -ldl -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
 
 mods/ren-jarvis/ren-jarvis.so: mods/ren-jarvis/ren-jarvis.c
 	@mkdir -p mods/ren-jarvis

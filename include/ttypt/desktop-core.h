@@ -570,5 +570,168 @@ static __attribute__((unused)) bool desktop_core_mpris_control(const char *actio
 	return strstr(out, "OK") != NULL;
 }
 
+static __attribute__((unused)) bool desktop_core_is_terminal_class(const char *wm_class)
+{
+	static const char *const TERMS[] = {
+		"st-256color", "st", "xterm", "alacritty", "kitty", "foot", "wezterm", "urxvt", "ghostty", NULL
+	};
+	if (!wm_class || !*wm_class) return false;
+	for (size_t i = 0; TERMS[i]; i++) {
+		if (desktop_core_str_contains_ci(wm_class, TERMS[i])) return true;
+	}
+	return false;
+}
+
+static __attribute__((unused)) int desktop_core_exec_capture(char *const argv[], char *out, size_t out_sz)
+{
+	if (!out || out_sz == 0) return -1;
+	out[0] = '\0';
+	if (!argv || !argv[0]) return -1;
+
+	int pfd[2];
+	if (pipe(pfd) < 0) return -1;
+	(void)fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
+	(void)fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
+
+	pid_t pid = fork();
+	if (pid < 0) {
+		close(pfd[0]);
+		close(pfd[1]);
+		return -1;
+	}
+	if (pid == 0) {
+		close(pfd[0]);
+		if (pfd[1] != STDOUT_FILENO) {
+			dup2(pfd[1], STDOUT_FILENO);
+			close(pfd[1]);
+		}
+		int devnull = open("/dev/null", O_RDWR);
+		if (devnull >= 0) {
+			dup2(devnull, STDIN_FILENO);
+			dup2(devnull, STDERR_FILENO);
+			if (devnull > 2) close(devnull);
+		}
+		execvp(argv[0], argv);
+		_exit(127);
+	}
+
+	close(pfd[1]);
+	size_t off = 0;
+	while (off + 1 < out_sz) {
+		ssize_t rd = read(pfd[0], out + off, out_sz - 1 - off);
+		if (rd < 0 && errno == EINTR) continue;
+		if (rd <= 0) break;
+		off += (size_t)rd;
+	}
+	out[off] = '\0';
+	close(pfd[0]);
+
+	int st = 0;
+	while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+	desktop_core_trim_trailing(out);
+	return (WIFEXITED(st) && WEXITSTATUS(st) == 0) ? 0 : -1;
+}
+
+static __attribute__((unused)) bool desktop_core_pid_is_descendant(unsigned long root_pid, unsigned long candidate_pid)
+{
+	if (!root_pid || !candidate_pid) return false;
+	if (root_pid == candidate_pid) return true;
+
+	unsigned long queue[64];
+	size_t head = 0, tail = 0;
+	queue[tail++] = root_pid;
+
+	while (head < tail) {
+		unsigned long cur = queue[head++];
+		unsigned long ch[16];
+		size_t n = desktop_core_get_child_pids(cur, ch, 16);
+		for (size_t i = 0; i < n; i++) {
+			if (ch[i] == candidate_pid) return true;
+			if (tail < 64) queue[tail++] = ch[i];
+		}
+	}
+	return false;
+}
+
+static __attribute__((unused)) bool desktop_core_find_tmux_target(
+	unsigned long focused_pid, char *out_target, size_t target_sz)
+{
+	if (!out_target || target_sz == 0) return false;
+	out_target[0] = '\0';
+
+	char *const argv_clients[] = {
+		"tmux", "list-clients", "-F", "#{client_pid}\t#{session_name}\t#{session_name}:#{window_index}.#{pane_index}", NULL
+	};
+	char buf[2048];
+	if (desktop_core_exec_capture(argv_clients, buf, sizeof(buf)) == 0 && buf[0]) {
+		char fallback[128] = {0};
+		char *save_line = NULL;
+		for (char *line = strtok_r(buf, "\n", &save_line); line; line = strtok_r(NULL, "\n", &save_line)) {
+			char *t1 = strchr(line, '\t');
+			char *t2 = t1 ? strchr(t1 + 1, '\t') : NULL;
+			if (!t1 || !t2) continue;
+			*t1 = '\0';
+			*t2 = '\0';
+			unsigned long cpid = strtoul(line, NULL, 10);
+			const char *sess = t1 + 1;
+			const char *target = t2 + 1;
+			if (!target[0]) continue;
+			if (focused_pid > 0 && desktop_core_pid_is_descendant(focused_pid, cpid)) {
+				snprintf(out_target, target_sz, "%s", target);
+				return true;
+			}
+			if (!fallback[0] && strcmp(sess, "jarvis") != 0) {
+				snprintf(fallback, sizeof(fallback), "%s", target);
+			}
+		}
+		if (fallback[0]) {
+			snprintf(out_target, target_sz, "%s", fallback);
+			return true;
+		}
+	}
+
+	char *const argv_panes[] = {
+		"tmux", "list-panes", "-a", "-F", "#{session_name}\t#{pane_active}\t#{window_active}\t#{session_name}:#{window_index}.#{pane_index}", NULL
+	};
+	if (desktop_core_exec_capture(argv_panes, buf, sizeof(buf)) == 0 && buf[0]) {
+		char *save_line = NULL;
+		for (char *line = strtok_r(buf, "\n", &save_line); line; line = strtok_r(NULL, "\n", &save_line)) {
+			char *t1 = strchr(line, '\t');
+			char *t2 = t1 ? strchr(t1 + 1, '\t') : NULL;
+			char *t3 = t2 ? strchr(t2 + 1, '\t') : NULL;
+			if (!t1 || !t2 || !t3) continue;
+			*t1 = '\0';
+			*t2 = '\0';
+			*t3 = '\0';
+			const char *sess = line;
+			const char *p_act = t1 + 1;
+			const char *w_act = t2 + 1;
+			const char *target = t3 + 1;
+			if (strcmp(sess, "jarvis") == 0 || !target[0]) continue;
+			if (p_act[0] == '1' && w_act[0] == '1') {
+				snprintf(out_target, target_sz, "%s", target);
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+static __attribute__((unused)) bool desktop_core_capture_tmux_target(
+	const char *target, int lines, char *out, size_t out_sz)
+{
+	if (!out || out_sz == 0) return false;
+	out[0] = '\0';
+	if (!target || !*target) return false;
+	if (lines <= 0) lines = 40;
+	if (lines > 200) lines = 200;
+
+	char target_copy[128], start_arg[24];
+	snprintf(target_copy, sizeof(target_copy), "%s", target);
+	snprintf(start_arg, sizeof(start_arg), "-%d", lines);
+	char *const argv[] = { "tmux", "capture-pane", "-p", "-t", target_copy, "-S", start_arg, NULL };
+	return desktop_core_exec_capture(argv, out, out_sz) == 0 && out[0] != '\0';
+}
+
 #endif /* !__wasm__ && !_WIN32 */
 #endif /* TTYPT_DESKTOP_CORE_H */

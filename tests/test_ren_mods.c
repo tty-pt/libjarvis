@@ -1,5 +1,7 @@
 #define _GNU_SOURCE
 #include "ttypt/libren.h"
+#include "ttypt/desktop-core.h"
+#include "../mods/desktop/atspi_core.h"
 #include "../mods/firefox/firefox_core.h"
 
 #include <assert.h>
@@ -135,14 +137,48 @@ static void test_load_all_ren_modules(void)
 	free(out);
 	out = NULL;
 
-	/* Verify ren-x11 focused window reports screen bounds when focused window exists */
+	/* Verify ren-x11 focused window reports screen bounds and pid */
 	rc = ren_call_tool("x11_windows", "focused", &out);
 	assert(rc == 0 && out != NULL);
+	assert(strstr(out, "\"pid\":") != NULL);
 	if (strstr(out, "\"w\":0") == NULL) {
 		assert(strstr(out, "\"sw\":") != NULL && strstr(out, "\"sh\":") != NULL);
 	}
 	free(out);
 	out = NULL;
+
+	/* Verify ren-desktop terminal & read_window tools execute cleanly and never leak jarvis tmux session */
+	rc = ren_call_tool("terminal", "10", &out);
+	assert(rc == 0 && out != NULL && out[0] != '\0');
+	assert(strstr(out, "[tmux jarvis:") == NULL);
+	free(out);
+	out = NULL;
+
+	rc = ren_call_tool("read_window", "", &out);
+	assert(rc == 0 && out != NULL && out[0] != '\0');
+	free(out);
+	out = NULL;
+
+	rc = ren_call_tool("read_window", "inspect", &out);
+	assert(rc == 0 && out != NULL && out[0] != '\0');
+	free(out);
+	out = NULL;
+
+	/* Verify desktop-core & atspi-core standalone helpers */
+	assert(desktop_core_is_terminal_class("st-256color"));
+	assert(desktop_core_is_terminal_class("Alacritty"));
+	assert(!desktop_core_is_terminal_class("firefox_firefox"));
+	{
+		char cap_buf[64] = {0};
+		char *const argv_echo[] = { "/bin/echo", "ok-capture", NULL };
+		assert(desktop_core_exec_capture(argv_echo, cap_buf, sizeof(cap_buf)) == 0);
+		assert(strcmp(cap_buf, "ok-capture") == 0);
+	}
+	{
+		char clean[64] = {0};
+		atspi_core_clean_text("Hello\xEF\xBF\xBC\xC2\xA0World\nLine2 ", clean, sizeof(clean));
+		assert(strcmp(clean, "Hello World Line2") == 0);
+	}
 
 	/* Verify ren-firefox rejects nonexistent tab cleanly without side effects */
 	rc = ren_call_tool("browser", "tab __nonexistent_jarvis_tab_xyz__", &out);

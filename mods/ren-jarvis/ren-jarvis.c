@@ -239,7 +239,9 @@ XY_MODULE_API void xy_install(void)
 	set_jarvis_model();
 
 	ren_register_prompt_hint(
-		"You have live GUI, desktop, and browser control via 'browser', 'window', 'workspace', 'x11_windows', 'clipboard', 'input', 'open_app', 'open_terminal', 'media', 'system', 'terminal', 'recall', and 'record'. Never claim you cannot access or interact with browser tabs, WhatsApp Web, or desktop apps.\n"
+		"You have live GUI, desktop, and browser control via 'browser', 'window', 'workspace', 'x11_windows', 'read_window', 'clipboard', 'input', 'open_app', 'open_terminal', 'media', 'system', 'terminal', 'recall', and 'record'. Never claim you cannot access or interact with browser tabs, WhatsApp Web, or desktop apps.\n"
+		"To inspect or read the focused non-browser window without screenshots:\n"
+		"- Call 'read_window' (or 'read_window inspect [filter]' for interactive control coordinates @(x,y)) to read text or UI controls from GTK/Qt/Electron windows via AT-SPI2 or from the focused st/tmux terminal pane; call 'terminal [lines]' directly to capture tmux pane output.\n"
 		"To browse, read pages, or interact with an open browser tab:\n"
 		"1. 'browser url <https://...>', 'browser search <query>', 'browser tab <title>', and 'browser click <label>' automatically wait for page load and return a readable page snapshot. Use 'browser read [offset|filter]' to read more page text or paginate long articles, 'browser wait [ms|text]' if a dynamic page is still loading, and 'browser inspect [filter]' to list controls with coordinates (*FOCUSED* marks active inputs; *OFF-SCREEN* controls lack screen coordinates and must be scrolled or filtered).\n"
 		"2. After navigating or clicking a link/button, always inspect the returned snapshot (or call 'browser read' / 'browser inspect') before deciding your next step or summarizing content.\n"
