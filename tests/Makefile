@@ -23,8 +23,15 @@ test: all
 	@tmp_rc=$$(mktemp); \
 	JARVISRC="$$tmp_rc" ../bin/jarvis config wake_word Jarbas; \
 	val=$$(JARVISRC="$$tmp_rc" ../bin/jarvis config wake_word); \
+	JARVISRC="$$tmp_rc" ../bin/jarvis config tts_lang en-us; \
+	JARVISRC="$$tmp_rc" ../bin/jarvis config lang pt; \
+	lval=$$(JARVISRC="$$tmp_rc" ../bin/jarvis config lang); \
+	stale=$$(JARVISRC="$$tmp_rc" ../bin/jarvis config tts_lang || true); \
+	JARVISRC="$$tmp_rc" ../bin/jarvis doctor --json | grep -q '"config":'; \
+	JARVISRC="$$tmp_rc" ../bin/jarvis setup --dry-run --json | grep -q '"dry_run":true'; \
 	rm -f "$$tmp_rc"; \
-	[ "$$val" = "Jarbas" ] || (echo "CLI config test failed: got '$$val'"; exit 1)
+	[ "$$val" = "Jarbas" ] || (echo "CLI config test failed: got '$$val'"; exit 1); \
+	[ "$$lval" = "pt" ] && [ -z "$$stale" ] || (echo "CLI one-line lang test failed: lang='$$lval' stale='$$stale'"; exit 1)
 	@echo "[PASS] bin/jarvis CLI smoke tests passed!"
 
 clean:

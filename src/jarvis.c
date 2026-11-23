@@ -10,6 +10,7 @@
 #include <strings.h>
 #ifndef _WIN32
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <signal.h>
@@ -29,12 +30,15 @@ static void print_usage(const char *prog)
 		"  query <utterance>                         Send natural language command to ren\n"
 		"  start | on                                Start jarvisd daemon and enable wake-word listener\n"
 		"  stop | off                                Disable wake-word listener\n"
+		"  restart                                   Restart jarvisd daemon to apply config changes\n"
 		"  toggle                                    Toggle wake-word listener on/off\n"
 		"  status                                    Print listener status ('on' or 'off')\n"
+		"  doctor                                    Check audio, Whisper, GPU, TTS, ren, and daemon health\n"
+		"  setup                                     Install missing defaults (Whisper model, PipeWire AEC)\n"
 		"  lockdown | lock                           Disable listener and lock screen\n"
 		"  menu                                      Open interactive voice & daemon settings menu\n"
-		"  config [key] [value]                      Get or set ~/.jarvisrc configuration values\n"
-		"  tts-on [voice]                            Enable neural TTS (optionally setting voice)\n"
+		"  config [key [value] | unset <key>]        Get, set, or unset ~/.jarvisrc configuration values\n"
+		"  tts-on [voice]                            Enable neural TTS (optionally setting voice or 'auto')\n"
 		"  tts-off                                   Disable neural TTS (0 KB idle RAM)\n"
 		"  tts-interrupt | quiet                     Interrupt active TTS speech immediately\n"
 		"  speak <text>                              Speak text via TTS\n"
@@ -45,10 +49,10 @@ static void print_usage(const char *prog)
 		"Options:\n"
 		"  -p, --port <port>                         Override jarvisd TCP port (default from ~/.jarvisrc)\n"
 		"  -c, --cmd <raw_cmd>                       Send raw control command to jarvisd socket\n"
-		"  --wm <dwm|sway|hyprland>                  Window manager hint for ren session startup\n"
+		"  --wm <auto|dwm|sway|hyprland|x11>         Window manager hint for ren session startup\n"
 		"  --surface <any|terminal|browser|site|nd>  Accepted for CLI compatibility\n"
 		"  --mod <name>                              Extra ren module name to load on session start\n"
-		"  --dry-run                                 Show normalized/socket dispatch preview without running\n"
+		"  --dry-run                                 Preview query dispatch or setup actions without changes\n"
 		"  --json                                    Emit JSON output\n"
 		"  -q, --quiet                               Suppress desktop notifications\n",
 		prog
@@ -369,17 +373,18 @@ static int connect_ren_socket(bool auto_start, const char *wm_override, const ch
 	char ren_mods[512] = {0};
 	if (!jarvis_rc_get("ren_mods", NULL, ren_mods, sizeof(ren_mods)) || !ren_mods[0]) {
 		char wm_buf[64] = {0}, wm_mod[80];
-		if (wm_override && *wm_override) {
+		if (wm_override && *wm_override && strcasecmp(wm_override, "auto") != 0) {
 			snprintf(wm_buf, sizeof(wm_buf), "%s", wm_override);
 		} else {
-			jarvis_rc_get("wm", "dwm", wm_buf, sizeof(wm_buf));
+			jarvis_resolve_wm(wm_buf, sizeof(wm_buf));
 		}
-		snprintf(wm_mod, sizeof(wm_mod), "ren-%s", wm_buf[0] ? wm_buf : "dwm");
+		snprintf(wm_mod, sizeof(wm_mod), "ren-%s", wm_buf[0] ? wm_buf : "desktop");
 		const char *cands[] = {
 			wm_mod, "ren-reflex", "ren-x11", "ren-firefox", "ren-desktop", "ren-jarvis", "ren-mm", NULL
 		};
 		size_t mo = 0;
 		for (size_t i = 0; cands[i]; i++) {
+			if (i > 0 && strcmp(cands[i], wm_mod) == 0) continue;
 			char sp[512];
 			snprintf(sp, sizeof(sp), "%s/.local/lib/ren/%s.so", home, cands[i]);
 			if (strcmp(cands[i], "ren-jarvis") == 0 || strcmp(cands[i], "ren-mm") == 0 ||
@@ -584,43 +589,27 @@ static jarvis_ontology_t *get_cli_ont(void)
 	static jarvis_ontology_t *s_ont = NULL;
 	if (!loaded) {
 		loaded = 1;
-		const char *home = getenv("HOME");
-		char def_ont[512] = {0};
-		if (home && *home)
-			snprintf(def_ont, sizeof(def_ont), "%s/.config/jarvis/ontology.json", home);
 		char ont_path[512] = {0};
-		jarvis_rc_get("ontology_path", def_ont, ont_path, sizeof(ont_path));
-		if (ont_path[0])
-			s_ont = jarvis_ontology_create(ont_path);
+		const char *req = jarvis_rc_get("ontology_path", NULL, ont_path, sizeof(ont_path))
+			? ont_path : NULL;
+		s_ont = jarvis_ontology_create(req);
 	}
 	return s_ont;
 }
 
 static void get_cli_wake_word(const jarvis_ontology_t *ont, char *out, size_t out_sz)
 {
-	if (!out || out_sz == 0) return;
-	const char *ont_wake = ont ? jarvis_ontology_get_wake_word(ont) : NULL;
-	if (!ont_wake || !*ont_wake) ont_wake = "assistant";
-	jarvis_rc_get("wake_word", ont_wake, out, out_sz);
-	if (!out[0]) snprintf(out, out_sz, "%s", ont_wake);
+	jarvis_resolve_wake_word(ont, out, out_sz);
 }
 
 static void get_cli_default_lang(const jarvis_ontology_t *ont, char *out, size_t out_sz)
 {
-	if (!out || out_sz == 0) return;
-	const char *ont_lang = ont ? jarvis_ontology_get_lang(ont) : NULL;
-	if (!ont_lang || !*ont_lang) ont_lang = "en";
-	jarvis_rc_get("lang", ont_lang, out, out_sz);
-	if (!out[0]) snprintf(out, out_sz, "%s", ont_lang);
+	jarvis_resolve_lang(ont, out, out_sz);
 }
 
 static void get_cli_default_voice(const jarvis_ontology_t *ont, char *out, size_t out_sz)
 {
-	char lang[32];
-	get_cli_default_lang(ont, lang, sizeof(lang));
-	const char *def_voice = (strncmp(lang, "pt", 2) == 0) ? "pm_tuga" : "bm_daniel";
-	jarvis_rc_get("tts_voice", def_voice, out, out_sz);
-	if (!out[0]) snprintf(out, out_sz, "%s", def_voice);
+	jarvis_resolve_tts_voice(ont, out, out_sz);
 }
 
 static void do_jarvis_start(bool quiet)
@@ -877,10 +866,12 @@ static void do_jarvis_menu(const char *wm_override, const char *extra_mod)
 		if (running) do_jarvis_stop(false);
 		else do_jarvis_start(false);
 	} else if (strncmp(choice, "2.", 2) == 0) {
-		char v_off[128], vprompt[128], vitems[1536];
+		char v_auto[128], v_off[128], vprompt[128], vitems[1664];
+		jarvis_ontology_format_ui(ont, "menu_voice_auto", wake, "auto                         (Automatic neural voice for active language)", v_auto, sizeof(v_auto));
 		jarvis_ontology_format_ui(ont, "menu_voice_off", wake, "off                          (Disable Neural TTS Voice)", v_off, sizeof(v_off));
 		jarvis_ontology_format_ui(ont, "voice_prompt", wake, "🗣 TTS Voice:", vprompt, sizeof(vprompt));
 		snprintf(vitems, sizeof(vitems),
+			"%s\n"
 			"pm_tuga                      (Português de Portugal — Male, Tuga)\n"
 			"pm_alex                      (Português — Male, Alex)\n"
 			"pm_santa                     (Português — Male, Santa)\n"
@@ -891,7 +882,7 @@ static void do_jarvis_menu(const char *wm_override, const char *extra_mod)
 			"bf_emma                      (English — British Female, Emma)\n"
 			"am_michael                   (English — American Male, Michael)\n"
 			"af_heart                     (English — American Female, Heart)\n"
-			"%s", v_off);
+			"%s", v_auto, v_off);
 		char vchoice[256] = {0};
 		if (cli_dmenu(vprompt, vitems, vchoice, sizeof(vchoice)) > 0 && vchoice[0]) {
 			char vid[64] = {0};
@@ -906,11 +897,18 @@ static void do_jarvis_menu(const char *wm_override, const char *extra_mod)
 				} else {
 					jarvis_rc_set("tts_enabled", "1");
 					jarvis_rc_set("tts_voice", vid);
-					const char *tlang = (vid[0] == 'p') ? "pt-pt" : ((vid[0] == 'a') ? "en-us" : "en-gb-x-rp");
-					jarvis_rc_set("tts_lang", tlang);
+					char resolved_v[64] = {0};
+					if (strcmp(vid, "auto") == 0) {
+						jarvis_rc_unset("tts_lang");
+						jarvis_resolve_tts_voice(ont, resolved_v, sizeof(resolved_v));
+					} else {
+						const char *tlang = (vid[0] == 'p') ? "pt-pt" : ((vid[0] == 'a') ? "en-us" : "en-gb-x-rp");
+						jarvis_rc_set("tts_lang", tlang);
+						snprintf(resolved_v, sizeof(resolved_v), "%s", vid);
+					}
 					char ttitle[128], greet[128], cmd_sp[192], resp[64];
 					jarvis_ontology_format_ui(ont, "tts_on_title", wake, "🗣  Neural Voice Active", ttitle, sizeof(ttitle));
-					cli_notify(ttitle, vid);
+					cli_notify(ttitle, resolved_v[0] ? resolved_v : vid);
 					jarvis_ontology_format_ui(ont, "tts_greeting", wake, "Ready.", greet, sizeof(greet));
 					snprintf(cmd_sp, sizeof(cmd_sp), "TTS_SPEAK|%s", greet);
 					daemon_cmd(cmd_sp, resp, sizeof(resp));
@@ -953,12 +951,16 @@ static void do_jarvis_menu(const char *wm_override, const char *extra_mod)
 		if (cli_dmenu(lprompt, lang_items, gchoice, sizeof(gchoice)) > 0 && gchoice[0]) {
 			char gval[32] = {0};
 			if (sscanf(gchoice, "%31s", gval) == 1 && gval[0]) {
-				char ltitle[128];
+				char ltitle[128], resp[64];
 				jarvis_rc_set("lang", gval);
-				if (strncmp(gval, "pt", 2) == 0) jarvis_rc_set("tts_lang", "pt-pt");
-				else if (strncmp(gval, "en", 2) == 0) jarvis_rc_set("tts_lang", "en-gb-x-rp");
-				jarvis_ontology_format_ui(ont, "lang_updated_title", wake, "🌐  Language Updated", ltitle, sizeof(ltitle));
+				jarvis_rc_unset("tts_lang");
+				if (daemon_cmd("PING", resp, sizeof(resp))) {
+					restart_daemon(running);
+				}
+				jarvis_ontology_t *new_ont = jarvis_ontology_create(NULL);
+				jarvis_ontology_format_ui(new_ont ? new_ont : ont, "lang_updated_title", wake, "🌐  Language Updated", ltitle, sizeof(ltitle));
 				cli_notify(ltitle, gval);
+				if (new_ont) jarvis_ontology_destroy(new_ont);
 			}
 		}
 	} else if (strncmp(choice, "6.", 2) == 0) {
@@ -996,6 +998,457 @@ static void do_jarvis_menu(const char *wm_override, const char *extra_mod)
 		char *const argv[] = { "st", "-e", (char *)ed, rc_path, NULL };
 		desktop_core_spawn_detached_argv(argv);
 	}
+}
+
+static bool cmd_in_path(const char *cmd)
+{
+	if (!cmd || !*cmd) return false;
+	const char *home = getenv("HOME");
+	if (home && *home) {
+		char lp[768];
+		snprintf(lp, sizeof(lp), "%s/.local/bin/%s", home, cmd);
+		if (access(lp, X_OK) == 0) return true;
+	}
+	const char *path_env = getenv("PATH");
+	if (!path_env || !*path_env) return false;
+	char copy[4096];
+	snprintf(copy, sizeof(copy), "%s", path_env);
+	char *save = NULL;
+	for (char *dir = strtok_r(copy, ":", &save); dir; dir = strtok_r(NULL, ":", &save)) {
+		if (!*dir) continue;
+		char cand[1024];
+		snprintf(cand, sizeof(cand), "%s/%s", dir, cmd);
+		if (access(cand, X_OK) == 0) return true;
+	}
+	return false;
+}
+
+static int run_argv_capture(char *const argv[], char *out, size_t out_sz)
+{
+	if (!out || out_sz == 0) return -1;
+	out[0] = '\0';
+	if (!argv || !argv[0]) return -1;
+
+	int pfd[2];
+	if (pipe(pfd) < 0) return -1;
+	pid_t pid = fork();
+	if (pid < 0) {
+		close(pfd[0]);
+		close(pfd[1]);
+		return -1;
+	}
+	if (pid == 0) {
+		dup2(pfd[1], STDOUT_FILENO);
+		int dn = open("/dev/null", O_RDWR);
+		if (dn >= 0) {
+			dup2(dn, STDIN_FILENO);
+			dup2(dn, STDERR_FILENO);
+			if (dn > STDERR_FILENO) close(dn);
+		}
+		close(pfd[0]);
+		close(pfd[1]);
+		execvp(argv[0], argv);
+		_exit(127);
+	}
+	close(pfd[1]);
+	size_t tot = 0;
+	while (tot + 1 < out_sz) {
+		ssize_t r = read(pfd[0], out + tot, out_sz - 1 - tot);
+		if (r < 0 && errno == EINTR) continue;
+		if (r <= 0) break;
+		tot += (size_t)r;
+	}
+	close(pfd[0]);
+	out[tot] = '\0';
+	int st = 0;
+	while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+	return (WIFEXITED(st) && WEXITSTATUS(st) == 0) ? 0 : -1;
+}
+
+static bool probe_http_health(uint16_t port, const char *req_path)
+{
+	int s = socket(AF_INET, SOCK_STREAM, 0);
+	if (s < 0) return false;
+	struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+	setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+	struct sockaddr_in addr;
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(port);
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	if (connect(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		close(s);
+		return false;
+	}
+	char req[256];
+	int n = snprintf(req, sizeof(req), "GET %s HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n", req_path);
+	if (n > 0) write_all_fd(s, req, (size_t)n);
+	char buf[512] = {0};
+	ssize_t rd = read(s, buf, sizeof(buf) - 1);
+	close(s);
+	return rd > 0 && strstr(buf, "200") != NULL;
+}
+
+static bool find_any_whisper_model(const char *home, bool allow_en_only, char *out, size_t out_sz)
+{
+	out[0] = '\0';
+	if (jarvis_rc_get("whisper_model", NULL, out, out_sz) && out[0] && access(out, R_OK) == 0) {
+		return true;
+	}
+	out[0] = '\0';
+	static const char *const multi[] = {
+		"ggml-small-q8_0.bin", "ggml-small-q5_1.bin",
+		"ggml-base-q8_0.bin",  "ggml-base-q5_1.bin",
+		"ggml-base.bin",       "ggml-large-v3-turbo-q5_0.bin", NULL
+	};
+	static const char *const en[] = {
+		"ggml-base.en-q8_0.bin", "ggml-small.en-q5_1.bin", NULL
+	};
+	for (size_t i = 0; multi[i]; i++) {
+		char cand[768];
+		snprintf(cand, sizeof(cand), "%s/.local/share/whisper/%s", home, multi[i]);
+		if (access(cand, R_OK) == 0) {
+			snprintf(out, out_sz, "%s", cand);
+			return true;
+		}
+	}
+	if (allow_en_only) {
+		for (size_t i = 0; en[i]; i++) {
+			char cand[768];
+			snprintf(cand, sizeof(cand), "%s/.local/share/whisper/%s", home, en[i]);
+			if (access(cand, R_OK) == 0) {
+				snprintf(out, out_sz, "%s", cand);
+				return true;
+			}
+		}
+	}
+	char wdir[512];
+	snprintf(wdir, sizeof(wdir), "%s/.local/share/whisper", home);
+	DIR *d = opendir(wdir);
+	if (d) {
+		struct dirent *de;
+		while ((de = readdir(d)) != NULL) {
+			size_t nl = strlen(de->d_name);
+			if (nl > 4 && strcmp(de->d_name + nl - 4, ".bin") == 0) {
+				char full[1024];
+				snprintf(full, sizeof(full), "%s/%s", wdir, de->d_name);
+				snprintf(out, out_sz, "%s", full);
+				closedir(d);
+				return true;
+			}
+		}
+		closedir(d);
+	}
+	return false;
+}
+
+static bool has_piper_or_kokoro_model(const char *home)
+{
+	char kokoro[768];
+	snprintf(kokoro, sizeof(kokoro), "%s/.local/share/kokoro/kokoro-v1.0.onnx", home);
+	if (access(kokoro, R_OK) == 0) return true;
+	char pdir[768];
+	snprintf(pdir, sizeof(pdir), "%s/.local/share/piper", home);
+	DIR *d = opendir(pdir);
+	if (d) {
+		struct dirent *de;
+		while ((de = readdir(d)) != NULL) {
+			size_t nl = strlen(de->d_name);
+			if (nl > 5 && strcmp(de->d_name + nl - 5, ".onnx") == 0) {
+				closedir(d);
+				return true;
+			}
+		}
+		closedir(d);
+	}
+	return false;
+}
+
+static bool mkdir_p_path(const char *path)
+{
+	char tmp[768];
+	size_t len = strlen(path);
+	if (len == 0 || len >= sizeof(tmp)) return false;
+	snprintf(tmp, sizeof(tmp), "%s", path);
+	for (char *p = tmp + 1; *p; p++) {
+		if (*p == '/') {
+			*p = '\0';
+			if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return false;
+			*p = '/';
+		}
+	}
+	return (mkdir(tmp, 0755) == 0 || errno == EEXIST);
+}
+
+static bool copy_file_atomic(const char *src, const char *dst)
+{
+	FILE *in = fopen(src, "rb");
+	if (!in) return false;
+	char tmp[1056];
+	snprintf(tmp, sizeof(tmp), "%s.tmp", dst);
+	FILE *out = fopen(tmp, "wb");
+	if (!out) {
+		fclose(in);
+		return false;
+	}
+	char buf[4096];
+	size_t n;
+	bool ok = true;
+	while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+		if (fwrite(buf, 1, n, out) != n) {
+			ok = false;
+			break;
+		}
+	}
+	if (ferror(in)) ok = false;
+	fclose(in);
+	if (fclose(out) != 0) ok = false;
+	if (!ok) {
+		unlink(tmp);
+		return false;
+	}
+	return rename(tmp, dst) == 0;
+}
+
+static int do_jarvis_doctor(bool as_json)
+{
+	const char *home = getenv("HOME");
+	if (!home || !*home) home = "/tmp";
+
+	const jarvis_ontology_t *ont = get_cli_ont();
+	char rc_path[512];
+	resolve_rc_file(rc_path, sizeof(rc_path));
+	bool has_rc = (access(rc_path, R_OK) == 0);
+
+	char lang[32] = {0}, wake[64] = {0}, voice[64] = {0}, wm[64] = {0};
+	jarvis_resolve_lang(ont, lang, sizeof(lang));
+	jarvis_resolve_wake_word(ont, wake, sizeof(wake));
+	jarvis_resolve_tts_voice(ont, voice, sizeof(voice));
+	jarvis_resolve_wm(wm, sizeof(wm));
+
+	bool has_pw_rec = cmd_in_path("pw-record");
+	bool has_pw_cat = cmd_in_path("pw-cat");
+	bool has_wpctl  = cmd_in_path("wpctl");
+
+	char aec_conf[768];
+	snprintf(aec_conf, sizeof(aec_conf), "%s/.config/pipewire/pipewire.conf.d/99-jarvis-aec.conf", home);
+	bool has_aec_conf = (access(aec_conf, R_OK) == 0);
+
+	bool has_aec_node = false;
+	if (has_wpctl) {
+		char wp_out[8192];
+		char *const wp_argv[] = { "wpctl", "status", NULL };
+		if (run_argv_capture(wp_argv, wp_out, sizeof(wp_out)) == 0) {
+			has_aec_node = (strstr(wp_out, "jarvis_aec_source") != NULL);
+		}
+	}
+
+	bool allow_en = (strncasecmp(lang, "en", 2) == 0);
+	char model_path[1024] = {0};
+	bool has_model = find_any_whisper_model(home, allow_en, model_path, sizeof(model_path));
+	bool en_model_mismatch = false;
+	if (has_model && !allow_en &&
+	    (strstr(model_path, ".en.") != NULL || strstr(model_path, ".en-") != NULL)) {
+		en_model_mismatch = true;
+	}
+	bool has_vulkan = (access("/dev/dri/renderD128", R_OK) == 0);
+
+	bool has_edge_pcm = cmd_in_path("edge-tts-pcm");
+	bool has_ffmpeg   = cmd_in_path("ffmpeg");
+	bool has_espeak   = cmd_in_path("espeak-ng");
+	bool has_edge_py  = false;
+	if (cmd_in_path("python3")) {
+		char *const py_argv[] = { "python3", "-c", "import edge_tts", NULL };
+		has_edge_py = (run_argv_sync(py_argv) == 0);
+	}
+	bool has_local_onnx = has_piper_or_kokoro_model(home);
+
+	bool has_ren = cmd_in_path("ren");
+	char ren_wm_so[768], ren_jarvis_so[768];
+	snprintf(ren_wm_so, sizeof(ren_wm_so), "%s/.local/lib/ren/ren-%s.so", home, wm);
+	snprintf(ren_jarvis_so, sizeof(ren_jarvis_so), "%s/.local/lib/ren/ren-jarvis.so", home);
+	bool has_ren_wm = (access(ren_wm_so, R_OK) == 0);
+	bool has_ren_jarvis = (access(ren_jarvis_so, R_OK) == 0);
+
+	bool auren_ok = probe_http_health(4242, "/v1/models");
+	char ping_resp[64] = {0}, st_resp[64] = {0};
+	bool daemon_up = daemon_cmd("PING", ping_resp, sizeof(ping_resp));
+	bool daemon_listening = daemon_up && daemon_cmd("JARVIS_STATUS", st_resp, sizeof(st_resp)) &&
+	                        (strcmp(st_resp, "ON") == 0);
+
+	bool healthy = (ont != NULL) && has_pw_rec && has_pw_cat && has_model &&
+	               !en_model_mismatch && (has_edge_pcm || has_local_onnx || has_espeak) && has_ren;
+
+	if (as_json) {
+		char e_rc[640], e_lang[64], e_wake[128], e_voice[128], e_wm[64], e_mod[1024];
+		desktop_core_json_escape(has_rc ? rc_path : "none (zero-config defaults)", e_rc, sizeof(e_rc));
+		desktop_core_json_escape(lang, e_lang, sizeof(e_lang));
+		desktop_core_json_escape(wake, e_wake, sizeof(e_wake));
+		desktop_core_json_escape(voice, e_voice, sizeof(e_voice));
+		desktop_core_json_escape(wm, e_wm, sizeof(e_wm));
+		desktop_core_json_escape(has_model ? model_path : "", e_mod, sizeof(e_mod));
+		printf("{\"healthy\":%s,"
+		       "\"config\":{\"rc_file\":\"%s\",\"has_rc\":%s,\"lang\":\"%s\",\"wake_word\":\"%s\",\"tts_voice\":\"%s\",\"wm\":\"%s\",\"ontology_loaded\":%s},"
+		       "\"audio\":{\"pw_record\":%s,\"pw_cat\":%s,\"wpctl\":%s,\"aec_conf\":%s,\"aec_source_active\":%s},"
+		       "\"whisper\":{\"model\":\"%s\",\"model_found\":%s,\"en_model_mismatch\":%s,\"vulkan_render_node\":%s},"
+		       "\"tts\":{\"edge_tts_pcm\":%s,\"edge_tts_python\":%s,\"ffmpeg\":%s,\"local_onnx\":%s,\"espeak_ng\":%s},"
+		       "\"ren\":{\"ren_bin\":%s,\"ren_jarvis_so\":%s,\"ren_wm_so\":%s,\"axil_auren_health\":%s},"
+		       "\"daemon\":{\"running\":%s,\"listening\":%s}}\n",
+		       healthy ? "true" : "false",
+		       e_rc, has_rc ? "true" : "false", e_lang, e_wake, e_voice, e_wm, ont ? "true" : "false",
+		       has_pw_rec ? "true" : "false", has_pw_cat ? "true" : "false",
+		       has_wpctl ? "true" : "false", has_aec_conf ? "true" : "false",
+		       has_aec_node ? "true" : "false",
+		       e_mod, has_model ? "true" : "false", en_model_mismatch ? "true" : "false",
+		       has_vulkan ? "true" : "false",
+		       has_edge_pcm ? "true" : "false", has_edge_py ? "true" : "false",
+		       has_ffmpeg ? "true" : "false", has_local_onnx ? "true" : "false",
+		       has_espeak ? "true" : "false",
+		       has_ren ? "true" : "false", has_ren_jarvis ? "true" : "false",
+		       has_ren_wm ? "true" : "false", auren_ok ? "true" : "false",
+		       daemon_up ? "true" : "false", daemon_listening ? "true" : "false");
+	} else {
+		printf("Jarvis Doctor (%s)\n", healthy ? "READY" : "NEEDS ATTENTION");
+		printf("  [Config]\n");
+		printf("    %-18s %s\n", "rc file:", has_rc ? rc_path : "none (zero-config defaults)");
+		printf("    %-18s %s (wake=%s, tts=%s, wm=%s)\n", "resolved:", lang, wake, voice, wm);
+		printf("    %-18s %s\n", "ontology:", ont ? "loaded" : "MISSING");
+		printf("  [Audio & PipeWire]\n");
+		printf("    %-18s pw-record=%s pw-cat=%s wpctl=%s\n", "tools:",
+		       has_pw_rec ? "OK" : "MISSING", has_pw_cat ? "OK" : "MISSING", has_wpctl ? "OK" : "MISSING");
+		printf("    %-18s conf=%s node(jarvis_aec_source)=%s\n", "AEC:",
+		       has_aec_conf ? "OK" : "missing (run 'jarvis setup')",
+		       has_aec_node ? "ACTIVE" : "inactive");
+		printf("  [Whisper & GPU]\n");
+		printf("    %-18s %s%s\n", "model:", has_model ? model_path : "MISSING (run 'jarvis setup')",
+		       en_model_mismatch ? " [WARN: .en model with non-en lang]" : "");
+		printf("    %-18s %s\n", "vulkan GPU:", has_vulkan ? "/dev/dri/renderD128 OK" : "not detected (CPU fallback)");
+		printf("  [TTS Backends]\n");
+		printf("    %-18s edge-tts-pcm=%s python-edge_tts=%s ffmpeg=%s\n", "neural:",
+		       has_edge_pcm ? "OK" : "missing", has_edge_py ? "OK" : "missing", has_ffmpeg ? "OK" : "missing");
+		printf("    %-18s local-onnx=%s espeak-ng=%s\n", "offline:",
+		       has_local_onnx ? "OK" : "none", has_espeak ? "OK" : "missing");
+		printf("  [Agent & Services]\n");
+		printf("    %-18s bin=%s ren-jarvis=%s ren-%s=%s\n", "ren:",
+		       has_ren ? "OK" : "MISSING", has_ren_jarvis ? "OK" : "missing",
+		       wm, has_ren_wm ? "OK" : "missing");
+		printf("    %-18s %s\n", "axil-auren:", auren_ok ? "UP (:4242)" : "unreachable (:4242)");
+		printf("    %-18s %s\n", "jarvisd:",
+		       daemon_up ? (daemon_listening ? "RUNNING (listening: on)" : "RUNNING (listening: off)") : "stopped");
+	}
+	return 0;
+}
+
+static int do_jarvis_setup(bool dry_run, bool as_json)
+{
+	const char *home = getenv("HOME");
+	if (!home || !*home) home = "/tmp";
+
+	char wdir[512], pwdir[512], cfgdir[512];
+	snprintf(wdir, sizeof(wdir), "%s/.local/share/whisper", home);
+	snprintf(pwdir, sizeof(pwdir), "%s/.config/pipewire/pipewire.conf.d", home);
+	snprintf(cfgdir, sizeof(cfgdir), "%s/.config/jarvis", home);
+
+	if (!dry_run) {
+		mkdir_p_path(wdir);
+		mkdir_p_path(pwdir);
+		mkdir_p_path(cfgdir);
+	}
+
+	char lang[32] = {0}, wake[64] = {0}, voice[64] = {0}, wm[64] = {0};
+	const jarvis_ontology_t *ont = get_cli_ont();
+	jarvis_resolve_lang(ont, lang, sizeof(lang));
+	jarvis_resolve_wake_word(ont, wake, sizeof(wake));
+	jarvis_resolve_tts_voice(ont, voice, sizeof(voice));
+	jarvis_resolve_wm(wm, sizeof(wm));
+
+	char model_path[1024] = {0};
+	bool has_model = find_any_whisper_model(home, strncasecmp(lang, "en", 2) == 0,
+	                                        model_path, sizeof(model_path));
+	const char *model_action = "present";
+	if (!has_model) {
+		snprintf(model_path, sizeof(model_path), "%s/ggml-base-q8_0.bin", wdir);
+		static const char *const url =
+			"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q8_0.bin";
+		if (dry_run) {
+			model_action = "would-download";
+		} else {
+			char tmp_m[1056];
+			snprintf(tmp_m, sizeof(tmp_m), "%s.part", model_path);
+			int dl_rc = -1;
+			if (cmd_in_path("curl")) {
+				char *const argv[] = { "curl", "-fL", "-o", tmp_m, (char *)url, NULL };
+				dl_rc = run_argv_sync(argv);
+			} else if (cmd_in_path("wget")) {
+				char *const argv[] = { "wget", "-O", tmp_m, (char *)url, NULL };
+				dl_rc = run_argv_sync(argv);
+			}
+			if (dl_rc == 0 && rename(tmp_m, model_path) == 0) {
+				has_model = true;
+				model_action = "downloaded";
+			} else {
+				unlink(tmp_m);
+				model_action = "download-failed";
+			}
+		}
+	}
+
+	char aec_dst[1024];
+	snprintf(aec_dst, sizeof(aec_dst), "%s/99-jarvis-aec.conf", pwdir);
+	bool has_aec = (access(aec_dst, R_OK) == 0);
+	const char *aec_action = "present";
+	if (!has_aec) {
+		char aec_src_home[768];
+		snprintf(aec_src_home, sizeof(aec_src_home), "%s/.local/share/jarvis/99-jarvis-aec.conf", home);
+		const char *cands[] = {
+			aec_src_home,
+			"/usr/local/share/jarvis/99-jarvis-aec.conf",
+			"/usr/share/jarvis/99-jarvis-aec.conf",
+			"data/99-jarvis-aec.conf",
+			NULL
+		};
+		const char *found_src = NULL;
+		for (size_t i = 0; cands[i]; i++) {
+			if (access(cands[i], R_OK) == 0) {
+				found_src = cands[i];
+				break;
+			}
+		}
+		if (!found_src) {
+			aec_action = "source-missing";
+		} else if (dry_run) {
+			aec_action = "would-install";
+		} else if (copy_file_atomic(found_src, aec_dst)) {
+			has_aec = true;
+			aec_action = "installed";
+		} else {
+			aec_action = "install-failed";
+		}
+	}
+
+	if (as_json) {
+		char e_mod[1024], e_aec[1024];
+		desktop_core_json_escape(model_path, e_mod, sizeof(e_mod));
+		desktop_core_json_escape(aec_dst, e_aec, sizeof(e_aec));
+		printf("{\"dry_run\":%s,\"whisper_model\":\"%s\",\"model_status\":\"%s\","
+		       "\"aec_conf\":\"%s\",\"aec_status\":\"%s\","
+		       "\"defaults\":{\"lang\":\"%s\",\"wake_word\":\"%s\",\"tts_voice\":\"%s\",\"wm\":\"%s\"}}\n",
+		       dry_run ? "true" : "false",
+		       e_mod, model_action, e_aec, aec_action,
+		       lang, wake, voice, wm);
+	} else {
+		printf("Jarvis Setup%s\n", dry_run ? " (dry-run)" : "");
+		printf("  Whisper model: %s (%s)\n", model_path, model_action);
+		printf("  PipeWire AEC : %s (%s)\n", aec_dst, aec_action);
+		if (strcmp(aec_action, "installed") == 0) {
+			printf("    Note: run 'systemctl --user restart pipewire pipewire-pulse' to activate jarvis_aec_source.\n");
+		}
+		printf("  Defaults     : lang=%s wake=%s voice=%s wm=%s (no ~/.jarvisrc required)\n",
+		       lang, wake, voice, wm);
+		printf("  Switch lang  : jarvis config lang pt   (or 'jarvis config lang en')\n");
+	}
+	return 0;
 }
 #endif /* !_WIN32 */
 
@@ -1076,9 +1529,10 @@ int main(int argc, char **argv)
 			    strcmp(argv[i], "start") == 0 || strcmp(argv[i], "on") == 0 ||
 			    strcmp(argv[i], "jarvis-start") == 0 || strcmp(argv[i], "server-start") == 0 ||
 			    strcmp(argv[i], "stop") == 0 || strcmp(argv[i], "off") == 0 ||
-			    strcmp(argv[i], "jarvis-stop") == 0 ||
+			    strcmp(argv[i], "jarvis-stop") == 0 || strcmp(argv[i], "restart") == 0 ||
 			    strcmp(argv[i], "toggle") == 0 || strcmp(argv[i], "jarvis-toggle") == 0 ||
-			    strcmp(argv[i], "status") == 0 ||
+			    strcmp(argv[i], "status") == 0 || strcmp(argv[i], "doctor") == 0 ||
+			    strcmp(argv[i], "setup") == 0 ||
 			    strcmp(argv[i], "lockdown") == 0 || strcmp(argv[i], "lock") == 0 ||
 			    strcmp(argv[i], "menu") == 0 || strcmp(argv[i], "tts-off") == 0) {
 				subcmd = argv[i];
@@ -1132,6 +1586,16 @@ int main(int argc, char **argv)
 			do_jarvis_stop(quiet);
 			return 0;
 		}
+		if (strcmp(subcmd, "restart") == 0) {
+			bool was_active = is_daemon_listening();
+			restart_daemon(was_active);
+			if (as_json) {
+				printf("{\"restarted\":true,\"listening\":%s}\n", was_active ? "true" : "false");
+			} else if (!quiet) {
+				printf("Restarted jarvisd (listening: %s)\n", was_active ? "on" : "off");
+			}
+			return 0;
+		}
 		if (strcmp(subcmd, "toggle") == 0 || strcmp(subcmd, "jarvis-toggle") == 0) {
 			if (is_daemon_listening()) do_jarvis_stop(quiet);
 			else do_jarvis_start(quiet);
@@ -1142,6 +1606,12 @@ int main(int argc, char **argv)
 			if (as_json) printf("{\"listening\":%s}\n", on ? "true" : "false");
 			else printf("%s\n", on ? "on" : "off");
 			return 0;
+		}
+		if (strcmp(subcmd, "doctor") == 0) {
+			return do_jarvis_doctor(as_json);
+		}
+		if (strcmp(subcmd, "setup") == 0) {
+			return do_jarvis_setup(dry_run, as_json);
 		}
 		if (strcmp(subcmd, "lockdown") == 0 || strcmp(subcmd, "lock") == 0) {
 			do_jarvis_lockdown(quiet);
@@ -1156,6 +1626,9 @@ int main(int argc, char **argv)
 			jarvis_rc_set("tts_enabled", "1");
 			if (subarg && *subarg) {
 				jarvis_rc_set("tts_voice", subarg);
+				if (strcasecmp(subarg, "auto") == 0) {
+					jarvis_rc_unset("tts_lang");
+				}
 			}
 			char v[64], wake[64], ttitle[128], greet[128], cmd_sp[192], resp[64];
 			get_cli_default_voice(ont, v, sizeof(v));
@@ -1198,7 +1671,14 @@ int main(int argc, char **argv)
 				}
 				return 1;
 			}
-			return jarvis_rc_set(subarg, subarg2) ? 0 : 1;
+			if (strcmp(subarg, "unset") == 0) {
+				return jarvis_rc_unset(subarg2) ? 0 : 1;
+			}
+			bool ok = jarvis_rc_set(subarg, subarg2);
+			if (ok && strcasecmp(subarg, "lang") == 0) {
+				jarvis_rc_unset("tts_lang");
+			}
+			return ok ? 0 : 1;
 		}
 		if (strcmp(subcmd, "tts-interrupt") == 0 || strcmp(subcmd, "interrupt") == 0 || strcmp(subcmd, "quiet") == 0) {
 			char resp[64];

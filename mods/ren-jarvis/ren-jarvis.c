@@ -71,6 +71,97 @@ static bool rc_lookup(const char *key, char *out, size_t out_sz)
 	return found;
 }
 
+static bool normalize_lang_local(const char *raw, char *out, size_t out_sz)
+{
+	if (!raw || !*raw || !out || out_sz == 0) return false;
+	char buf[32];
+	size_t w = 0;
+	while (*raw && isspace((unsigned char)*raw)) raw++;
+	for (size_t i = 0; raw[i] && w + 1 < sizeof(buf); i++) {
+		char c = raw[i];
+		if (c == '.' || c == '@') break;
+		if (c == '_') c = '-';
+		if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+		buf[w++] = c;
+	}
+	while (w > 0 && isspace((unsigned char)buf[w - 1])) w--;
+	buf[w] = '\0';
+	if (!buf[0] || strcmp(buf, "c") == 0 || strcmp(buf, "posix") == 0)
+		return false;
+	snprintf(out, out_sz, "%s", buf);
+	return true;
+}
+
+static bool resolve_kbd_local(char *out, size_t out_sz)
+{
+	const char *u = getenv("USER");
+	if (!u || !*u) u = "quirinpa";
+	char path[256], buf[32] = {0};
+	snprintf(path, sizeof(path), "/tmp/dwm-kbd-%s.state", u);
+	FILE *fp = fopen(path, "r");
+	if (!fp) return false;
+	bool ok = false;
+	if (fgets(buf, sizeof(buf), fp)) {
+		char code[8] = {0};
+		size_t ci = 0;
+		for (size_t i = 0; buf[i] && ci < 2; i++) {
+			if (isalpha((unsigned char)buf[i]))
+				code[ci++] = (char)tolower((unsigned char)buf[i]);
+		}
+		code[ci] = '\0';
+		if (strcmp(code, "us") == 0 || strcmp(code, "gb") == 0 || strcmp(code, "uk") == 0) {
+			snprintf(out, out_sz, "en");
+			ok = true;
+		} else if (strcmp(code, "br") == 0) {
+			snprintf(out, out_sz, "pt-br");
+			ok = true;
+		} else if (ci == 2) {
+			snprintf(out, out_sz, "%s", code);
+			ok = true;
+		}
+	}
+	fclose(fp);
+	return ok;
+}
+
+static void resolve_lang_local(char *out, size_t out_sz)
+{
+	if (!out || out_sz == 0) return;
+	char tag[32] = {0};
+
+	const char *env_l = getenv("JARVIS_LANG");
+	if (env_l && normalize_lang_local(env_l, tag, sizeof(tag))) {
+		if (strcmp(tag, "kbd") == 0) {
+			if (resolve_kbd_local(out, out_sz)) return;
+		} else if (strcmp(tag, "auto") != 0) {
+			snprintf(out, out_sz, "%s", tag);
+			return;
+		}
+	}
+
+	char rc_lang[32] = {0};
+	if (rc_lookup("lang", rc_lang, sizeof(rc_lang)) &&
+	    normalize_lang_local(rc_lang, tag, sizeof(tag))) {
+		if (strcmp(tag, "kbd") == 0) {
+			if (resolve_kbd_local(out, out_sz)) return;
+		} else if (strcmp(tag, "auto") != 0) {
+			snprintf(out, out_sz, "%s", tag);
+			return;
+		}
+	}
+
+	static const char *const lc_vars[] = { "LC_ALL", "LC_MESSAGES", "LANG", NULL };
+	for (size_t i = 0; lc_vars[i]; i++) {
+		const char *lv = getenv(lc_vars[i]);
+		if (lv && normalize_lang_local(lv, tag, sizeof(tag))) {
+			snprintf(out, out_sz, "%s", tag);
+			return;
+		}
+	}
+
+	snprintf(out, out_sz, "en");
+}
+
 static void set_jarvis_identity_prompt(void)
 {
 	char custom_prompt[4096] = {0};
@@ -79,18 +170,45 @@ static void set_jarvis_identity_prompt(void)
 		return;
 	}
 
+	char lang[32] = {0};
+	resolve_lang_local(lang, sizeof(lang));
+
 	char wake_buf[64] = {0};
-	if (!rc_lookup("wake_word", wake_buf, sizeof(wake_buf)) || !wake_buf[0]) {
-		snprintf(wake_buf, sizeof(wake_buf), "Assistant");
+	const char *env_w = getenv("JARVIS_WAKE_WORD");
+	if (env_w && *env_w) {
+		snprintf(wake_buf, sizeof(wake_buf), "%s", env_w);
+	} else if (!rc_lookup("wake_word", wake_buf, sizeof(wake_buf)) ||
+	           !wake_buf[0] || strcasecmp(wake_buf, "auto") == 0) {
+		snprintf(wake_buf, sizeof(wake_buf), "%s",
+		         (strncmp(lang, "pt", 2) == 0) ? "Jarbas" : "Jarvis");
 	}
 	wake_buf[0] = (char)toupper((unsigned char)wake_buf[0]);
 
-	char identity[1024];
+	char lang_rule[128];
+	if (strcmp(lang, "pt-br") == 0) {
+		snprintf(lang_rule, sizeof(lang_rule), "Always reply to the user in Brazilian Portuguese (pt-BR).");
+	} else if (strncmp(lang, "pt", 2) == 0) {
+		snprintf(lang_rule, sizeof(lang_rule), "Always reply to the user in European Portuguese (pt-PT).");
+	} else if (strncmp(lang, "en", 2) == 0) {
+		snprintf(lang_rule, sizeof(lang_rule), "Always reply to the user in English.");
+	} else if (strncmp(lang, "es", 2) == 0) {
+		snprintf(lang_rule, sizeof(lang_rule), "Always reply to the user in Spanish.");
+	} else if (strncmp(lang, "fr", 2) == 0) {
+		snprintf(lang_rule, sizeof(lang_rule), "Always reply to the user in French.");
+	} else if (strncmp(lang, "de", 2) == 0) {
+		snprintf(lang_rule, sizeof(lang_rule), "Always reply to the user in German.");
+	} else if (strncmp(lang, "it", 2) == 0) {
+		snprintf(lang_rule, sizeof(lang_rule), "Always reply to the user in Italian.");
+	} else {
+		snprintf(lang_rule, sizeof(lang_rule), "Always reply to the user in language '%s'.", lang);
+	}
+
+	char identity[1280];
 	snprintf(identity, sizeof(identity),
 	         "You are %s, the user's personal voice and desktop AI assistant. "
 	         "Never identify yourself as ren. Help the user with desktop automation, "
-	         "browser control, file operations, and memory using the available tools.",
-	         wake_buf);
+	         "browser control, file operations, and memory using the available tools. %s",
+	         wake_buf, lang_rule);
 	ren_set_system_prompt(identity);
 }
 

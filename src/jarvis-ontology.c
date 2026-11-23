@@ -448,7 +448,108 @@ static void load_kv_str_obj(const jjson_val_t *obj, jarvis_kv_str_t *dst, size_t
 	}
 }
 
-jarvis_ontology_t *jarvis_ontology_create_from_json(const char *json_str)
+static void upsert_kv_str_obj(const jjson_val_t *obj, jarvis_kv_str_t *dst, size_t max_items, size_t *inout_count)
+{
+	if (!obj || obj->type != JJSON_OBJECT) return;
+	for (size_t i = 0; i < obj->u.obj.count; i++) {
+		const char *k = obj->u.obj.pairs[i].key;
+		const jjson_val_t *v = obj->u.obj.pairs[i].val;
+		if (!k || !v || v->type != JJSON_STRING || !v->u.str) continue;
+		bool updated = false;
+		for (size_t j = 0; j < *inout_count; j++) {
+			if (strcmp(dst[j].key, k) == 0) {
+				snprintf(dst[j].val, sizeof(dst[j].val), "%s", v->u.str);
+				updated = true;
+				break;
+			}
+		}
+		if (!updated && *inout_count < max_items) {
+			jarvis_kv_str_t *kv = &dst[(*inout_count)++];
+			snprintf(kv->key, sizeof(kv->key), "%s", k);
+			snprintf(kv->val, sizeof(kv->val), "%s", v->u.str);
+		}
+	}
+}
+
+static const jjson_val_t *find_locale_obj(const jjson_val_t *locales, const char *lang)
+{
+	if (!locales || locales->type != JJSON_OBJECT || !lang || !*lang) return NULL;
+
+	char norm[JARVIS_SHORT_LEN];
+	size_t nw = 0;
+	for (size_t i = 0; lang[i] && nw + 1 < sizeof(norm); i++) {
+		char c = lang[i];
+		if (c == '.' || c == '@') break;
+		if (c == '_') c = '-';
+		if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+		norm[nw++] = c;
+	}
+	norm[nw] = '\0';
+	if (!norm[0]) return NULL;
+
+	const jjson_val_t *v = jjson_obj_get(locales, norm);
+	if (v && v->type == JJSON_OBJECT) return v;
+
+	for (size_t i = 0; i < locales->u.obj.count; i++) {
+		const char *k = locales->u.obj.pairs[i].key;
+		const jjson_val_t *kv = locales->u.obj.pairs[i].val;
+		if (k && kv && kv->type == JJSON_OBJECT && strcasecmp(k, norm) == 0) {
+			return kv;
+		}
+	}
+
+	char *dash = strchr(norm, '-');
+	if (dash) {
+		*dash = '\0';
+		v = jjson_obj_get(locales, norm);
+		if (v && v->type == JJSON_OBJECT) return v;
+		for (size_t i = 0; i < locales->u.obj.count; i++) {
+			const char *k = locales->u.obj.pairs[i].key;
+			const jjson_val_t *kv = locales->u.obj.pairs[i].val;
+			if (k && kv && kv->type == JJSON_OBJECT && strcasecmp(k, norm) == 0) {
+				return kv;
+			}
+		}
+	}
+	return NULL;
+}
+
+static void apply_locale_override(jarvis_ontology_t *ont, const jjson_val_t *locales, const char *target_lang)
+{
+	const jjson_val_t *loc = find_locale_obj(locales, target_lang);
+	if (!loc) return;
+
+	const char *s = jjson_obj_get_str(loc, "lang", NULL);
+	if (s && *s) snprintf(ont->lang, sizeof(ont->lang), "%s", s);
+
+	s = jjson_obj_get_str(loc, "lang_name", NULL);
+	if (s && *s) snprintf(ont->lang_name, sizeof(ont->lang_name), "%s", s);
+
+	s = jjson_obj_get_str(loc, "wake_word", NULL);
+	if (s && *s) snprintf(ont->wake_word, sizeof(ont->wake_word), "%s", s);
+
+	s = jjson_obj_get_str(loc, "whisper_wake_prompt", NULL);
+	if (s && *s) snprintf(ont->whisper_wake_prompt, sizeof(ont->whisper_wake_prompt), "%s", s);
+
+	s = jjson_obj_get_str(loc, "whisper_cmd_prompt", NULL);
+	if (s && *s) snprintf(ont->whisper_cmd_prompt, sizeof(ont->whisper_cmd_prompt), "%s", s);
+
+	upsert_kv_str_obj(jjson_obj_get(loc, "ui_strings"), ont->ui_strings, JARVIS_MAX_UI_STRINGS, &ont->ui_string_count);
+	upsert_kv_str_obj(jjson_obj_get(loc, "reply_templates"), ont->reply_templates, JARVIS_MAX_REPLY_TEMPLATES, &ont->reply_template_count);
+
+	append_short_str_list(jjson_obj_get(loc, "wake_variants"), ont->wake_variants, JARVIS_MAX_WAKE_VARIANTS, &ont->wake_variant_count);
+	append_short_str_list(jjson_obj_get(loc, "polite_prefixes"), ont->polite_prefixes, JARVIS_MAX_POLITE_PREFIXES, &ont->polite_prefix_count);
+	append_id_str_list(jjson_obj_get(loc, "tts_interrupt_phrases"), ont->tts_interrupts, JARVIS_MAX_TTS_INTERRUPTS, &ont->tts_interrupt_count);
+	append_id_str_list(jjson_obj_get(loc, "op_abort_phrases"), ont->op_abort_phrases, JARVIS_MAX_OP_ABORTS, &ont->op_abort_count);
+	append_id_str_list(jjson_obj_get(loc, "lockdown_phrases"), ont->lockdown_phrases, JARVIS_MAX_LOCKDOWN_PHRASES, &ont->lockdown_phrase_count);
+	append_short_str_list(jjson_obj_get(loc, "screen_lock_keywords"), ont->screen_lock_keywords, JARVIS_MAX_SCREEN_LOCK_KW, &ont->screen_lock_kw_count);
+	append_short_str_list(jjson_obj_get(loc, "tier1_triggers"), ont->tier1_triggers, JARVIS_MAX_TIER1_TRIGGERS, &ont->tier1_trigger_count);
+	append_id_str_list(jjson_obj_get(loc, "hallucination_phrases"), ont->hallucinations, JARVIS_MAX_HALLUCINATIONS, &ont->hallucination_count);
+	append_short_str_list(jjson_obj_get(loc, "stopwords"), ont->stopwords, JARVIS_MAX_STOPWORDS, &ont->stopword_count);
+	append_short_str_list(jjson_obj_get(loc, "conjunctions"), ont->conjunctions, JARVIS_MAX_CONJUNCTIONS, &ont->conjunction_count);
+}
+
+jarvis_ontology_t *jarvis_ontology_create_from_json_for_lang(const char *json_str, const char *lang)
 {
 	if (!json_str || !*json_str) return NULL;
 	jjson_val_t *root = jjson_parse(json_str);
@@ -485,6 +586,18 @@ jarvis_ontology_t *jarvis_ontology_create_from_json(const char *json_str)
 	/* 1. Stopwords & conjunctions */
 	load_short_str_list(jjson_obj_get(root, "stopwords"), ont->stopwords, JARVIS_MAX_STOPWORDS, &ont->stopword_count);
 	load_short_str_list(jjson_obj_get(root, "conjunctions"), ont->conjunctions, JARVIS_MAX_CONJUNCTIONS, &ont->conjunction_count);
+
+	/* 1b. Optional locale overlay (`"locales": { "en": {...}, "pt": {...} }`) */
+	const jjson_val_t *locales = jjson_obj_get(root, "locales");
+	if (locales && locales->type == JJSON_OBJECT) {
+		char eff_lang[JARVIS_SHORT_LEN] = {0};
+		if (lang && *lang) {
+			snprintf(eff_lang, sizeof(eff_lang), "%s", lang);
+		} else {
+			jarvis_resolve_lang(ont, eff_lang, sizeof(eff_lang));
+		}
+		apply_locale_override(ont, locales, eff_lang);
+	}
 
 	/* 2. Normalize stopwords, conjunctions, polite prefixes, interrupts, lockdown & triggers */
 	for (size_t i = 0; i < ont->stopword_count; i++) {
@@ -530,10 +643,11 @@ jarvis_ontology_t *jarvis_ontology_create_from_json(const char *json_str)
 			size_t rlen = strlen(raw);
 			bool lead_sp = (rlen > 0 && isspace((unsigned char)raw[0]));
 			bool trail_sp = (rlen > 0 && isspace((unsigned char)raw[rlen - 1]));
-			char buf[JARVIS_SHORT_LEN];
+			char buf[JARVIS_SHORT_LEN + 4];
 			snprintf(buf, sizeof(buf), "%s%s%s",
 			         lead_sp ? " " : "", c, trail_sp ? " " : "");
-			snprintf(ont->tier1_triggers[i], sizeof(ont->tier1_triggers[i]), "%s", buf);
+			snprintf(ont->tier1_triggers[i], sizeof(ont->tier1_triggers[i]), "%.*s",
+			         (int)(sizeof(ont->tier1_triggers[i]) - 1), buf);
 		} else {
 			ont->tier1_triggers[i][0] = '\0';
 		}
@@ -549,7 +663,12 @@ jarvis_ontology_t *jarvis_ontology_create_from_json(const char *json_str)
 	return ont;
 }
 
-static jarvis_ontology_t *try_load_ontology_file(const char *path)
+jarvis_ontology_t *jarvis_ontology_create_from_json(const char *json_str)
+{
+	return jarvis_ontology_create_from_json_for_lang(json_str, NULL);
+}
+
+static jarvis_ontology_t *try_load_ontology_file_for_lang(const char *path, const char *lang)
 {
 #ifndef __wasm__
 	if (!path || !*path) return NULL;
@@ -570,32 +689,37 @@ static jarvis_ontology_t *try_load_ontology_file(const char *path)
 	size_t rd = fread(buf, 1, (size_t)sz, fp);
 	buf[rd] = '\0';
 	fclose(fp);
-	jarvis_ontology_t *ont = jarvis_ontology_create_from_json(buf);
+	jarvis_ontology_t *ont = jarvis_ontology_create_from_json_for_lang(buf, lang);
 	free(buf);
 	return ont;
 #else
 	(void)path;
+	(void)lang;
 	return NULL;
 #endif
 }
 
-jarvis_ontology_t *jarvis_ontology_create(const char *json_path)
+jarvis_ontology_t *jarvis_ontology_create_for_lang(const char *json_path, const char *lang)
 {
 #ifndef __wasm__
 	if (json_path && *json_path) {
-		jarvis_ontology_t *ont = try_load_ontology_file(json_path);
+		jarvis_ontology_t *ont = try_load_ontology_file_for_lang(json_path, lang);
 		if (ont) return ont;
 	}
 	const char *env_p = getenv("JARVIS_ONTOLOGY_JSON");
 	if (env_p && *env_p) {
-		jarvis_ontology_t *ont = try_load_ontology_file(env_p);
+		jarvis_ontology_t *ont = try_load_ontology_file_for_lang(env_p, lang);
 		if (ont) return ont;
 	}
 	const char *home = getenv("HOME");
 	if (home && *home) {
 		char home_cfg[512];
 		snprintf(home_cfg, sizeof(home_cfg), "%s/.config/jarvis/ontology.json", home);
-		jarvis_ontology_t *ont = try_load_ontology_file(home_cfg);
+		jarvis_ontology_t *ont = try_load_ontology_file_for_lang(home_cfg, lang);
+		if (ont) return ont;
+
+		snprintf(home_cfg, sizeof(home_cfg), "%s/.local/share/jarvis/ontology.json", home);
+		ont = try_load_ontology_file_for_lang(home_cfg, lang);
 		if (ont) return ont;
 	}
 	static const char *const fallback_paths[] = {
@@ -607,13 +731,18 @@ jarvis_ontology_t *jarvis_ontology_create(const char *json_path)
 		NULL
 	};
 	for (size_t i = 0; fallback_paths[i]; i++) {
-		jarvis_ontology_t *ont = try_load_ontology_file(fallback_paths[i]);
+		jarvis_ontology_t *ont = try_load_ontology_file_for_lang(fallback_paths[i], lang);
 		if (ont) return ont;
 	}
 #else
 	(void)json_path;
 #endif
-	return jarvis_ontology_create_from_json("{}");
+	return jarvis_ontology_create_from_json_for_lang("{}", lang);
+}
+
+jarvis_ontology_t *jarvis_ontology_create(const char *json_path)
+{
+	return jarvis_ontology_create_for_lang(json_path, NULL);
 }
 
 const char *jarvis_ontology_get_wake_word(const jarvis_ontology_t *ont)

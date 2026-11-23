@@ -302,15 +302,7 @@ write_state_file(const char *path, const char *prefix, const char *detail, const
 static void
 get_active_wake_word(char *out, size_t out_sz)
 {
-	if (!out || out_sz == 0)
-		return;
-	const jarvis_ontology_t *ont = get_daemon_ont();
-	const char *ont_wake = jarvis_ontology_get_wake_word(ont);
-	if (!ont_wake || !*ont_wake)
-		ont_wake = "assistant";
-	jarvis_rc_get("wake_word", ont_wake, out, out_sz);
-	if (!out[0])
-		snprintf(out, out_sz, "%s", ont_wake);
+	jarvis_resolve_wake_word(get_daemon_ont(), out, out_sz);
 }
 
 static void
@@ -367,54 +359,14 @@ daemon_notify(const char *title, const char *body, int earcon)
 	}
 }
 
-/* Dynamically resolve "kbd" language or normalize ISO tags ("pt-pt" -> "pt") for Whisper. */
+/* Dynamically resolve "kbd" / locale language or normalize ISO tags ("pt-pt" -> "pt") for Whisper. */
 static void
 resolve_lang(const char *req_lang, char *out, size_t out_sz)
 {
-	const char *def_lang = jarvis_ontology_get_lang(get_daemon_ont());
-	if (!def_lang || !*def_lang) def_lang = "en";
-
+	char resolved[32] = {0};
 	if (!req_lang || !*req_lang || strcmp(req_lang, "kbd") == 0) {
-		char rc_lang[32] = {0};
-		if (jarvis_rc_get("lang", NULL, rc_lang, sizeof(rc_lang)) &&
-		    rc_lang[0] && strcmp(rc_lang, "kbd") != 0 && strcmp(rc_lang, "auto") != 0) {
-			req_lang = rc_lang;
-		}
-	}
-
-	if (!req_lang || !*req_lang || strcmp(req_lang, "kbd") == 0) {
-		char path[256], buf[32] = {0};
-		snprintf(path, sizeof(path), "/tmp/dwm-kbd-%s.state", get_username());
-		FILE *fp = fopen(path, "r");
-		if (fp) {
-			if (fgets(buf, sizeof(buf), fp)) {
-				char code[8] = {0};
-				size_t ci = 0;
-				for (size_t i = 0; buf[i] && ci < 2; i++) {
-					if (isalpha((unsigned char)buf[i]))
-						code[ci++] = (char)tolower((unsigned char)buf[i]);
-				}
-				code[ci] = '\0';
-				if (strcmp(code, "us") == 0 || strcmp(code, "gb") == 0 || strcmp(code, "uk") == 0) {
-					snprintf(out, out_sz, "en");
-					fclose(fp);
-					return;
-				}
-				if (strcmp(code, "br") == 0) {
-					snprintf(out, out_sz, "pt");
-					fclose(fp);
-					return;
-				}
-				if (ci == 2) {
-					snprintf(out, out_sz, "%s", code);
-					fclose(fp);
-					return;
-				}
-			}
-			fclose(fp);
-		}
-		snprintf(out, out_sz, "%s", def_lang);
-		return;
+		jarvis_resolve_lang(get_daemon_ont(), resolved, sizeof(resolved));
+		req_lang = resolved;
 	}
 	if (strcasecmp(req_lang, "auto") == 0) {
 		snprintf(out, out_sz, "auto");
@@ -3086,10 +3038,14 @@ read_jarvis_runtime_cfg(char *lang, size_t lang_sz,
                         int *out_conv_followup_ms,
                         int *out_cmd_silence_ms)
 {
-	const char *ont_lang = jarvis_ontology_get_lang(get_daemon_ont());
-	const char *def_lang = (ont_lang && *ont_lang) ? ont_lang : "en";
+	char rc_l[32] = {0};
+	if (jarvis_rc_get("lang", NULL, rc_l, sizeof(rc_l)) &&
+	    (strcasecmp(rc_l, "auto") == 0 || strcasecmp(rc_l, "kbd") == 0)) {
+		snprintf(lang, lang_sz, "%s", rc_l);
+	} else {
+		jarvis_resolve_lang(get_daemon_ont(), lang, lang_sz);
+	}
 
-	jarvis_rc_get("lang", def_lang, lang, lang_sz);
 	*out_followup_ms = jarvis_rc_get_int("followup_ms", 0);
 	if (*out_followup_ms < 0 || *out_followup_ms > 3600000)
 		*out_followup_ms = 0;
@@ -3122,10 +3078,29 @@ init_daemon_runtime(void)
 	if (access(done_wav, R_OK) != 0)
 		jarvis_voice_write_earcon_wav(done_wav, 1);
 
-	char def_ont[512], ont_path[512];
-	snprintf(def_ont, sizeof(def_ont), "%s/.config/jarvis/ontology.json", home);
-	jarvis_rc_get("ontology_path", def_ont, ont_path, sizeof(ont_path));
-	g_daemon_ont = jarvis_ontology_create(ont_path);
+	/* Drop any stale ren/tmux session so config changes (e.g. lang/wake_word) take effect on restart */
+	char ren_sock[128];
+	snprintf(ren_sock, sizeof(ren_sock), "/tmp/ren-jarvis-%s.sock", u);
+	unlink(ren_sock);
+	pid_t kpid = fork();
+	if (kpid == 0) {
+		int dn = open("/dev/null", O_RDWR);
+		if (dn >= 0) {
+			dup2(dn, STDIN_FILENO);
+			dup2(dn, STDOUT_FILENO);
+			dup2(dn, STDERR_FILENO);
+			if (dn > STDERR_FILENO) close(dn);
+		}
+		execlp("tmux", "tmux", "kill-session", "-t", "jarvis", (char *)NULL);
+		_exit(127);
+	} else if (kpid > 0) {
+		int st_k = 0;
+		while (waitpid(kpid, &st_k, 0) < 0 && errno == EINTR) {}
+	}
+
+	char ont_path[512] = {0};
+	const char *req_ont = jarvis_rc_get("ontology_path", NULL, ont_path, sizeof(ont_path)) ? ont_path : NULL;
+	g_daemon_ont = jarvis_ontology_create(req_ont);
 }
 
 static int
@@ -3169,8 +3144,8 @@ ensure_ren_jarvis_session(const char *sock_path, const struct sockaddr_un *addr)
 			char ren_mods[512] = {0};
 			if (!jarvis_rc_get("ren_mods", NULL, ren_mods, sizeof(ren_mods)) || !ren_mods[0]) {
 				char wm_buf[64] = {0}, wm_mod[80];
-				jarvis_rc_get("wm", "dwm", wm_buf, sizeof(wm_buf));
-				snprintf(wm_mod, sizeof(wm_mod), "ren-%s", wm_buf[0] ? wm_buf : "dwm");
+				jarvis_resolve_wm(wm_buf, sizeof(wm_buf));
+				snprintf(wm_mod, sizeof(wm_mod), "ren-%s", wm_buf[0] ? wm_buf : "desktop");
 				const char *cands[] = { wm_mod, "ren-reflex", "ren-x11", "ren-firefox", "ren-desktop", "ren-jarvis", "ren-mm", NULL };
 				size_t mo = 0;
 				for (size_t i = 0; cands[i]; i++) {
@@ -3497,7 +3472,7 @@ run_inprocess_jarvis_turn(int srv, struct whisper_context *ctx_wake, int n_threa
 	char lang[32], wm_surface[64];
 	int fcfg = 0, conv_followup_ms = 9000, cmd_silence_ms = 900;
 	read_jarvis_runtime_cfg(lang, sizeof(lang), &fcfg, &conv_followup_ms, &cmd_silence_ms);
-	jarvis_rc_get("wm", "dwm", wm_surface, sizeof(wm_surface));
+	jarvis_resolve_wm(wm_surface, sizeof(wm_surface));
 
 	int next_followup = *io_next_followup;
 	if (fcfg == 3600000) {
@@ -4028,6 +4003,13 @@ serve_client_request(int srv, int cli, char *buf,
 	close(cli);
 }
 
+static bool
+is_english_only_whisper_model(const char *path)
+{
+	if (!path || !*path) return false;
+	return strstr(path, ".en.") != NULL || strstr(path, ".en-") != NULL;
+}
+
 static void
 resolve_default_whisper_models(char *main_out, size_t main_sz, char *wake_out, size_t wake_sz)
 {
@@ -4035,29 +4017,60 @@ resolve_default_whisper_models(char *main_out, size_t main_sz, char *wake_out, s
 	if (!home || !*home)
 		home = "/home/quirinpa";
 
-	if (!jarvis_rc_get("whisper_model", NULL, main_out, main_sz) || !main_out[0] || access(main_out, R_OK) != 0) {
-		static const char *const main_cands[] = {
+	char eff_lang[32] = {0};
+	jarvis_resolve_lang(NULL, eff_lang, sizeof(eff_lang));
+	bool allow_en_only = (strncasecmp(eff_lang, "en", 2) == 0);
+
+	bool have_main = jarvis_rc_get("whisper_model", NULL, main_out, main_sz) &&
+	                 main_out[0] && access(main_out, R_OK) == 0;
+	if (have_main && !allow_en_only && is_english_only_whisper_model(main_out)) {
+		fprintf(stderr,
+		        "jarvisd: WARNING: configured whisper_model '%s' is English-only for lang='%s'; "
+		        "falling back to multilingual model\n",
+		        main_out, eff_lang);
+		have_main = false;
+		main_out[0] = '\0';
+	}
+
+	if (!have_main) {
+		static const char *const multi_cands[] = {
 			"ggml-small-q8_0.bin",
 			"ggml-small-q5_1.bin",
 			"ggml-base-q8_0.bin",
 			"ggml-base-q5_1.bin",
 			"ggml-base.bin",
+			"ggml-large-v3-turbo-q5_0.bin",
+			NULL
+		};
+		static const char *const en_cands[] = {
 			"ggml-base.en-q8_0.bin",
 			"ggml-small.en-q5_1.bin",
 			NULL
 		};
 		main_out[0] = '\0';
-		for (size_t i = 0; main_cands[i]; i++) {
+		for (size_t i = 0; multi_cands[i]; i++) {
 			char cand[512];
-			snprintf(cand, sizeof(cand), "%s/.local/share/whisper/%s", home, main_cands[i]);
+			snprintf(cand, sizeof(cand), "%s/.local/share/whisper/%s", home, multi_cands[i]);
 			if (access(cand, R_OK) == 0) {
 				snprintf(main_out, main_sz, "%s", cand);
 				break;
 			}
 		}
+		if (!main_out[0] && allow_en_only) {
+			for (size_t i = 0; en_cands[i]; i++) {
+				char cand[512];
+				snprintf(cand, sizeof(cand), "%s/.local/share/whisper/%s", home, en_cands[i]);
+				if (access(cand, R_OK) == 0) {
+					snprintf(main_out, main_sz, "%s", cand);
+					break;
+				}
+			}
+		}
 	}
 
-	if (!jarvis_rc_get("whisper_wake_model", NULL, wake_out, wake_sz) || !wake_out[0] || access(wake_out, R_OK) != 0) {
+	bool have_wake = jarvis_rc_get("whisper_wake_model", NULL, wake_out, wake_sz) &&
+	                 wake_out[0] && access(wake_out, R_OK) == 0;
+	if (!have_wake) {
 		static const char *const wake_cands[] = {
 			"ggml-base-q8_0.bin",
 			"ggml-base-q5_1.bin",

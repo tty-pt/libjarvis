@@ -114,6 +114,11 @@ install-extra: ${DESTDIR}${PREFIX}/lib/pkgconfig/jarvis.pc ${DESTDIR}${PREFIX}/l
 	@rm -f ${DESTDIR}${PREFIX}/lib/jarvis/jarvis-*.so $(HOME)/.local/lib/jarvis/jarvis-*.so
 	@rmdir ${DESTDIR}${PREFIX}/lib/jarvis $(HOME)/.local/lib/jarvis 2>/dev/null || true
 	@mkdir -p $(HOME)/.local/lib $(HOME)/.local/bin $(HOME)/.config/jarvis
+	@install -d ${DESTDIR}${PREFIX}/share/jarvis
+	@install -m 644 data/ontology.json ${DESTDIR}${PREFIX}/share/jarvis/ontology.json
+	@if [ -f data/99-jarvis-aec.conf ]; then \
+		install -m 644 data/99-jarvis-aec.conf ${DESTDIR}${PREFIX}/share/jarvis/99-jarvis-aec.conf; \
+	fi
 	@install -m 644 data/ontology.json $(HOME)/.config/jarvis/ontology.json
 	@if [ -f bin/jarvis ]; then \
 		install -m 755 bin/jarvis $(HOME)/.local/bin/jarvis; \

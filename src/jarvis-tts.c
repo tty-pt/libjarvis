@@ -336,19 +336,62 @@ static bool is_tts_enabled(void)
 	return true;
 }
 
+static bool normalize_lang_tts(const char *raw, char *out, size_t out_sz)
+{
+	if (!raw || !*raw || !out || out_sz == 0) return false;
+	char buf[32];
+	size_t w = 0;
+	while (*raw && isspace((unsigned char)*raw)) raw++;
+	for (size_t i = 0; raw[i] && w + 1 < sizeof(buf); i++) {
+		char c = raw[i];
+		if (c == '.' || c == '@') break;
+		if (c == '_') c = '-';
+		if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+		buf[w++] = c;
+	}
+	while (w > 0 && isspace((unsigned char)buf[w - 1])) w--;
+	buf[w] = '\0';
+	if (!buf[0] || strcmp(buf, "c") == 0 || strcmp(buf, "posix") == 0)
+		return false;
+	snprintf(out, out_sz, "%s", buf);
+	return true;
+}
+
 static void resolve_default_lang(char *out, size_t out_sz)
 {
-	const char *env_l = getenv("JARVIS_TTS_LANG");
-	if (env_l && *env_l) {
-		snprintf(out, out_sz, "%s", env_l);
+	char tag[32] = {0};
+	const char *env_tl = getenv("JARVIS_TTS_LANG");
+	if (env_tl && normalize_lang_tts(env_tl, tag, sizeof(tag)) &&
+	    strcmp(tag, "auto") != 0 && strcmp(tag, "kbd") != 0) {
+		snprintf(out, out_sz, "%s", tag);
 		return;
 	}
-	if (rc_lookup("tts_lang", out, out_sz) && out[0]) {
+	char rc_val[32] = {0};
+	if (rc_lookup("tts_lang", rc_val, sizeof(rc_val)) &&
+	    normalize_lang_tts(rc_val, tag, sizeof(tag)) &&
+	    strcmp(tag, "auto") != 0 && strcmp(tag, "kbd") != 0) {
+		snprintf(out, out_sz, "%s", tag);
 		return;
 	}
-	if (rc_lookup("lang", out, out_sz) && out[0] &&
-	    strcmp(out, "kbd") != 0 && strcmp(out, "auto") != 0) {
+	const char *env_l = getenv("JARVIS_LANG");
+	if (env_l && normalize_lang_tts(env_l, tag, sizeof(tag)) &&
+	    strcmp(tag, "auto") != 0 && strcmp(tag, "kbd") != 0) {
+		snprintf(out, out_sz, "%s", tag);
 		return;
+	}
+	if (rc_lookup("lang", rc_val, sizeof(rc_val)) &&
+	    normalize_lang_tts(rc_val, tag, sizeof(tag)) &&
+	    strcmp(tag, "auto") != 0 && strcmp(tag, "kbd") != 0) {
+		snprintf(out, out_sz, "%s", tag);
+		return;
+	}
+	static const char *const lc_vars[] = { "LC_ALL", "LC_MESSAGES", "LANG", NULL };
+	for (size_t i = 0; lc_vars[i]; i++) {
+		const char *lv = getenv(lc_vars[i]);
+		if (lv && normalize_lang_tts(lv, tag, sizeof(tag))) {
+			snprintf(out, out_sz, "%s", tag);
+			return;
+		}
 	}
 	snprintf(out, out_sz, "en");
 }
@@ -356,19 +399,36 @@ static void resolve_default_lang(char *out, size_t out_sz)
 static void get_tts_voice(char *out, size_t out_sz)
 {
 	const char *env_v = getenv("JARVIS_VOICE");
-	if (env_v && *env_v) {
+	if (env_v && *env_v && strcasecmp(env_v, "auto") != 0) {
 		snprintf(out, out_sz, "%s", env_v);
 		return;
 	}
-	if (rc_lookup("tts_voice", out, out_sz) && out[0]) {
+	char rc_v[64] = {0};
+	if (rc_lookup("tts_voice", rc_v, sizeof(rc_v)) &&
+	    rc_v[0] && strcasecmp(rc_v, "auto") != 0) {
+		snprintf(out, out_sz, "%s", rc_v);
 		return;
 	}
 	char def_lang[32];
 	resolve_default_lang(def_lang, sizeof(def_lang));
-	if (strncasecmp(def_lang, "pt", 2) == 0) {
-		snprintf(out, out_sz, "pm_tuga");
+	if (strcmp(def_lang, "pt-br") == 0) {
+		snprintf(out, out_sz, "edge:pt-BR-FranciscaNeural");
+	} else if (strncmp(def_lang, "pt", 2) == 0) {
+		snprintf(out, out_sz, "edge:pt-PT-RaquelNeural");
+	} else if (strcmp(def_lang, "en-us") == 0) {
+		snprintf(out, out_sz, "edge:en-US-AndrewNeural");
+	} else if (strncmp(def_lang, "en", 2) == 0) {
+		snprintf(out, out_sz, "edge:en-GB-RyanNeural");
+	} else if (strncmp(def_lang, "es", 2) == 0) {
+		snprintf(out, out_sz, "edge:es-ES-AlvaroNeural");
+	} else if (strncmp(def_lang, "fr", 2) == 0) {
+		snprintf(out, out_sz, "edge:fr-FR-HenriNeural");
+	} else if (strncmp(def_lang, "de", 2) == 0) {
+		snprintf(out, out_sz, "edge:de-DE-ConradNeural");
+	} else if (strncmp(def_lang, "it", 2) == 0) {
+		snprintf(out, out_sz, "edge:it-IT-DiegoNeural");
 	} else {
-		snprintf(out, out_sz, "bm_daniel");
+		snprintf(out, out_sz, "edge:en-GB-RyanNeural");
 	}
 }
 
@@ -1712,6 +1772,102 @@ static int16_t *synthesize_onnx_pcm(const char *seg_text, const char *voice, siz
 	return pcm16;
 }
 
+static int16_t *synthesize_espeak_cli_pcm(const char *seg_text, const char *lang_hint, size_t *out_samples, int *out_rate)
+{
+	*out_samples = 0;
+	*out_rate = 22050;
+	if (!seg_text || !*seg_text) return NULL;
+
+	char es_voice[32];
+	normalize_espeak_voice(lang_hint, es_voice, sizeof(es_voice));
+
+	int pfd[2];
+	if (pipe(pfd) < 0) return NULL;
+	fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
+
+	pid_t pid = fork();
+	if (pid == 0) {
+		close(pfd[0]);
+		dup2(pfd[1], STDOUT_FILENO);
+		if (pfd[1] > STDERR_FILENO) close(pfd[1]);
+		int devnull = open("/dev/null", O_WRONLY);
+		if (devnull >= 0) {
+			dup2(devnull, STDERR_FILENO);
+			if (devnull > STDERR_FILENO) close(devnull);
+		}
+		execlp("espeak-ng", "espeak-ng", "-v", es_voice, "--stdout", seg_text, (char *)NULL);
+		execlp("espeak", "espeak", "-v", es_voice, "--stdout", seg_text, (char *)NULL);
+		_exit(127);
+	}
+	close(pfd[1]);
+	if (pid < 0) {
+		close(pfd[0]);
+		return NULL;
+	}
+
+	size_t cap = 65536, len = 0;
+	uint8_t *wav = (uint8_t *)malloc(cap);
+	if (wav) {
+		for (;;) {
+			if (len + 4096 > cap) {
+				if (cap >= 4U * 1024U * 1024U) break;
+				size_t ncap = cap * 2;
+				uint8_t *nb = (uint8_t *)realloc(wav, ncap);
+				if (!nb) break;
+				wav = nb;
+				cap = ncap;
+			}
+			ssize_t r = read(pfd[0], wav + len, cap - len);
+			if (r < 0 && errno == EINTR) continue;
+			if (r <= 0) break;
+			len += (size_t)r;
+		}
+	}
+	close(pfd[0]);
+	int st = 0;
+	while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+
+	if (!wav || len < 44 || memcmp(wav, "RIFF", 4) != 0 || memcmp(wav + 8, "WAVE", 4) != 0) {
+		free(wav);
+		return NULL;
+	}
+
+	uint32_t sample_rate = 22050;
+	uint16_t bits_per_sample = 16;
+	size_t off = 12;
+	int16_t *pcm16 = NULL;
+
+	while (off + 8 <= len) {
+		uint32_t csz = (uint32_t)wav[off + 4] | ((uint32_t)wav[off + 5] << 8) |
+		               ((uint32_t)wav[off + 6] << 16) | ((uint32_t)wav[off + 7] << 24);
+		size_t body = off + 8;
+		if (memcmp(wav + off, "fmt ", 4) == 0 && body + 16 <= len && csz >= 16) {
+			sample_rate = (uint32_t)wav[body + 4] | ((uint32_t)wav[body + 5] << 8) |
+			              ((uint32_t)wav[body + 6] << 16) | ((uint32_t)wav[body + 7] << 24);
+			bits_per_sample = (uint16_t)wav[body + 14] | ((uint16_t)wav[body + 15] << 8);
+		} else if (memcmp(wav + off, "data", 4) == 0 && bits_per_sample == 16 && body < len) {
+			size_t avail = len - body;
+			size_t bytes = (csz > 0 && csz <= avail) ? (size_t)csz : avail;
+			size_t nsamp = bytes / sizeof(int16_t);
+			if (nsamp > 0) {
+				pcm16 = (int16_t *)malloc(nsamp * sizeof(int16_t));
+				if (pcm16) {
+					memcpy(pcm16, wav + body, nsamp * sizeof(int16_t));
+					*out_samples = nsamp;
+					*out_rate = (sample_rate >= 8000 && sample_rate <= 96000) ? (int)sample_rate : 22050;
+				}
+			}
+			break;
+		}
+		size_t step = 8 + (size_t)csz + ((csz & 1U) ? 1U : 0U);
+		if (step < 8 || off + step > len) break;
+		off += step;
+	}
+
+	free(wav);
+	return pcm16;
+}
+
 static int16_t *synthesize_segment_pcm(const char *seg_text, const char *voice, size_t *out_samples, int *out_rate, uint64_t my_gen)
 {
 	*out_samples = 0;
@@ -1738,14 +1894,31 @@ static int16_t *synthesize_segment_pcm(const char *seg_text, const char *voice, 
 		/* Local neural ONNX fallback when Edge TTS fails or times out (never cached under edge: key) */
 		char fb_voice[64];
 		resolve_edge_fallback_voice(is_pt, fb_voice, sizeof(fb_voice));
-		return synthesize_onnx_pcm(seg_text, fb_voice, out_samples, out_rate);
+		pcm = synthesize_onnx_pcm(seg_text, fb_voice, out_samples, out_rate);
+		if (pcm && *out_samples > 0) return pcm;
+
+		/* Last-resort offline CLI fallback */
+		pcm = synthesize_espeak_cli_pcm(seg_text, is_pt ? "pt" : NULL, out_samples, out_rate);
+		if (pcm && *out_samples > 0) return pcm;
+	} else {
+		int16_t *pcm = synthesize_onnx_pcm(seg_text, voice, out_samples, out_rate);
+		if (pcm && *out_samples > 0) {
+			tts_cache_store(voice, seg_text, pcm, *out_samples, *out_rate);
+			return pcm;
+		}
+		pcm = synthesize_espeak_cli_pcm(seg_text, NULL, out_samples, out_rate);
+		if (pcm && *out_samples > 0) return pcm;
 	}
 
-	int16_t *pcm = synthesize_onnx_pcm(seg_text, voice, out_samples, out_rate);
-	if (pcm && *out_samples > 0) {
-		tts_cache_store(voice, seg_text, pcm, *out_samples, *out_rate);
+	static bool s_warned_no_tts = false;
+	if (!s_warned_no_tts) {
+		s_warned_no_tts = true;
+		fprintf(stderr,
+		        "jarvis-tts: no TTS engine succeeded for voice='%s' "
+		        "(check edge-tts-pcm, Piper/Kokoro models in ~/.local/share/, or espeak-ng)\n",
+		        voice ? voice : "(null)");
 	}
-	return pcm;
+	return NULL;
 }
 
 /* ---------------------------------------------------------------------------

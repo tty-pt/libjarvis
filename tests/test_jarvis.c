@@ -247,6 +247,118 @@ static void test_05_desktop_core(void)
 	printf("  [PASS] desktop-core.h escaping, safe app resolution, and zombie-free spawn!\n");
 }
 
+static void test_06_zero_config_and_locales(void)
+{
+	printf("Running test_06_zero_config_and_locales...\n");
+
+	/* Save relevant env vars */
+	const char *keys[] = {
+		"JARVISRC", "JARVIS_LANG", "JARVIS_WAKE_WORD", "JARVIS_VOICE",
+		"JARVIS_TTS_LANG", "JARVIS_WM", "LC_ALL", "LC_MESSAGES", "LANG",
+		"HYPRLAND_INSTANCE_SIGNATURE", "SWAYSOCK", "XDG_CURRENT_DESKTOP",
+		"DESKTOP_SESSION", "DISPLAY"
+	};
+	char *saved[14];
+	for (size_t i = 0; i < 14; i++) {
+		const char *v = getenv(keys[i]);
+		saved[i] = v ? strdup(v) : NULL;
+		unsetenv(keys[i]);
+	}
+
+	/* 1. Locale overrides inside data/ontology.json */
+	jarvis_ontology_t *ont_en = jarvis_ontology_create_for_lang("../data/ontology.json", "en");
+	assert(ont_en != NULL);
+	assert(strcmp(jarvis_ontology_get_lang(ont_en), "en") == 0);
+	assert(strcmp(jarvis_ontology_get_wake_word(ont_en), "jarvis") == 0);
+	assert(strcmp(jarvis_ontology_get_reply_template(ont_en, "default"), "Done.") == 0);
+	assert(strcmp(jarvis_ontology_get_ui_string(ont_en, "menu_voice_auto", ""),
+	              "auto                         (Automatic neural voice for active language)") == 0);
+
+	jarvis_ontology_t *ont_pt = jarvis_ontology_create_for_lang("../data/ontology.json", "pt-PT");
+	assert(ont_pt != NULL);
+	assert(strcmp(jarvis_ontology_get_lang(ont_pt), "pt") == 0);
+	assert(strcmp(jarvis_ontology_get_wake_word(ont_pt), "jarbas") == 0);
+	assert(strcmp(jarvis_ontology_get_reply_template(ont_pt, "default"), "Concluído.") == 0);
+	assert(strcmp(jarvis_ontology_get_ui_string(ont_pt, "thinking", ""), "A pensar...") == 0);
+
+	/* 2. Zero ~/.jarvisrc defaults driven solely by system locale */
+	char missing_rc[128];
+	snprintf(missing_rc, sizeof(missing_rc), "/tmp/test_missing_jarvisrc_%d", (int)getpid());
+	unlink(missing_rc);
+	setenv("JARVISRC", missing_rc, 1);
+
+	char buf[128];
+	setenv("LC_ALL", "pt_PT.UTF-8", 1);
+	jarvis_resolve_lang(ont_en, buf, sizeof(buf));
+	assert(strcmp(buf, "pt-pt") == 0);
+	jarvis_resolve_wake_word(NULL, buf, sizeof(buf));
+	assert(strcmp(buf, "jarbas") == 0);
+	jarvis_resolve_tts_voice(NULL, buf, sizeof(buf));
+	assert(strcmp(buf, "edge:pt-PT-RaquelNeural") == 0);
+
+	setenv("LC_ALL", "en_US.UTF-8", 1);
+	jarvis_resolve_lang(ont_en, buf, sizeof(buf));
+	assert(strcmp(buf, "en-us") == 0);
+	jarvis_resolve_wake_word(NULL, buf, sizeof(buf));
+	assert(strcmp(buf, "jarvis") == 0);
+	jarvis_resolve_tts_voice(NULL, buf, sizeof(buf));
+	assert(strcmp(buf, "edge:en-US-AndrewNeural") == 0);
+
+	/* 3. One-line lang switch in JARVISRC + auto TTS voice + jarvis_rc_unset */
+	char tmp_rc[] = "/tmp/test_one_line_rc_XXXXXX";
+	int fd = mkstemp(tmp_rc);
+	assert(fd >= 0);
+	dprintf(fd, "lang = pt\ntts_lang = en-us\ntts_voice = auto\n");
+	close(fd);
+	setenv("JARVISRC", tmp_rc, 1);
+
+	assert(jarvis_rc_unset("tts_lang"));
+	assert(!jarvis_rc_get("tts_lang", NULL, buf, sizeof(buf)));
+	jarvis_resolve_lang(NULL, buf, sizeof(buf));
+	assert(strcmp(buf, "pt") == 0);
+	jarvis_resolve_wake_word(NULL, buf, sizeof(buf));
+	assert(strcmp(buf, "jarbas") == 0);
+	jarvis_resolve_tts_voice(NULL, buf, sizeof(buf));
+	assert(strcmp(buf, "edge:pt-PT-RaquelNeural") == 0);
+
+	assert(jarvis_rc_set("lang", "en"));
+	jarvis_resolve_lang(NULL, buf, sizeof(buf));
+	assert(strcmp(buf, "en") == 0);
+	jarvis_resolve_wake_word(NULL, buf, sizeof(buf));
+	assert(strcmp(buf, "jarvis") == 0);
+	jarvis_resolve_tts_voice(NULL, buf, sizeof(buf));
+	assert(strcmp(buf, "edge:en-GB-RyanNeural") == 0);
+	unlink(tmp_rc);
+
+	/* 4. Zero-config WM auto-detection */
+	setenv("JARVISRC", missing_rc, 1);
+	setenv("HYPRLAND_INSTANCE_SIGNATURE", "abc", 1);
+	jarvis_resolve_wm(buf, sizeof(buf));
+	assert(strcmp(buf, "hyprland") == 0);
+	unsetenv("HYPRLAND_INSTANCE_SIGNATURE");
+	setenv("SWAYSOCK", "/run/user/1000/sway.sock", 1);
+	jarvis_resolve_wm(buf, sizeof(buf));
+	assert(strcmp(buf, "sway") == 0);
+	unsetenv("SWAYSOCK");
+	setenv("XDG_CURRENT_DESKTOP", "dwm", 1);
+	jarvis_resolve_wm(buf, sizeof(buf));
+	assert(strcmp(buf, "dwm") == 0);
+
+	jarvis_ontology_destroy(ont_en);
+	jarvis_ontology_destroy(ont_pt);
+
+	/* Restore env vars */
+	for (size_t i = 0; i < 14; i++) {
+		if (saved[i]) {
+			setenv(keys[i], saved[i], 1);
+			free(saved[i]);
+		} else {
+			unsetenv(keys[i]);
+		}
+	}
+	printf("  [PASS] Locale overrides, zero-config resolution, and one-line switch!\n");
+}
+
 int main(void)
 {
 	test_01_text_normalization_and_safety();
@@ -254,6 +366,7 @@ int main(void)
 	test_03_streaming_tts_and_rc();
 	test_04_vad_wake_and_earcon();
 	test_05_desktop_core();
-	printf("\nALL libjarvis unit tests passed (5/5 suites)!\n");
+	test_06_zero_config_and_locales();
+	printf("\nALL libjarvis unit tests passed (6/6 suites)!\n");
 	return 0;
 }

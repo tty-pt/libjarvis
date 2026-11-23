@@ -48,9 +48,19 @@ bool jarvis_is_destructive_command(const char *cmd);
 jarvis_ontology_t *jarvis_ontology_create(const char *json_path);
 
 /**
+ * @brief Create and load an ontology from @p json_path, applying @p lang locale overrides if present.
+ */
+jarvis_ontology_t *jarvis_ontology_create_for_lang(const char *json_path, const char *lang);
+
+/**
  * @brief Load ontology directly from an in-memory JSON string.
  */
 jarvis_ontology_t *jarvis_ontology_create_from_json(const char *json_str);
+
+/**
+ * @brief Load ontology from an in-memory JSON string, applying @p lang locale overrides if present.
+ */
+jarvis_ontology_t *jarvis_ontology_create_from_json_for_lang(const char *json_str, const char *lang);
 
 /**
  * @brief Destroy an ontology instance.
@@ -131,6 +141,35 @@ int jarvis_rc_get_int(const char *key, int fallback);
  * @brief Update or insert a `key = value` pair in `~/.jarvisrc`.
  */
 bool jarvis_rc_set(const char *key, const char *value);
+
+/**
+ * @brief Remove @p key from `~/.jarvisrc` (if present).
+ */
+bool jarvis_rc_unset(const char *key);
+
+/**
+ * @brief Resolve effective language with zero-config fallbacks:
+ *        `$JARVIS_LANG` -> `~/.jarvisrc` (`lang`) -> `$LC_ALL`/`$LC_MESSAGES`/`$LANG` -> ontology -> `"en"`.
+ */
+void jarvis_resolve_lang(const jarvis_ontology_t *ont, char *out, size_t out_sz);
+
+/**
+ * @brief Resolve effective wake word with zero-config fallbacks:
+ *        `$JARVIS_WAKE_WORD` -> `~/.jarvisrc` (`wake_word`) -> ontology -> `"jarbas"`/`"jarvis"` per lang.
+ */
+void jarvis_resolve_wake_word(const jarvis_ontology_t *ont, char *out, size_t out_sz);
+
+/**
+ * @brief Resolve effective TTS voice with zero-config fallbacks:
+ *        `$JARVIS_VOICE` -> `~/.jarvisrc` (`tts_voice` unless `"auto"`) -> language-mapped `edge:` neural voice.
+ */
+void jarvis_resolve_tts_voice(const jarvis_ontology_t *ont, char *out, size_t out_sz);
+
+/**
+ * @brief Resolve active window manager / compositor with zero-config fallbacks:
+ *        `$JARVIS_WM` -> `~/.jarvisrc` (`wm` unless `"auto"`) -> Wayland/X11/dwm environment detection.
+ */
+void jarvis_resolve_wm(char *out, size_t out_sz);
 
 /* ---------------------------------------------------------------------------
  * Voice Pipeline: Ring Buffer, Adaptive VAD, Wake-Word, Earcon & TTS Segmentation

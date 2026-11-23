@@ -1,4 +1,5 @@
 #include "jarvis-internal.h"
+#include <strings.h>
 
 #ifndef __wasm__
 #include <unistd.h>
@@ -365,6 +366,331 @@ bool jarvis_rc_set(const char *key, const char *value)
 	fclose(out);
 	return rename(tmp_path, rc_path) == 0;
 #else
+	(void)key;
+	(void)value;
 	return false;
 #endif
+}
+
+bool jarvis_rc_unset(const char *key)
+{
+	if (!key || !*key) return false;
+#ifndef __wasm__
+	char rc_path[512];
+	resolve_jarvisrc_path(rc_path, sizeof(rc_path), true);
+
+	FILE *fp = fopen(rc_path, "r");
+	if (!fp) return true;
+
+	char lines[128][1024];
+	size_t n_lines = 0;
+	bool removed = false;
+	char buf[1024];
+
+	while (fgets(buf, sizeof(buf), fp)) {
+		bool match = false;
+		char copy[1024];
+		snprintf(copy, sizeof(copy), "%s", buf);
+		char *p = copy;
+		while (*p && isspace((unsigned char)*p)) p++;
+		if (*p && *p != '#' && *p != ';') {
+			char *eq = strchr(p, '=');
+			if (eq) {
+				*eq = '\0';
+				size_t kl = strlen(p);
+				while (kl > 0 && isspace((unsigned char)p[kl - 1])) p[--kl] = '\0';
+				if (strcasecmp(p, key) == 0) {
+					match = true;
+					removed = true;
+				}
+			}
+		}
+		if (!match && n_lines < 128) {
+			snprintf(lines[n_lines++], sizeof(lines[0]), "%s", buf);
+		}
+	}
+	fclose(fp);
+	if (!removed) return true;
+
+	char tmp_path[540];
+	snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", rc_path);
+	FILE *out = fopen(tmp_path, "w");
+	if (!out) return false;
+	for (size_t i = 0; i < n_lines; i++) {
+		fputs(lines[i], out);
+	}
+	fclose(out);
+	return rename(tmp_path, rc_path) == 0;
+#else
+	(void)key;
+	return false;
+#endif
+}
+
+static bool normalize_lang_tag(const char *raw, char *out, size_t out_sz)
+{
+	if (!raw || !*raw || !out || out_sz == 0) return false;
+	char buf[32];
+	size_t w = 0;
+	while (*raw && isspace((unsigned char)*raw)) raw++;
+	for (size_t i = 0; raw[i] && w + 1 < sizeof(buf); i++) {
+		char c = raw[i];
+		if (c == '.' || c == '@') break;
+		if (c == '_') c = '-';
+		if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+		buf[w++] = c;
+	}
+	while (w > 0 && isspace((unsigned char)buf[w - 1])) w--;
+	buf[w] = '\0';
+	if (!buf[0] || strcmp(buf, "c") == 0 || strcmp(buf, "posix") == 0) {
+		return false;
+	}
+	snprintf(out, out_sz, "%s", buf);
+	return true;
+}
+
+static bool resolve_kbd_layout_lang(char *out, size_t out_sz)
+{
+#ifndef __wasm__
+	const char *u = getenv("USER");
+	if (!u || !*u) u = "quirinpa";
+	char path[256], buf[32] = {0};
+	snprintf(path, sizeof(path), "/tmp/dwm-kbd-%s.state", u);
+	FILE *fp = fopen(path, "r");
+	if (!fp) return false;
+	bool ok = false;
+	if (fgets(buf, sizeof(buf), fp)) {
+		char code[8] = {0};
+		size_t ci = 0;
+		for (size_t i = 0; buf[i] && ci < 2; i++) {
+			if (isalpha((unsigned char)buf[i])) {
+				code[ci++] = (char)tolower((unsigned char)buf[i]);
+			}
+		}
+		code[ci] = '\0';
+		if (strcmp(code, "us") == 0 || strcmp(code, "gb") == 0 || strcmp(code, "uk") == 0) {
+			snprintf(out, out_sz, "en");
+			ok = true;
+		} else if (strcmp(code, "br") == 0) {
+			snprintf(out, out_sz, "pt-br");
+			ok = true;
+		} else if (ci == 2) {
+			snprintf(out, out_sz, "%s", code);
+			ok = true;
+		}
+	}
+	fclose(fp);
+	return ok;
+#else
+	(void)out;
+	(void)out_sz;
+	return false;
+#endif
+}
+
+void jarvis_resolve_lang(const jarvis_ontology_t *ont, char *out, size_t out_sz)
+{
+	if (!out || out_sz == 0) return;
+	out[0] = '\0';
+
+	char tag[32] = {0};
+	const char *env_l = getenv("JARVIS_LANG");
+	if (env_l && normalize_lang_tag(env_l, tag, sizeof(tag))) {
+		if (strcmp(tag, "kbd") == 0) {
+			if (resolve_kbd_layout_lang(out, out_sz)) return;
+		} else if (strcmp(tag, "auto") != 0) {
+			snprintf(out, out_sz, "%s", tag);
+			return;
+		}
+	}
+
+	char rc_lang[32] = {0};
+	if (jarvis_rc_get("lang", NULL, rc_lang, sizeof(rc_lang)) &&
+	    normalize_lang_tag(rc_lang, tag, sizeof(tag))) {
+		if (strcmp(tag, "kbd") == 0) {
+			if (resolve_kbd_layout_lang(out, out_sz)) return;
+		} else if (strcmp(tag, "auto") != 0) {
+			snprintf(out, out_sz, "%s", tag);
+			return;
+		}
+	}
+
+	static const char *const lc_vars[] = { "LC_ALL", "LC_MESSAGES", "LANG", NULL };
+	for (size_t i = 0; lc_vars[i]; i++) {
+		const char *lv = getenv(lc_vars[i]);
+		if (lv && normalize_lang_tag(lv, tag, sizeof(tag))) {
+			snprintf(out, out_sz, "%s", tag);
+			return;
+		}
+	}
+
+	if (ont) {
+		const char *ol = jarvis_ontology_get_lang(ont);
+		if (ol && normalize_lang_tag(ol, tag, sizeof(tag))) {
+			snprintf(out, out_sz, "%s", tag);
+			return;
+		}
+	}
+
+	snprintf(out, out_sz, "en");
+}
+
+void jarvis_resolve_wake_word(const jarvis_ontology_t *ont, char *out, size_t out_sz)
+{
+	if (!out || out_sz == 0) return;
+	out[0] = '\0';
+
+	const char *env_w = getenv("JARVIS_WAKE_WORD");
+	if (env_w && *env_w) {
+		snprintf(out, out_sz, "%s", env_w);
+		return;
+	}
+
+	char rc_wake[64] = {0};
+	if (jarvis_rc_get("wake_word", NULL, rc_wake, sizeof(rc_wake)) &&
+	    rc_wake[0] && strcasecmp(rc_wake, "auto") != 0) {
+		snprintf(out, out_sz, "%s", rc_wake);
+		return;
+	}
+
+	if (ont) {
+		const char *ow = jarvis_ontology_get_wake_word(ont);
+		if (ow && *ow && strcmp(ow, "assistant") != 0) {
+			snprintf(out, out_sz, "%s", ow);
+			return;
+		}
+	}
+
+	char lang[32] = {0};
+	jarvis_resolve_lang(ont, lang, sizeof(lang));
+	if (strncmp(lang, "pt", 2) == 0) {
+		snprintf(out, out_sz, "jarbas");
+	} else {
+		snprintf(out, out_sz, "jarvis");
+	}
+}
+
+void jarvis_resolve_tts_voice(const jarvis_ontology_t *ont, char *out, size_t out_sz)
+{
+	if (!out || out_sz == 0) return;
+	out[0] = '\0';
+
+	const char *env_v = getenv("JARVIS_VOICE");
+	if (env_v && *env_v && strcasecmp(env_v, "auto") != 0) {
+		snprintf(out, out_sz, "%s", env_v);
+		return;
+	}
+
+	char rc_v[64] = {0};
+	if (jarvis_rc_get("tts_voice", NULL, rc_v, sizeof(rc_v)) &&
+	    rc_v[0] && strcasecmp(rc_v, "auto") != 0) {
+		snprintf(out, out_sz, "%s", rc_v);
+		return;
+	}
+
+	char lang[32] = {0};
+	const char *env_tl = getenv("JARVIS_TTS_LANG");
+	if (!env_tl || !normalize_lang_tag(env_tl, lang, sizeof(lang)) || strcmp(lang, "auto") == 0) {
+		char rc_tl[32] = {0};
+		if (!jarvis_rc_get("tts_lang", NULL, rc_tl, sizeof(rc_tl)) ||
+		    !normalize_lang_tag(rc_tl, lang, sizeof(lang)) || strcmp(lang, "auto") == 0) {
+			jarvis_resolve_lang(ont, lang, sizeof(lang));
+		}
+	}
+
+	if (strcmp(lang, "pt-br") == 0) {
+		snprintf(out, out_sz, "edge:pt-BR-FranciscaNeural");
+	} else if (strncmp(lang, "pt", 2) == 0) {
+		snprintf(out, out_sz, "edge:pt-PT-RaquelNeural");
+	} else if (strcmp(lang, "en-us") == 0) {
+		snprintf(out, out_sz, "edge:en-US-AndrewNeural");
+	} else if (strncmp(lang, "en", 2) == 0) {
+		snprintf(out, out_sz, "edge:en-GB-RyanNeural");
+	} else if (strncmp(lang, "es", 2) == 0) {
+		snprintf(out, out_sz, "edge:es-ES-AlvaroNeural");
+	} else if (strncmp(lang, "fr", 2) == 0) {
+		snprintf(out, out_sz, "edge:fr-FR-HenriNeural");
+	} else if (strncmp(lang, "de", 2) == 0) {
+		snprintf(out, out_sz, "edge:de-DE-ConradNeural");
+	} else if (strncmp(lang, "it", 2) == 0) {
+		snprintf(out, out_sz, "edge:it-IT-DiegoNeural");
+	} else {
+		snprintf(out, out_sz, "edge:en-GB-RyanNeural");
+	}
+}
+
+static bool str_contains_ci(const char *hay, const char *needle)
+{
+	if (!hay || !needle || !*needle) return false;
+	size_t nlen = strlen(needle);
+	for (const char *p = hay; *p; p++) {
+		if (strncasecmp(p, needle, nlen) == 0) return true;
+	}
+	return false;
+}
+
+void jarvis_resolve_wm(char *out, size_t out_sz)
+{
+	if (!out || out_sz == 0) return;
+	out[0] = '\0';
+
+	const char *env_wm = getenv("JARVIS_WM");
+	if (env_wm && *env_wm && strcasecmp(env_wm, "auto") != 0) {
+		snprintf(out, out_sz, "%s", env_wm);
+		return;
+	}
+
+	char rc_wm[64] = {0};
+	if (jarvis_rc_get("wm", NULL, rc_wm, sizeof(rc_wm)) &&
+	    rc_wm[0] && strcasecmp(rc_wm, "auto") != 0) {
+		snprintf(out, out_sz, "%s", rc_wm);
+		return;
+	}
+
+	const char *hypr = getenv("HYPRLAND_INSTANCE_SIGNATURE");
+	if (hypr && *hypr) {
+		snprintf(out, out_sz, "hyprland");
+		return;
+	}
+
+	const char *sway = getenv("SWAYSOCK");
+	if (sway && *sway) {
+		snprintf(out, out_sz, "sway");
+		return;
+	}
+
+	const char *xdg_cur = getenv("XDG_CURRENT_DESKTOP");
+	const char *dsess = getenv("DESKTOP_SESSION");
+	if (str_contains_ci(xdg_cur, "hyprland") || str_contains_ci(dsess, "hyprland")) {
+		snprintf(out, out_sz, "hyprland");
+		return;
+	}
+	if (str_contains_ci(xdg_cur, "sway") || str_contains_ci(dsess, "sway")) {
+		snprintf(out, out_sz, "sway");
+		return;
+	}
+	if (str_contains_ci(xdg_cur, "dwm") || str_contains_ci(dsess, "dwm")) {
+		snprintf(out, out_sz, "dwm");
+		return;
+	}
+
+#ifndef __wasm__
+	const char *u = getenv("USER");
+	if (u && *u) {
+		char pid_p[256];
+		snprintf(pid_p, sizeof(pid_p), "/tmp/dwm-bar-%s.pid", u);
+		if (access(pid_p, R_OK) == 0) {
+			snprintf(out, out_sz, "dwm");
+			return;
+		}
+	}
+#endif
+
+	const char *disp = getenv("DISPLAY");
+	if (disp && *disp) {
+		snprintf(out, out_sz, "x11");
+		return;
+	}
+
+	snprintf(out, out_sz, "desktop");
 }
