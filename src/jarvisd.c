@@ -3139,9 +3139,9 @@ read_jarvis_runtime_cfg(char *lang, size_t lang_sz,
 	*out_followup_ms = jarvis_rc_get_int("followup_ms", 0);
 	if (*out_followup_ms < 0 || *out_followup_ms > 3600000)
 		*out_followup_ms = 0;
-	*out_conv_followup_ms = jarvis_rc_get_int("conv_followup_ms", 10000);
+	*out_conv_followup_ms = jarvis_rc_get_int("conv_followup_ms", 5000);
 	if (*out_conv_followup_ms < 0 || *out_conv_followup_ms > 3600000)
-		*out_conv_followup_ms = 9000;
+		*out_conv_followup_ms = 5000;
 	if (out_cmd_silence_ms) {
 		int cs = jarvis_rc_get_int("cmd_silence_ms", 750);
 		if (cs < 560)
@@ -3556,7 +3556,7 @@ run_inprocess_jarvis_turn(int srv, struct whisper_context *ctx_wake, int n_threa
 	snprintf(acting_pid, sizeof(acting_pid), "/tmp/jarvis-acting-%s.pid", u);
 
 	char lang[32], wm_surface[64];
-	int fcfg = 0, conv_followup_ms = 9000, cmd_silence_ms = 750;
+	int fcfg = 0, conv_followup_ms = 5000, cmd_silence_ms = 750;
 	read_jarvis_runtime_cfg(lang, sizeof(lang), &fcfg, &conv_followup_ms, &cmd_silence_ms);
 	jarvis_resolve_wm(wm_surface, sizeof(wm_surface));
 

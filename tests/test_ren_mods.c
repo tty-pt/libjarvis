@@ -179,6 +179,63 @@ static void test_load_all_ren_modules(void)
 		atspi_core_clean_text("Hello\xEF\xBF\xBC\xC2\xA0World\nLine2 ", clean, sizeof(clean));
 		assert(strcmp(clean, "Hello World Line2") == 0);
 	}
+	assert(atspi_is_interactive_role("tree item"));
+	assert(atspi_is_editable_role("spin button"));
+	assert(atspi_score_text_field("Save As", "save as", 100, 70, 45) == 100);
+	assert(atspi_score_text_field("Save As", "save", 100, 70, 45) == 70);
+	assert(atspi_score_text_field("File Save", "save", 100, 70, 45) == 45);
+	assert(atspi_score_text_field("Cancel", "save", 100, 70, 45) == 0);
+
+	/* Verify ren-desktop ui tool validates args, @win, and missing targets cleanly */
+	rc = ren_call_tool("ui", "", &out);
+	assert(rc != 0 && out != NULL && strstr(out, "usage:") != NULL);
+	free(out);
+	out = NULL;
+
+	rc = ren_call_tool("ui", "bogus", &out);
+	assert(rc != 0 && out != NULL && strstr(out, "usage:") != NULL);
+	free(out);
+	out = NULL;
+
+	rc = ren_call_tool("ui", "type target_only |   ", &out);
+	assert(rc != 0 && out != NULL && strstr(out, "usage:") != NULL);
+	free(out);
+	out = NULL;
+
+	rc = ren_call_tool("ui", "submit | hello", &out);
+	assert(rc != 0 && out != NULL && strstr(out, "usage:") != NULL);
+	free(out);
+	out = NULL;
+
+	rc = ren_call_tool("ui", "set missing_pipe", &out);
+	assert(rc != 0 && out != NULL && strstr(out, "usage:") != NULL);
+	free(out);
+	out = NULL;
+
+	rc = ren_call_tool("ui", "@__nonexistent_jarvis_win_xyz__ click Save", &out);
+	assert(rc != 0 && out != NULL && strstr(out, "not found") != NULL);
+	free(out);
+	out = NULL;
+
+	rc = ren_call_tool("read_window", "@__nonexistent_jarvis_win_xyz__ inspect", &out);
+	assert(rc != 0 && out != NULL && strstr(out, "not found") != NULL);
+	free(out);
+	out = NULL;
+
+	rc = ren_call_tool("ui", "click __nonexistent_jarvis_ctrl_xyz__", &out);
+	assert(rc != 0 && out != NULL && strstr(out, "not found") != NULL);
+	free(out);
+	out = NULL;
+
+	rc = ren_call_tool("ui", "focus __nonexistent_jarvis_ctrl_xyz__", &out);
+	assert(rc != 0 && out != NULL && strstr(out, "not found") != NULL);
+	free(out);
+	out = NULL;
+
+	rc = ren_call_tool("ui", "set __nonexistent_jarvis_ctrl_xyz__ | 42", &out);
+	assert(rc != 0 && out != NULL && strstr(out, "not found") != NULL);
+	free(out);
+	out = NULL;
 
 	/* Verify ren-firefox rejects nonexistent tab cleanly without side effects */
 	rc = ren_call_tool("browser", "tab __nonexistent_jarvis_tab_xyz__", &out);

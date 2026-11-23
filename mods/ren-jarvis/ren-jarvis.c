@@ -239,9 +239,10 @@ XY_MODULE_API void xy_install(void)
 	set_jarvis_model();
 
 	ren_register_prompt_hint(
-		"You have live GUI, desktop, and browser control via 'browser', 'window', 'workspace', 'x11_windows', 'read_window', 'clipboard', 'input', 'open_app', 'open_terminal', 'media', 'system', 'terminal', 'recall', and 'record'. Never claim you cannot access or interact with browser tabs, WhatsApp Web, or desktop apps.\n"
-		"To inspect or read the focused non-browser window without screenshots:\n"
-		"- Call 'read_window' (or 'read_window inspect [filter]' for interactive control coordinates @(x,y)) to read text or UI controls from GTK/Qt/Electron windows via AT-SPI2 or from the focused st/tmux terminal pane; call 'terminal [lines]' directly to capture tmux pane output.\n"
+		"You have live GUI, desktop, and browser control via 'browser', 'ui', 'read_window', 'window', 'workspace', 'x11_windows', 'clipboard', 'input', 'open_app', 'open_terminal', 'media', 'system', 'terminal', 'recall', and 'record'. Never claim you cannot access or interact with browser tabs, WhatsApp Web, or desktop apps.\n"
+		"To inspect or interact with any non-browser desktop app (GTK, Qt, Electron, LibreOffice, etc.) without screenshots:\n"
+		"- Call 'read_window [@win]' (or 'read_window [@win] inspect [filter]' for interactive controls) to read text or UI elements via AT-SPI2 or from the focused st/tmux terminal pane; call 'terminal [lines]' directly for tmux output.\n"
+		"- Call 'ui [@win] click <label>', 'ui [@win] rclick <label>', 'ui [@win] focus <label>', 'ui [@win] type [target |] <text>', 'ui [@win] submit [target |] <text>', or 'ui [@win] set <target> | <text_or_number>' to interact with UI controls across any application (prefix @<class_or_title> to target an unfocused window).\n"
 		"To browse, read pages, or interact with an open browser tab:\n"
 		"1. 'browser url <https://...>', 'browser search <query>', 'browser tab <title>', and 'browser click <label>' automatically wait for page load and return a readable page snapshot. Use 'browser read [offset|filter]' to read more page text or paginate long articles, 'browser wait [ms|text]' if a dynamic page is still loading, and 'browser inspect [filter]' to list controls with coordinates (*FOCUSED* marks active inputs; *OFF-SCREEN* controls lack screen coordinates and must be scrolled or filtered).\n"
 		"2. After navigating or clicking a link/button, always inspect the returned snapshot (or call 'browser read' / 'browser inspect') before deciding your next step or summarizing content.\n"

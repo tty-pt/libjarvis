@@ -6,6 +6,7 @@
  */
 
 #define _GNU_SOURCE
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -296,37 +297,233 @@ static int tool_system(const char *args, char **out_result)
 	return 0;
 }
 
-static void desktop_query_focused_window(
-	unsigned long *out_pid, char *out_cls, size_t cls_sz,
-	char *out_title, size_t title_sz,
-	int *out_x, int *out_y, int *out_w, int *out_h, bool *out_has_win)
+typedef struct {
+	unsigned long pid;
+	char          id[32];
+	char          cls[128];
+	char          title[256];
+	int           wx, wy, ww, wh;
+	int           sw, sh;
+	bool          has_win;
+	bool          has_scr;
+	char          win_sel[160];
+} desktop_win_state_t;
+
+static void desktop_query_focused_window(desktop_win_state_t *out)
 {
-	if (out_pid) *out_pid = 0;
-	if (out_cls && cls_sz > 0) out_cls[0] = '\0';
-	if (out_title && title_sz > 0) out_title[0] = '\0';
-	if (out_has_win) *out_has_win = false;
+	if (!out) return;
+	char saved_sel[160] = {0};
+	snprintf(saved_sel, sizeof(saved_sel), "%s", out->win_sel);
+	memset(out, 0, sizeof(*out));
+	snprintf(out->win_sel, sizeof(out->win_sel), "%s", saved_sel);
 
 	char *foc_json = NULL;
 	if (ren_call_tool("x11_windows", "focused", &foc_json) != 0 || !foc_json) {
 		free(foc_json);
 		return;
 	}
-	if (out_pid) *out_pid = desktop_extract_json_ulong(foc_json, "pid");
-	if (out_cls && cls_sz > 0) desktop_extract_json_str(foc_json, "class", out_cls, cls_sz);
-	if (out_title && title_sz > 0) desktop_extract_json_str(foc_json, "title", out_title, title_sz);
+	out->pid = desktop_extract_json_ulong(foc_json, "pid");
+	desktop_extract_json_str(foc_json, "id", out->id, sizeof(out->id));
+	desktop_extract_json_str(foc_json, "class", out->cls, sizeof(out->cls));
+	desktop_extract_json_str(foc_json, "title", out->title, sizeof(out->title));
 	int gx = 0, gy = 0, gw = 0, gh = 0;
 	if (desktop_extract_json_int(foc_json, "x", &gx) &&
 	    desktop_extract_json_int(foc_json, "y", &gy) &&
 	    desktop_extract_json_int(foc_json, "w", &gw) &&
 	    desktop_extract_json_int(foc_json, "h", &gh) &&
 	    gw > 0 && gh > 0) {
-		if (out_x) *out_x = gx;
-		if (out_y) *out_y = gy;
-		if (out_w) *out_w = gw;
-		if (out_h) *out_h = gh;
-		if (out_has_win) *out_has_win = true;
+		out->wx = gx;
+		out->wy = gy;
+		out->ww = gw;
+		out->wh = gh;
+		out->has_win = true;
+	}
+	int gsw = 0, gsh = 0;
+	if (desktop_extract_json_int(foc_json, "sw", &gsw) &&
+	    desktop_extract_json_int(foc_json, "sh", &gsh) &&
+	    gsw > 0 && gsh > 0) {
+		out->sw = gsw;
+		out->sh = gsh;
+		out->has_scr = true;
 	}
 	free(foc_json);
+}
+
+static atspi_win_ctx_t desktop_win_to_atspi(const desktop_win_state_t *w)
+{
+	atspi_win_ctx_t ctx;
+	memset(&ctx, 0, sizeof(ctx));
+	if (!w) return ctx;
+	ctx.pid = w->pid;
+	ctx.cls = w->cls;
+	ctx.title = w->title;
+	ctx.wx = w->wx;
+	ctx.wy = w->wy;
+	ctx.ww = w->ww;
+	ctx.wh = w->wh;
+	ctx.sw = w->sw;
+	ctx.sh = w->sh;
+	ctx.has_win = w->has_win;
+	ctx.has_scr = w->has_scr;
+	return ctx;
+}
+
+static const char *desktop_parse_win_target(const char *args, char *out_win, size_t win_sz)
+{
+	if (out_win && win_sz > 0) out_win[0] = '\0';
+	if (!args) return "";
+	while (*args && isspace((unsigned char)*args)) args++;
+	if (*args != '@') return args;
+	args++;
+	if (!*args) return args;
+
+	size_t w = 0;
+	if (*args == '"' || *args == '\'') {
+		char q = *args++;
+		while (*args && *args != q && w + 1 < win_sz) {
+			out_win[w++] = *args++;
+		}
+		if (*args == q) args++;
+	} else {
+		while (*args && !isspace((unsigned char)*args) && w + 1 < win_sz) {
+			out_win[w++] = *args++;
+		}
+	}
+	if (out_win && win_sz > 0) out_win[w] = '\0';
+	while (*args && isspace((unsigned char)*args)) args++;
+	return args;
+}
+
+static bool desktop_win_matches_sel(const desktop_win_state_t *w, const char *sel)
+{
+	if (!w || !sel || !*sel) return false;
+	if (w->id[0] && strcasecmp(w->id, sel) == 0) return true;
+	if (w->cls[0] && strcasestr(w->cls, sel) != NULL) return true;
+	if (w->title[0] && strcasestr(w->title, sel) != NULL) return true;
+	return false;
+}
+
+static bool desktop_focus_target_win(
+	const char *win_sel, desktop_win_state_t *out_win, char *out_err, size_t err_sz)
+{
+	if (out_err && err_sz > 0) out_err[0] = '\0';
+	memset(out_win, 0, sizeof(*out_win));
+	if (win_sel && *win_sel) {
+		snprintf(out_win->win_sel, sizeof(out_win->win_sel), "%s", win_sel);
+	}
+	desktop_query_focused_window(out_win);
+	if (!win_sel || !*win_sel) return true;
+
+	if (desktop_win_matches_sel(out_win, win_sel)) return true;
+
+	char cmd[200];
+	snprintf(cmd, sizeof(cmd), "focus %s", win_sel);
+	char *fout = NULL;
+	int rc = ren_call_tool("x11_windows", cmd, &fout);
+	if (rc != 0 && fout && strstr(fout, "unknown tool")) {
+		free(fout);
+		fout = NULL;
+		rc = ren_call_tool("window", cmd, &fout);
+	}
+	if (rc != 0) {
+		if (out_err && err_sz > 0) {
+			if (fout && *fout) snprintf(out_err, err_sz, "%s", fout);
+			else snprintf(out_err, err_sz, "Error: window not found matching '@%.120s'", win_sel);
+		}
+		free(fout);
+		return false;
+	}
+	free(fout);
+	usleep(120000);
+	desktop_query_focused_window(out_win);
+	if (!out_win->cls[0] && !out_win->title[0]) {
+		snprintf(out_win->title, sizeof(out_win->title), "%s", win_sel);
+	}
+	return true;
+}
+
+static bool desktop_atspi_focus_win(void *ud)
+{
+	desktop_win_state_t *w = (desktop_win_state_t *)ud;
+	const char *sel = (w && w->win_sel[0]) ? w->win_sel : (w && w->id[0] ? w->id : NULL);
+	if (!sel || !*sel) return false;
+	char cmd[200], *fout = NULL;
+	snprintf(cmd, sizeof(cmd), "focus %s", sel);
+	int rc = ren_call_tool("x11_windows", cmd, &fout);
+	if (rc != 0 && fout && strstr(fout, "unknown tool")) {
+		free(fout);
+		fout = NULL;
+		rc = ren_call_tool("window", cmd, &fout);
+	}
+	free(fout);
+	return rc == 0;
+}
+
+static bool desktop_atspi_is_win_focused(void *ud)
+{
+	desktop_win_state_t *w = (desktop_win_state_t *)ud;
+	char *foc_json = NULL;
+	int rc = ren_call_tool("x11_windows", "focused", &foc_json);
+	if (rc != 0 || !foc_json) {
+		free(foc_json);
+		return true; /* No x11_windows tool loaded (e.g. Wayland) */
+	}
+	char cur_id[32] = {0};
+	desktop_extract_json_str(foc_json, "id", cur_id, sizeof(cur_id));
+	free(foc_json);
+	if (w && w->id[0] && cur_id[0]) {
+		return strcmp(cur_id, w->id) == 0;
+	}
+	return cur_id[0] != '\0';
+}
+
+static bool desktop_atspi_click_xy(void *ud, int x, int y, int btn)
+{
+	(void)ud;
+	char arg[64], *out = NULL;
+	snprintf(arg, sizeof(arg), "click %d %d %d", x, y, btn > 0 ? btn : 1);
+	int rc = ren_call_tool("input", arg, &out);
+	free(out);
+	return rc == 0;
+}
+
+static bool desktop_atspi_send_key(void *ud, const char *combo)
+{
+	(void)ud;
+	if (!combo || !*combo) return false;
+	char arg[128], *out = NULL;
+	snprintf(arg, sizeof(arg), "key %.110s", combo);
+	int rc = ren_call_tool("input", arg, &out);
+	free(out);
+	return rc == 0;
+}
+
+static bool desktop_atspi_type_text(void *ud, const char *text, bool submit)
+{
+	(void)ud;
+	if (!text) return false;
+	size_t len = strlen(text);
+	char *arg = (char *)malloc(len + 16);
+	if (!arg) return false;
+	snprintf(arg, len + 16, "%s %s", submit ? "submit" : "type", text);
+	char *out = NULL;
+	int rc = ren_call_tool("input", arg, &out);
+	free(arg);
+	free(out);
+	return rc == 0;
+}
+
+static atspi_ops_t desktop_make_atspi_ops(desktop_win_state_t *w)
+{
+	atspi_ops_t ops;
+	memset(&ops, 0, sizeof(ops));
+	ops.focus_win = desktop_atspi_focus_win;
+	ops.is_win_focused = desktop_atspi_is_win_focused;
+	ops.click_xy = desktop_atspi_click_xy;
+	ops.send_key = desktop_atspi_send_key;
+	ops.type_text = desktop_atspi_type_text;
+	ops.ud = w;
+	return ops;
 }
 
 static int tool_terminal(const char *args, char **out_result)
@@ -336,15 +533,16 @@ static int tool_terminal(const char *args, char **out_result)
 	if (lines <= 0) lines = 40;
 	if (lines > 200) lines = 200;
 
-	unsigned long foc_pid = 0;
-	desktop_query_focused_window(&foc_pid, NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL);
+	desktop_win_state_t win;
+	memset(&win, 0, sizeof(win));
+	desktop_query_focused_window(&win);
 
 	char target[128] = {0};
 	char *cap = (char *)malloc(8192);
 	if (!cap) return -1;
 	cap[0] = '\0';
 
-	if (desktop_core_find_tmux_target(foc_pid, target, sizeof(target)) &&
+	if (desktop_core_find_tmux_target(win.pid, target, sizeof(target)) &&
 	    desktop_core_capture_tmux_target(target, lines, cap, 8192)) {
 		size_t out_sz = strlen(cap) + 192;
 		char *out = (char *)malloc(out_sz);
@@ -365,42 +563,43 @@ static int tool_terminal(const char *args, char **out_result)
 
 static int tool_read_window(const char *args, char **out_result)
 {
-	while (args && *args == ' ') args++;
+	char win_sel[160] = {0};
+	const char *rest = desktop_parse_win_target(args, win_sel, sizeof(win_sel));
 	bool inspect_mode = false;
 	const char *filter = NULL;
-	if (args && *args) {
-		if (strcasecmp(args, "inspect") == 0) {
+	if (rest && *rest) {
+		if (strcasecmp(rest, "inspect") == 0) {
 			inspect_mode = true;
-		} else if (strncasecmp(args, "inspect ", 8) == 0) {
+		} else if (strncasecmp(rest, "inspect ", 8) == 0) {
 			inspect_mode = true;
-			filter = args + 8;
+			filter = rest + 8;
 			while (*filter == ' ') filter++;
 			if (!*filter) filter = NULL;
-		} else if (strcasecmp(args, "read") == 0) {
+		} else if (strcasecmp(rest, "read") == 0) {
 			inspect_mode = false;
-		} else if (strncasecmp(args, "read ", 5) == 0) {
-			filter = args + 5;
+		} else if (strncasecmp(rest, "read ", 5) == 0) {
+			filter = rest + 5;
 			while (*filter == ' ') filter++;
 			if (!*filter) filter = NULL;
 		} else {
-			filter = args;
+			filter = rest;
 		}
 	}
 
-	unsigned long foc_pid = 0;
-	char cls[128] = {0}, title[256] = {0};
-	int wx = 0, wy = 0, ww = 0, wh = 0;
-	bool has_win = false;
-	desktop_query_focused_window(&foc_pid, cls, sizeof(cls), title, sizeof(title),
-	                             &wx, &wy, &ww, &wh, &has_win);
+	desktop_win_state_t win;
+	char ferr[256] = {0};
+	if (!desktop_focus_target_win(win_sel, &win, ferr, sizeof(ferr))) {
+		*out_result = strdup(ferr[0] ? ferr : "Error: window not found");
+		return -1;
+	}
 
 	char *buf = (char *)malloc(8192);
 	if (!buf) return -1;
 	buf[0] = '\0';
 
-	if (desktop_core_is_terminal_class(cls)) {
+	if (desktop_core_is_terminal_class(win.cls)) {
 		char target[128] = {0};
-		if (desktop_core_find_tmux_target(foc_pid, target, sizeof(target)) &&
+		if (desktop_core_find_tmux_target(win.pid, target, sizeof(target)) &&
 		    desktop_core_capture_tmux_target(target, 60, buf, 8192)) {
 			size_t out_sz = strlen(buf) + 384;
 			char *out = (char *)malloc(out_sz);
@@ -409,15 +608,15 @@ static int tool_read_window(const char *args, char **out_result)
 				return -1;
 			}
 			snprintf(out, out_sz, "[terminal tmux=%s class='%s' title='%.80s']\n%s",
-			         target, cls, title, buf);
+			         target, win.cls, win.title, buf);
 			free(buf);
 			*out_result = out;
 			return 0;
 		}
 	}
 
-	if (atspi_core_read_window(foc_pid, cls, title, wx, wy, ww, wh, has_win,
-	                           inspect_mode, filter, buf, 8192)) {
+	atspi_win_ctx_t awin = desktop_win_to_atspi(&win);
+	if (atspi_core_read_window(&awin, inspect_mode, filter, buf, 8192)) {
 		size_t out_sz = strlen(buf) + 384;
 		char *out = (char *)malloc(out_sz);
 		if (!out) {
@@ -425,7 +624,7 @@ static int tool_read_window(const char *args, char **out_result)
 			return -1;
 		}
 		snprintf(out, out_sz, "[window class='%s' title='%.80s' pid=%lu]\n%s",
-		         cls[0] ? cls : "unknown", title, foc_pid, buf);
+		         win.cls[0] ? win.cls : "unknown", win.title, win.pid, buf);
 		free(buf);
 		*out_result = out;
 		return 0;
@@ -434,9 +633,132 @@ static int tool_read_window(const char *args, char **out_result)
 	free(buf);
 	char msg[512];
 	snprintf(msg, sizeof(msg),
-	         "(no AT-SPI2 or tmux text tree available for focused window class='%s' title='%.120s' pid=%lu)",
-	         cls[0] ? cls : "none", title, foc_pid);
+	         "(no AT-SPI2 or tmux text tree available for window class='%s' title='%.120s' pid=%lu)",
+	         win.cls[0] ? win.cls : "none", win.title, win.pid);
 	*out_result = strdup(msg);
+	return 0;
+}
+
+static bool desktop_split_pipe_arg(
+	const char *raw, char *out_left, size_t left_sz, char *out_right, size_t right_sz)
+{
+	if (out_left && left_sz > 0) out_left[0] = '\0';
+	if (out_right && right_sz > 0) out_right[0] = '\0';
+	if (!raw) return false;
+	while (*raw && isspace((unsigned char)*raw)) raw++;
+	const char *pipe = strchr(raw, '|');
+	if (!pipe) {
+		snprintf(out_right, right_sz, "%s", raw);
+		size_t rlen = strlen(out_right);
+		while (rlen > 0 && isspace((unsigned char)out_right[rlen - 1])) out_right[--rlen] = '\0';
+		return false;
+	}
+	size_t llen = (size_t)(pipe - raw);
+	while (llen > 0 && isspace((unsigned char)raw[llen - 1])) llen--;
+	if (llen >= left_sz) llen = left_sz - 1;
+	memcpy(out_left, raw, llen);
+	out_left[llen] = '\0';
+
+	const char *r = pipe + 1;
+	while (*r && isspace((unsigned char)*r)) r++;
+	snprintf(out_right, right_sz, "%s", r);
+	size_t rlen = strlen(out_right);
+	while (rlen > 0 && isspace((unsigned char)out_right[rlen - 1])) out_right[--rlen] = '\0';
+	return true;
+}
+
+static int tool_ui(const char *args, char **out_result)
+{
+	static const char *const k_usage =
+		"Error: usage: ui [@win] <click <target> | rclick <target> | focus <target> | type [target |] <text> | submit [target |] <text> | set <target> | <val>>";
+
+	char win_sel[160] = {0};
+	const char *rest = desktop_parse_win_target(args, win_sel, sizeof(win_sel));
+	if (!rest || !*rest) {
+		*out_result = strdup(k_usage);
+		return -1;
+	}
+
+	enum { UI_NONE, UI_CLICK, UI_RCLICK, UI_FOCUS, UI_TYPE, UI_SUBMIT, UI_SET } verb = UI_NONE;
+	const char *arg = "";
+	if (strncasecmp(rest, "click ", 6) == 0) { verb = UI_CLICK; arg = rest + 6; }
+	else if (strncasecmp(rest, "rclick ", 7) == 0) { verb = UI_RCLICK; arg = rest + 7; }
+	else if (strncasecmp(rest, "focus ", 6) == 0) { verb = UI_FOCUS; arg = rest + 6; }
+	else if (strncasecmp(rest, "type ", 5) == 0) { verb = UI_TYPE; arg = rest + 5; }
+	else if (strncasecmp(rest, "submit ", 7) == 0) { verb = UI_SUBMIT; arg = rest + 7; }
+	else if (strncasecmp(rest, "set ", 4) == 0) { verb = UI_SET; arg = rest + 4; }
+	else {
+		*out_result = strdup(k_usage);
+		return -1;
+	}
+	while (*arg && isspace((unsigned char)*arg)) arg++;
+
+	char target[256] = {0}, text[1024] = {0};
+	if (verb == UI_CLICK || verb == UI_RCLICK || verb == UI_FOCUS) {
+		snprintf(target, sizeof(target), "%s", arg);
+		size_t tlen = strlen(target);
+		while (tlen > 0 && isspace((unsigned char)target[tlen - 1])) target[--tlen] = '\0';
+		if (!target[0]) {
+			*out_result = strdup(k_usage);
+			return -1;
+		}
+	} else if (verb == UI_TYPE || verb == UI_SUBMIT) {
+		bool has_pipe = desktop_split_pipe_arg(arg, target, sizeof(target), text, sizeof(text));
+		if ((has_pipe && !target[0]) || !text[0]) {
+			*out_result = strdup(k_usage);
+			return -1;
+		}
+	} else if (verb == UI_SET) {
+		bool has_pipe = desktop_split_pipe_arg(arg, target, sizeof(target), text, sizeof(text));
+		if (!has_pipe || !target[0] || !text[0]) {
+			*out_result = strdup("Error: usage: ui [@win] set <target> | <text_or_number>");
+			return -1;
+		}
+	}
+
+	desktop_win_state_t win;
+	char msg[512] = {0};
+	if (!desktop_focus_target_win(win_sel, &win, msg, sizeof(msg))) {
+		*out_result = strdup(msg[0] ? msg : "Error: window not found");
+		return -1;
+	}
+
+	atspi_win_ctx_t awin = desktop_win_to_atspi(&win);
+	atspi_ops_t ops = desktop_make_atspi_ops(&win);
+
+	if (verb == UI_CLICK || verb == UI_RCLICK) {
+		bool ok = atspi_core_click(&awin, &ops, target, verb == UI_RCLICK ? 3 : 1, msg, sizeof(msg));
+		*out_result = strdup(msg[0] ? msg : (ok ? "ok" : "Error: ui click failed"));
+		return ok ? 0 : -1;
+	}
+	if (verb == UI_FOCUS) {
+		bool ok = atspi_core_focus(&awin, &ops, target, msg, sizeof(msg));
+		*out_result = strdup(msg[0] ? msg : (ok ? "ok" : "Error: ui focus failed"));
+		return ok ? 0 : -1;
+	}
+	if (verb == UI_SET) {
+		bool ok = atspi_core_set(&awin, &ops, target, text, msg, sizeof(msg));
+		*out_result = strdup(msg[0] ? msg : (ok ? "ok" : "Error: ui set failed"));
+		return ok ? 0 : -1;
+	}
+
+	/* UI_TYPE / UI_SUBMIT */
+	char role[64] = {0}, label[128] = {0};
+	bool is_term = desktop_core_is_terminal_class(win.cls);
+	if (!atspi_core_prepare_input(&awin, &ops, target[0] ? target : NULL, is_term,
+	                              role, sizeof(role), label, sizeof(label), msg, sizeof(msg))) {
+		*out_result = strdup(msg[0] ? msg : "Error: no editable input focused");
+		return -1;
+	}
+	if (!desktop_atspi_type_text(&win, text, verb == UI_SUBMIT)) {
+		*out_result = strdup("Error: input tool unavailable to type text");
+		return -1;
+	}
+	char out[512];
+	snprintf(out, sizeof(out), "%s into [%s '%.64s']: %.160s",
+	         verb == UI_SUBMIT ? "typed+enter" : "typed",
+	         role[0] ? role : "input", label, text);
+	*out_result = strdup(out);
 	return 0;
 }
 
@@ -446,5 +768,6 @@ XY_MODULE_API void xy_install(void)
 	ren_register_tool("media", "media <play [query] | pause | next | prev | volume_up | volume_down | mute>", tool_media);
 	ren_register_tool("system", "system [all | memory | cpu | disk | ports]", tool_system);
 	ren_register_tool("terminal", "terminal [lines]", tool_terminal);
-	ren_register_tool("read_window", "read_window [inspect [filter] | <filter>]", tool_read_window);
+	ren_register_tool("read_window", "read_window [@win] [inspect [filter] | <filter>]", tool_read_window);
+	ren_register_tool("ui", "ui [@win] <click <target> | rclick <target> | focus <target> | type [target |] <text> | submit [target |] <text> | set <target> | <val>>", tool_ui);
 }
