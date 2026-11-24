@@ -40,6 +40,7 @@
 #include "whisper.h"
 #include "jarvis-stt.h"
 #include "jarvis-dispatch.h"
+#include "jarvis-ipc-srv.h"
 
 static volatile sig_atomic_t g_jarvis_active = 0;
 static volatile sig_atomic_t g_in_followup   = 0;
@@ -62,52 +63,14 @@ static struct {
 	.was_stopped = 0
 };
 
-#define SAMPLE_RATE      16000
-#define FRAME_MS         20
-#define FRAME_SAMPLES    ((SAMPLE_RATE * FRAME_MS) / 1000) /* 320 samples */
-#define FRAME_BYTES      (FRAME_SAMPLES * (int)sizeof(int16_t))
-#define RING_FRAMES      6000 /* 120 seconds circular float32 PCM buffer */
-#define RING_SAMPLES     (RING_FRAMES * FRAME_SAMPLES)
-#define MAX_UTTER_FRAMES 4500 /* 90 seconds max utterance */
-#define WARM_HOLD_MS     60000L
-
-static volatile sig_atomic_t running          = 1;
-static volatile sig_atomic_t g_stop_req       = 0;
-static volatile sig_atomic_t g_cancel_req     = 0;
-static volatile sig_atomic_t cli_stop_req     = 0;
-static volatile sig_atomic_t cli_cancel_req   = 0;
-
-static stl_socket_t g_preempt_cli = STL_INVALID_SOCKET;
-static char         g_preempt_buf[2048];
-
-/* Shared audio capture ring buffer */
-static struct {
-	pthread_mutex_t mtx;
-	pthread_cond_t  cond;
-	float           pcm[RING_SAMPLES];
-	float           db[RING_FRAMES];
-	uint8_t         is_speech[RING_FRAMES];
-	int64_t         total_frames;
-	int64_t         last_cmd_end_f;
-	double          noise_floor_db;
-	double          ambient_std_db;
-	int             env_frames;
-	int             active_users;
-	long            hold_until_ms;
-	int             in_speech_hint;
-	int             pw_open;
-} g_audio = {
-	.mtx            = PTHREAD_MUTEX_INITIALIZER,
-	.cond           = PTHREAD_COND_INITIALIZER,
-	.total_frames   = 0,
-	.noise_floor_db = -42.0,
-	.ambient_std_db = 1.5,
-	.env_frames     = 0,
-	.active_users   = 0,
-	.hold_until_ms  = 0,
-	.in_speech_hint = 0,
-	.pw_open        = 0
-};
+#define SAMPLE_RATE      JARVIS_SAMPLE_RATE
+#define FRAME_MS         JARVIS_FRAME_MS
+#define FRAME_SAMPLES    JARVIS_FRAME_SAMPLES
+#define FRAME_BYTES      JARVIS_FRAME_BYTES
+#define RING_FRAMES      JARVIS_RING_FRAMES
+#define RING_SAMPLES     JARVIS_RING_SAMPLES
+#define MAX_UTTER_FRAMES JARVIS_MAX_UTTER_FRAMES
+#define WARM_HOLD_MS     JARVIS_WARM_HOLD_MS
 
 static const jarvis_ontology_t *
 get_daemon_ont(void)
@@ -143,48 +106,14 @@ get_cmd_initial_prompt(void)
 	return (p && *p) ? p : NULL;
 }
 
-/* Non-blocking background Whisper decode worker for ctx_main */
-static struct {
-	pthread_mutex_t       mtx;
-	pthread_cond_t        cond;
-	struct whisper_context *ctx;
-	int                   n_threads;
-	float                *pcm;
-	int                   n_samples;
-	char                  lang[32];
-	const char           *prompt;
-	int                   max_tok;
-	int                   is_partial;
-	int64_t               job_voiced_f;
-	int64_t               job_end_f;
-	int                   has_job;
-	int                   busy;
-	volatile sig_atomic_t abort_flag;
-	int                   has_result;
-	char                  result_text[4096];
-	int64_t               result_voiced_f;
-	int64_t               result_end_f;
-	int                   result_is_partial;
-	int                   result_all_silent;
-	int64_t               done_at_frame;
-} g_dec = {
-	.mtx               = PTHREAD_MUTEX_INITIALIZER,
-	.cond              = PTHREAD_COND_INITIALIZER,
-	.ctx               = NULL,
-	.n_threads         = 4,
-	.pcm               = NULL,
-	.n_samples         = 0,
-	.prompt            = NULL,
-	.job_end_f         = 0,
-	.has_job           = 0,
-	.busy              = 0,
-	.abort_flag        = 0,
-	.has_result        = 0,
-	.result_voiced_f   = -1,
-	.result_end_f      = -1,
-	.result_all_silent = 0,
-	.done_at_frame     = 0
-};
+static volatile sig_atomic_t running          = 1;
+static volatile sig_atomic_t g_stop_req       = 0;
+static volatile sig_atomic_t g_cancel_req     = 0;
+static volatile sig_atomic_t cli_stop_req     = 0;
+static volatile sig_atomic_t cli_cancel_req   = 0;
+
+static stl_socket_t g_preempt_cli = STL_INVALID_SOCKET;
+static char         g_preempt_buf[2048];
 
 static void
 on_sig(int sig)
@@ -756,168 +685,25 @@ audio_release(long hold_ms)
 static int
 ring_extract_pcm(int64_t start_f, int64_t end_f, float *out_pcm, int max_samples)
 {
-	int n_samples = 0;
-
-	pthread_mutex_lock(&g_audio.mtx);
-	if (end_f > g_audio.total_frames)
-		end_f = g_audio.total_frames;
-	if (end_f - start_f > RING_FRAMES - 4)
-		start_f = end_f - (RING_FRAMES - 4);
-	if (start_f < 0)
-		start_f = 0;
-
-	for (int64_t f = start_f; f < end_f; f++) {
-		if (n_samples + FRAME_SAMPLES > max_samples)
-			break;
-		int slot = (int)(f % RING_FRAMES);
-		memcpy(out_pcm + n_samples, g_audio.pcm + (size_t)slot * FRAME_SAMPLES,
-		       (size_t)FRAME_SAMPLES * sizeof(float));
-		n_samples += FRAME_SAMPLES;
-	}
-	pthread_mutex_unlock(&g_audio.mtx);
-	return n_samples;
+	return jarvis_stt_ring_extract_pcm(start_f, end_f, out_pcm, max_samples);
 }
 
 static int
 load_wav_f32(const char *path, float **out_pcm, int *out_samples)
 {
-	FILE *fp = fopen(path, "rb");
-	if (!fp)
-		return -1;
-
-	if (fseek(fp, 0, SEEK_END) != 0) {
-		fclose(fp);
-		return -1;
-	}
-	long fsize = ftell(fp);
-	if (fsize <= 44 || fsize > 64 * 1024 * 1024) {
-		fclose(fp);
-		return -1;
-	}
-	if (fseek(fp, 44, SEEK_SET) != 0) {
-		fclose(fp);
-		return -1;
-	}
-
-	size_t pcm_bytes = (size_t)(fsize - 44);
-	int n_samples = (int)(pcm_bytes / sizeof(int16_t));
-	int16_t *raw = malloc((size_t)n_samples * sizeof(int16_t));
-	float *f32 = malloc((size_t)n_samples * sizeof(float));
-	if (!raw || !f32) {
-		free(raw);
-		free(f32);
-		fclose(fp);
-		return -1;
-	}
-
-	size_t n_read = fread(raw, sizeof(int16_t), (size_t)n_samples, fp);
-	fclose(fp);
-	n_samples = (int)n_read;
-
-	for (int i = 0; i < n_samples; i++)
-		f32[i] = (float)raw[i] / 32768.0f;
-
-	free(raw);
-	*out_pcm = f32;
-	*out_samples = n_samples;
-	return 0;
+	return jarvis_stt_load_wav_f32(path, out_pcm, out_samples);
 }
 
 static int
 compute_audio_ctx(int n_samples, int is_wake, int is_partial)
 {
-	int frames = (n_samples / 320) + (is_wake ? 24 : (is_partial ? 24 : 32));
-	int aligned = ((frames + 31) / 32) * 32;
-	int min_ctx = is_wake ? 128 : (is_partial ? 192 : 256);
-	if (aligned < min_ctx)
-		aligned = min_ctx;
-	if (aligned > 1500)
-		aligned = 1500;
-	return aligned;
+	return jarvis_stt_compute_audio_ctx(n_samples, is_wake, is_partial);
 }
 
-/*
- * Classical Digital Signal Processing (DSP) Front-End:
- * 1. First-order 80 Hz IIR high-pass filter (fs = 16000 Hz, alpha = 0.9695)
- *    removes DC offset and low-frequency rumble/plosive energy.
- * 2. Active-speech RMS & peak estimation with Automatic Gain Control (AGC)
- *    normalizes quiet speech toward target peak 0.707 (-3.0 dBFS) and target
- *    active RMS 0.12 (-18.4 dBFS), capped at +18 dB (8.0x) gain so pure
- *    ambient noise floor is never over-amplified.
- */
 static float *
 normalize_pcm_agc(const float *pcm, int n_samples)
 {
-	if (!pcm || n_samples <= 0)
-		return NULL;
-	float *buf = malloc((size_t)n_samples * sizeof(float));
-	if (!buf)
-		return NULL;
-
-	const float alpha = 0.9695f;
-	float prev_x = pcm[0];
-	float prev_y = 0.0f;
-	float peak = 0.0f;
-	double sum_sq = 0.0;
-
-	for (int i = 0; i < n_samples; i++) {
-		float x = pcm[i];
-		float y = alpha * (prev_y + x - prev_x);
-		prev_x = x;
-		prev_y = y;
-		buf[i] = y;
-		float ay = fabsf(y);
-		if (ay > peak)
-			peak = ay;
-		sum_sq += (double)y * (double)y;
-	}
-
-	/* Measure active-speech RMS on 20ms frames (320 samples) whose energy is at
-	 * least -22 dB relative to peak (or > 0.015), so leading/trailing silence frames
-	 * never underestimate speech RMS and cause over-gain clipping of consonants.
-	 */
-	double total_rms = sqrt(sum_sq / (double)n_samples);
-	double active_sq = 0.0;
-	int active_n = 0;
-	float frame_thresh = peak * 0.08f;
-	if (frame_thresh < 0.008f)
-		frame_thresh = 0.008f;
-	for (int base = 0; base + 320 <= n_samples; base += 320) {
-		double f_sq = 0.0;
-		for (int k = 0; k < 320; k++) {
-			float v = buf[base + k];
-			f_sq += (double)v * (double)v;
-		}
-		double f_rms = sqrt(f_sq / 320.0);
-		if (f_rms >= (double)frame_thresh) {
-			active_sq += f_sq;
-			active_n += 320;
-		}
-	}
-	double rms = (active_n >= 1600) ? sqrt(active_sq / (double)active_n) : total_rms;
-
-	/* Only apply boost if signal contains genuine acoustic energy above silence floor */
-	if (peak > 0.010f && rms > 0.0020) {
-		float gain_peak = 0.78f / peak;
-		float gain_rms = (float)(0.11 / rms);
-		float gain = (gain_rms < gain_peak) ? gain_rms : gain_peak;
-		if (gain > 5.0f)
-			gain = 5.0f;
-		if (gain < 0.85f)
-			gain = 0.85f;
-		if (fabsf(gain - 1.0f) > 0.05f) {
-			for (int i = 0; i < n_samples; i++) {
-				float v = buf[i] * gain;
-				if (v > 0.98f)
-					v = 0.98f;
-				else if (v < -0.98f)
-					v = -0.98f;
-				buf[i] = v;
-			}
-		}
-	}
-
-	return buf;
+	return jarvis_stt_apply_preemphasis_and_agc(pcm, n_samples);
 }
 
 static void
@@ -3587,94 +3373,6 @@ serve_client_request(stl_socket_t srv, stl_socket_t cli, char *buf,
 	stl_sock_close(cli);
 }
 
-static bool
-is_english_only_whisper_model(const char *path)
-{
-	if (!path || !*path) return false;
-	return strstr(path, ".en.") != NULL || strstr(path, ".en-") != NULL;
-}
-
-static void
-resolve_default_whisper_models(char *main_out, size_t main_sz, char *wake_out, size_t wake_sz)
-{
-	char eff_lang[32] = {0};
-	jarvis_resolve_lang(NULL, eff_lang, sizeof(eff_lang));
-	bool allow_en_only = (strncasecmp(eff_lang, "en", 2) == 0);
-
-	bool have_main = jarvis_rc_get("whisper_model", NULL, main_out, main_sz) &&
-	                 main_out[0] && jarvis_plat_is_readable(main_out);
-	if (have_main && !allow_en_only && is_english_only_whisper_model(main_out)) {
-		fprintf(stderr,
-		        "jarvisd: WARNING: configured whisper_model '%s' is English-only for lang='%s'; "
-		        "falling back to multilingual model\n",
-		        main_out, eff_lang);
-		have_main = false;
-		main_out[0] = '\0';
-	}
-
-	if (!have_main) {
-		static const char *const multi_cands[] = {
-			"ggml-large-v3-turbo-q5_0.bin",
-			"ggml-large-v3-turbo-q8_0.bin",
-			"ggml-large-v3-turbo.bin",
-			"ggml-large-v3-q5_0.bin",
-			"ggml-large-v3.bin",
-			"ggml-small-q8_0.bin",
-			"ggml-small-q5_1.bin",
-			"ggml-base-q8_0.bin",
-			"ggml-base-q5_1.bin",
-			"ggml-base.bin",
-			NULL
-		};
-		static const char *const en_cands[] = {
-			"ggml-base.en-q8_0.bin",
-			"ggml-small.en-q5_1.bin",
-			NULL
-		};
-		main_out[0] = '\0';
-		for (size_t i = 0; multi_cands[i]; i++) {
-			char cand[512];
-			if (jarvis_plat_data_file("whisper", multi_cands[i], cand, sizeof(cand)) == 0 &&
-			    jarvis_plat_is_readable(cand)) {
-				snprintf(main_out, main_sz, "%s", cand);
-				break;
-			}
-		}
-		if (!main_out[0] && allow_en_only) {
-			for (size_t i = 0; en_cands[i]; i++) {
-				char cand[512];
-				if (jarvis_plat_data_file("whisper", en_cands[i], cand, sizeof(cand)) == 0 &&
-				    jarvis_plat_is_readable(cand)) {
-					snprintf(main_out, main_sz, "%s", cand);
-					break;
-				}
-			}
-		}
-	}
-
-	bool have_wake = jarvis_rc_get("whisper_wake_model", NULL, wake_out, wake_sz) &&
-	                 wake_out[0] && jarvis_plat_is_readable(wake_out);
-	if (!have_wake) {
-		static const char *const wake_cands[] = {
-			"ggml-base-q8_0.bin",
-			"ggml-base-q5_1.bin",
-			"ggml-base.bin",
-			NULL
-		};
-		wake_out[0] = '\0';
-		for (size_t i = 0; wake_cands[i]; i++) {
-			char cand[512];
-			if (jarvis_plat_data_file("whisper", wake_cands[i], cand, sizeof(cand)) == 0 &&
-			    jarvis_plat_is_readable(cand)) {
-				snprintf(wake_out, wake_sz, "%s", cand);
-				break;
-			}
-		}
-		if (!wake_out[0])
-			snprintf(wake_out, wake_sz, "%s", main_out);
-	}
-}
-
 static void
 prepend_path_dir(const char *dir)
 {
@@ -3757,7 +3455,7 @@ main(int argc, char *argv[])
 		return run_client_mode(port, client_req);
 
 	static char s_main_model[512], s_wake_model[512];
-	resolve_default_whisper_models(s_main_model, sizeof(s_main_model), s_wake_model, sizeof(s_wake_model));
+	jarvis_resolve_default_whisper_models(s_main_model, sizeof(s_main_model), s_wake_model, sizeof(s_wake_model));
 	if (!main_model_path || !*main_model_path)
 		main_model_path = s_main_model;
 	if (!wake_model_path || !*wake_model_path)

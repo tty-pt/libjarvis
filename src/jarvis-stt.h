@@ -18,12 +18,7 @@
 #define JARVIS_MAX_UTTER_FRAMES 4500 /* 90 seconds max utterance */
 #define JARVIS_WARM_HOLD_MS     60000L
 
-typedef struct jarvis_stt jarvis_stt_t;
-
-/* Callback to check if running state should abort */
-typedef bool (*jarvis_abort_cb_t)(void *user_data);
-
-/* Audio capture ring buffer & VAD state */
+/* Audio capture ring buffer & adaptive noise floor VAD state */
 typedef struct {
 	pthread_mutex_t mtx;
 	pthread_cond_t  cond;
@@ -66,5 +61,19 @@ typedef struct {
 	int                     result_all_silent;
 	int64_t                 done_at_frame;
 } jarvis_decode_worker_t;
+
+/* Global STT state references shared across audio threads */
+extern jarvis_audio_ring_t    g_audio;
+extern jarvis_decode_worker_t g_dec;
+
+/* DSP and Whisper helper routines */
+float *jarvis_stt_apply_preemphasis_and_agc(const float *pcm, int n_samples);
+int    jarvis_stt_compute_audio_ctx(int n_samples, int is_wake, int is_partial);
+void   jarvis_stt_run_whisper_slice(struct whisper_context *ctx, int n_threads, const float *pcm, int n_samples,
+                                   const char *lang, const char *prompt, int max_tok, int is_wake, int is_partial,
+                                   int use_abort_cb, char *out_text, size_t out_sz, int *out_all_silent);
+
+int    jarvis_stt_ring_extract_pcm(int64_t start_f, int64_t end_f, float *out_pcm, int max_samples);
+int    jarvis_stt_load_wav_f32(const char *path, float **out_pcm, int *out_samples);
 
 #endif /* JARVIS_STT_H */
