@@ -54,9 +54,10 @@ jarvis_audio_cap_t *jarvis_audio_cap_open(int sample_rate, int channels)
 	snprintf(ch_buf, sizeof(ch_buf), "%d", cap->channels);
 	select_pw_source(target, sizeof(target));
 
-	const char *argv[12];
+	const char *argv[13];
 	int i = 0;
 	argv[i++] = "pw-record";
+	argv[i++] = "--raw";
 	if (target[0]) {
 		argv[i++] = "--target";
 		argv[i++] = target;

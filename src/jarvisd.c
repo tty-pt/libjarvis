@@ -878,7 +878,7 @@ run_whisper_slice(struct whisper_context *ctx, int n_threads, const float *pcm, 
 	}
 
 	bool is_final_cmd = (!is_wake && !is_partial);
-	int beam_sz = is_final_cmd ? jarvis_rc_get_int("whisper_beam_size", 1) : 1;
+	int beam_sz = is_final_cmd ? jarvis_rc_get_int("whisper_beam_size", 5) : 1;
 	if (beam_sz < 1) beam_sz = 1;
 	if (beam_sz > 5) beam_sz = 5;
 	int use_beam = (is_final_cmd && beam_sz > 1);
@@ -892,7 +892,7 @@ run_whisper_slice(struct whisper_context *ctx, int n_threads, const float *pcm, 
 	wparams.suppress_blank   = true;
 	wparams.suppress_nst     = true;
 	wparams.temperature      = 0.0f;
-	wparams.temperature_inc  = use_beam ? 0.2f : 0.0f;
+	wparams.temperature_inc  = is_final_cmd ? 0.2f : 0.0f;
 	if (use_beam) {
 		wparams.beam_search.beam_size = beam_sz;
 	} else {
@@ -1817,6 +1817,7 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 	int64_t decoded_cmd_voiced_f = -1;
 	int64_t decoded_cmd_end_f = -1;
 	int decoded_cmd_is_final = 0;
+	int live_cmd_from_main = 0;
 	int tts_was_active_in_utter = is_tts_currently_speaking(NULL, 0) ? 1 : 0;
 	char live_cmd[4096] = {0};
 
@@ -1926,6 +1927,7 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 					decoded_cmd_voiced_f = res_vf;
 					decoded_cmd_end_f = res_ef;
 					if (candidate && *candidate) {
+						live_cmd_from_main = 1;
 						if (!res_part && res_vf >= last_voiced_f && res_ef >= last_voiced_f + spec_tail_f)
 							decoded_cmd_is_final = 1;
 						if (strcmp(live_cmd, candidate) != 0) {
@@ -2455,9 +2457,11 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 				}
 
 				char final_raw[4096] = {0};
+				int ran_final_main = 0;
 				if (!(decoded_cmd_is_final && live_cmd[0] != '\0' &&
 				      decoded_cmd_voiced_f >= last_voiced_f - 1 &&
 				      decoded_cmd_end_f >= last_voiced_f + spec_tail_f)) {
+					ran_final_main = 1;
 					int64_t end_f = last_voiced_f + final_tail_f;
 					decode_force_submit_final(cmd_start_f, end_f, last_voiced_f,
 					                          lang, eff_prompt, 0);
@@ -2506,6 +2510,7 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 						if (tts_on)
 							interrupt_tts_and_clear_cache();
 						snprintf(live_cmd, sizeof(live_cmd), "%s", stripped);
+						live_cmd_from_main = 1;
 					} else if (wm == 1 || (!chime_played && live_cmd[0] == '\0' && voiced_frames <= 32 &&
 					                       contains_wake_word(final_raw, wake_word))) {
 						/* User spoke ONLY wake word and paused: interrupt TTS, play chime, duck speaker, and wait for command */
@@ -2522,6 +2527,7 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 						silence_frames = 0;
 						trailing_soft_frames = 0;
 						live_cmd[0] = '\0';
+						live_cmd_from_main = 0;
 						decoded_cmd_is_final = 0;
 						decoded_cmd_end_f = -1;
 						pthread_mutex_lock(&g_audio.mtx);
@@ -2544,27 +2550,39 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 								if (tts_on)
 									interrupt_tts_and_clear_cache();
 								snprintf(live_cmd, sizeof(live_cmd), "%s", final_raw);
+								live_cmd_from_main = 1;
 							} else if (!operating_mode && is_bargein_stop_phrase(final_raw)) {
 								interrupt_tts_and_clear_cache();
 								tts_was_active_in_utter = 0;
 								live_cmd[0] = '\0';
+								live_cmd_from_main = 0;
 							} else if ((is_followup_window || operating_mode) && !is_tts_self_echo(final_raw, active_tts)) {
 								if (tts_on)
 									interrupt_tts_and_clear_cache();
 								snprintf(live_cmd, sizeof(live_cmd), "%s", final_raw);
+								live_cmd_from_main = 1;
 							} else {
 								live_cmd[0] = '\0';
+								live_cmd_from_main = 0;
 							}
 						} else if (!operating_mode && is_bargein_stop_phrase(final_raw)) {
 							interrupt_tts_and_clear_cache();
 							tts_was_active_in_utter = 0;
 							live_cmd[0] = '\0';
+							live_cmd_from_main = 0;
 						} else {
 							snprintf(live_cmd, sizeof(live_cmd), "%s", final_raw);
+							live_cmd_from_main = 1;
 						}
 					} else {
 						live_cmd[0] = '\0';
+						live_cmd_from_main = 0;
 					}
+				} else if (ran_final_main && !live_cmd_from_main) {
+					/* Final ctx_main pass rejected the utterance as empty/noise;
+					 * do not fall back to the smaller ctx_wake preview text.
+					 */
+					live_cmd[0] = '\0';
 				}
 				if (resumed_speaking) {
 					silence_frames = 0;
