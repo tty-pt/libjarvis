@@ -673,7 +673,7 @@ static void do_jarvis_stop(bool quiet)
 static void write_voice_state(const char *state)
 {
 	char path[256], tmp[272];
-	if (jarvis_plat_state_path("jarvis-voice-", ".state", path, sizeof(path)) != 0)
+	if (jarvis_plat_state_path("jarvis-voice", ".state", path, sizeof(path)) != 0)
 		return;
 	if (!state || !*state) {
 		remove(path);
@@ -694,7 +694,7 @@ static void write_voice_state(const char *state)
 static int do_jarvis_listen(bool as_json, bool quiet, const char *wm_override, const char *extra_mod)
 {
 	char pid_path[256];
-	jarvis_plat_state_path("jarvis-listen-", ".pid", pid_path, sizeof(pid_path));
+	jarvis_plat_state_path("jarvis-listen", ".pid", pid_path, sizeof(pid_path));
 
 	FILE *pfp = fopen(pid_path, "r");
 	if (pfp) {
@@ -730,7 +730,7 @@ static int do_jarvis_listen(bool as_json, bool quiet, const char *wm_override, c
 	char lang[32], wake[64], state_path[256], stream_cmd[512];
 	get_cli_default_lang(ont, lang, sizeof(lang));
 	get_cli_wake_word(ont, wake, sizeof(wake));
-	jarvis_plat_state_path("jarvis-voice-", ".state", state_path, sizeof(state_path));
+	jarvis_plat_state_path("jarvis-voice", ".state", state_path, sizeof(state_path));
 
 	int silence_ms = jarvis_rc_get_int("cmd_silence_ms", 750);
 	int wait_ms = jarvis_rc_get_int("listen_wait_ms", 6000);
@@ -741,7 +741,7 @@ static int do_jarvis_listen(bool as_json, bool quiet, const char *wm_override, c
 	notify_status_bar();
 
 	char chime_wav[256];
-	jarvis_plat_state_path("jarvis-chime-", ".wav", chime_wav, sizeof(chime_wav));
+	jarvis_plat_state_path("jarvis-chime", ".wav", chime_wav, sizeof(chime_wav));
 	if (!jarvis_plat_is_readable(chime_wav)) {
 		jarvis_voice_write_earcon_wav(chime_wav, false);
 	}
@@ -826,7 +826,7 @@ static void do_clear_learned(bool quiet)
 	const char *home = get_cli_home();
 	char p[512];
 
-	if (jarvis_plat_state_path("jarvis-", ".context.json", p, sizeof(p)) == 0)
+	if (jarvis_plat_state_path("jarvis", ".context.json", p, sizeof(p)) == 0)
 		remove(p);
 	if (home && *home) {
 		snprintf(p, sizeof(p), "%s/.cache/jarvis/session.json", home);

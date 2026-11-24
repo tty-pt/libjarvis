@@ -292,7 +292,7 @@ daemon_notify(const char *title, const char *body, int earcon)
 	notify_osd_async(title, body, 4000);
 	if (earcon) {
 		char done_wav[256];
-		if (jarvis_plat_state_path("jarvis-done-", ".wav", done_wav, sizeof(done_wav)) == 0)
+		if (jarvis_plat_state_path("jarvis-done", ".wav", done_wav, sizeof(done_wav)) == 0)
 			play_chime_async(done_wav);
 	}
 }
@@ -1233,7 +1233,7 @@ static int
 is_tts_file_active(void)
 {
 	char path[256];
-	if (jarvis_plat_state_path("jarvis-tts-active-", ".state", path, sizeof(path)) != 0)
+	if (jarvis_plat_state_path("jarvis-tts-active", ".state", path, sizeof(path)) != 0)
 		return 0;
 	return jarvis_plat_is_readable(path);
 }
@@ -1244,7 +1244,7 @@ is_tts_currently_speaking(char *out_text, size_t out_sz)
 	if (out_text && out_sz > 0)
 		out_text[0] = '\0';
 	char path[256];
-	FILE *fp = (jarvis_plat_state_path("jarvis-tts-active-", ".state", path, sizeof(path)) == 0)
+	FILE *fp = (jarvis_plat_state_path("jarvis-tts-active", ".state", path, sizeof(path)) == 0)
 	         ? fopen(path, "r") : NULL;
 	if (fp) {
 		char buf[2048] = {0};
@@ -1343,12 +1343,12 @@ jarvis_set_active(int active)
 {
 	char state_file[256], jpid_file[256], apid_file[256];
 	char legacy_state[256], legacy_jpid[256], legacy_apid[256];
-	jarvis_plat_state_path("jarvis-voice-", ".state", state_file, sizeof(state_file));
-	jarvis_plat_state_path("jarvis-", ".pid", jpid_file, sizeof(jpid_file));
-	jarvis_plat_state_path("jarvis-acting-", ".pid", apid_file, sizeof(apid_file));
-	jarvis_plat_state_path("dwm-voice-", ".state", legacy_state, sizeof(legacy_state));
-	jarvis_plat_state_path("dwm-jarvis-", ".pid", legacy_jpid, sizeof(legacy_jpid));
-	jarvis_plat_state_path("dwm-acting-", ".pid", legacy_apid, sizeof(legacy_apid));
+	jarvis_plat_state_path("jarvis-voice", ".state", state_file, sizeof(state_file));
+	jarvis_plat_state_path("jarvis", ".pid", jpid_file, sizeof(jpid_file));
+	jarvis_plat_state_path("jarvis-acting", ".pid", apid_file, sizeof(apid_file));
+	jarvis_plat_state_path("dwm-voice", ".state", legacy_state, sizeof(legacy_state));
+	jarvis_plat_state_path("dwm-jarvis", ".pid", legacy_jpid, sizeof(legacy_jpid));
+	jarvis_plat_state_path("dwm-acting", ".pid", legacy_apid, sizeof(legacy_apid));
 	if (active) {
 		g_jarvis_active = 1;
 		FILE *fp = fopen(jpid_file, "w");
@@ -1441,7 +1441,7 @@ poll_control_socket(stl_socket_t srv, stl_socket_t cli, int is_jarvis_idle)
 			char *nl = strpbrk(st, "\r\n");
 			if (nl) *nl = 0;
 			char sf[256];
-			jarvis_plat_state_path("jarvis-voice-", ".state", sf, sizeof(sf));
+			jarvis_plat_state_path("jarvis-voice", ".state", sf, sizeof(sf));
 			if (strcmp(st, "speaking") == 0) {
 				g_tts_speaking = 1;
 				update_idle_voice_state(sf);
@@ -2692,10 +2692,10 @@ static void
 init_daemon_runtime(void)
 {
 	char chime_wav[256], done_wav[256];
-	if (jarvis_plat_state_path("jarvis-chime-", ".wav", chime_wav, sizeof(chime_wav)) == 0 &&
+	if (jarvis_plat_state_path("jarvis-chime", ".wav", chime_wav, sizeof(chime_wav)) == 0 &&
 	    !jarvis_plat_is_readable(chime_wav))
 		jarvis_voice_write_earcon_wav(chime_wav, 0);
-	if (jarvis_plat_state_path("jarvis-done-", ".wav", done_wav, sizeof(done_wav)) == 0 &&
+	if (jarvis_plat_state_path("jarvis-done", ".wav", done_wav, sizeof(done_wav)) == 0 &&
 	    !jarvis_plat_is_readable(done_wav))
 		jarvis_voice_write_earcon_wav(done_wav, 1);
 
@@ -2830,10 +2830,10 @@ run_inprocess_jarvis_turn(stl_socket_t srv, struct whisper_context *ctx_wake, in
                           int *io_next_followup)
 {
 	char state_file[256], chime_wav[256], last_txt[256], acting_pid[256];
-	jarvis_plat_state_path("jarvis-voice-", ".state", state_file, sizeof(state_file));
-	jarvis_plat_state_path("jarvis-chime-", ".wav", chime_wav, sizeof(chime_wav));
-	jarvis_plat_state_path("jarvis-voice-", ".last.txt", last_txt, sizeof(last_txt));
-	jarvis_plat_state_path("jarvis-acting-", ".pid", acting_pid, sizeof(acting_pid));
+	jarvis_plat_state_path("jarvis-voice", ".state", state_file, sizeof(state_file));
+	jarvis_plat_state_path("jarvis-chime", ".wav", chime_wav, sizeof(chime_wav));
+	jarvis_plat_state_path("jarvis-voice", ".last.txt", last_txt, sizeof(last_txt));
+	jarvis_plat_state_path("jarvis-acting", ".pid", acting_pid, sizeof(acting_pid));
 
 	char lang[32], wm_surface[64];
 	int fcfg = 0, conv_followup_ms = 5000, cmd_silence_ms = 750;
@@ -3206,7 +3206,7 @@ serve_client_request(stl_socket_t srv, stl_socket_t cli, char *buf,
 		char *nl = strpbrk(st, "\r\n");
 		if (nl) *nl = '\0';
 		char sf[256];
-		jarvis_plat_state_path("jarvis-voice-", ".state", sf, sizeof(sf));
+		jarvis_plat_state_path("jarvis-voice", ".state", sf, sizeof(sf));
 		if (strcmp(st, "speaking") == 0) {
 			g_tts_speaking = 1;
 			update_idle_voice_state(sf);
