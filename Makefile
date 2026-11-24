@@ -174,9 +174,9 @@ ifeq ($(JARVISD_LIBS),)
 JARVISD_LIBS := -lstdc++ -lpthread -ldl -lm
 endif
 
-$(JARVISD_BIN): src/jarvisd.c src/jarvis-tts.c src/jarvis-tts.h $(WHISPER_A) lib/libjarvis.$(SO)
+$(JARVISD_BIN): src/jarvisd.c src/jarvis-dispatch.c src/jarvis-tts.c src/jarvis-tts.h $(WHISPER_A) lib/libjarvis.$(SO)
 	@mkdir -p bin
-	$(cc) -Iinclude -Isrc -I$(whispercpp)/../include -I$(whispercpp)/../ggml/include $(CFLAGS) -o $@ src/jarvisd.c src/jarvis-tts.c \
+	$(cc) -Iinclude -Isrc -I$(whispercpp)/../include -I$(whispercpp)/../ggml/include $(CFLAGS) -o $@ src/jarvisd.c src/jarvis-dispatch.c src/jarvis-tts.c \
 		$(WHISPER_A) $(GGML_STATIC_LIBS) \
 		-Llib -ljarvis -L../libstele/lib -lstele $(LDFLAGS) $(JARVISD_LIBS) $(or $(LDFLAGS-jarvis-${uname}),$(LDFLAGS-jarvis-${SYS}))
 
