@@ -1211,14 +1211,18 @@ contains_wake_word(const char *text, const char *wake_word)
 	return match_wake_anywhere(text, wake_word, NULL, 0) > 0;
 }
 
+#define TTS_DRAIN_COOLDOWN_MS 650L
+
 static char g_last_tts_cache[2048] = {0};
 static long g_last_tts_ms = 0;
+static long g_tts_last_active_ms = 0;
 
 static void
 clear_tts_speaking_cache(void)
 {
 	g_last_tts_cache[0] = '\0';
 	g_last_tts_ms = 0;
+	g_tts_last_active_ms = 0;
 }
 
 static void
@@ -1239,10 +1243,24 @@ is_tts_file_active(void)
 }
 
 static int
+is_tts_audio_hot(void)
+{
+	long now = now_ms();
+	if (g_tts_speaking || is_tts_file_active()) {
+		g_tts_last_active_ms = now;
+		return 1;
+	}
+	if (g_tts_last_active_ms > 0 && (now - g_tts_last_active_ms) < TTS_DRAIN_COOLDOWN_MS)
+		return 1;
+	return 0;
+}
+
+static int
 is_tts_currently_speaking(char *out_text, size_t out_sz)
 {
 	if (out_text && out_sz > 0)
 		out_text[0] = '\0';
+	long now = now_ms();
 	char path[256];
 	FILE *fp = (jarvis_plat_state_path("jarvis-tts-active", ".state", path, sizeof(path)) == 0)
 	         ? fopen(path, "r") : NULL;
@@ -1256,20 +1274,28 @@ is_tts_currently_speaking(char *out_text, size_t out_sz)
 				buf[i] = ' ';
 		}
 		trim_inplace(buf);
+		g_tts_last_active_ms = now;
 		if (buf[0]) {
 			snprintf(g_last_tts_cache, sizeof(g_last_tts_cache), "%s", buf);
-			g_last_tts_ms = now_ms();
+			g_last_tts_ms = now;
 		}
 		if (out_text && out_sz > 0)
 			snprintf(out_text, out_sz, "%.*s", (int)(out_sz - 1), buf);
 		return 1;
 	}
-	/* 2000ms post-TTS acoustic grace window so room reverb / audio drain tail
-	 * plus endpointing + Whisper decode latency after playback exits is still
-	 * recognized as TTS self-echo (cleared immediately on explicit barge-in).
+	if (g_tts_speaking) {
+		g_tts_last_active_ms = now;
+		if (out_text && out_sz > 0 && g_last_tts_cache[0])
+			snprintf(out_text, out_sz, "%.*s", (int)(out_sz - 1), g_last_tts_cache);
+		return 1;
+	}
+	/* Post-TTS acoustic drain cooldown so PipeWire playback buffer + room reverb
+	 * + capture pipe tail are still recognized as active TTS audio (in-utterance
+	 * overlap is latched by tts_was_active_in_utter across Whisper decode latency).
 	 */
-	if (g_last_tts_cache[0] != '\0' && (now_ms() - g_last_tts_ms) <= 2000L) {
-		if (out_text && out_sz > 0)
+	if ((g_last_tts_cache[0] != '\0' && (now - g_last_tts_ms) < TTS_DRAIN_COOLDOWN_MS) ||
+	    (g_tts_last_active_ms > 0 && (now - g_tts_last_active_ms) < TTS_DRAIN_COOLDOWN_MS)) {
+		if (out_text && out_sz > 0 && g_last_tts_cache[0])
 			snprintf(out_text, out_sz, "%.*s", (int)(out_sz - 1), g_last_tts_cache);
 		return 1;
 	}
@@ -1444,9 +1470,11 @@ poll_control_socket(stl_socket_t srv, stl_socket_t cli, int is_jarvis_idle)
 			jarvis_plat_state_path("jarvis-voice", ".state", sf, sizeof(sf));
 			if (strcmp(st, "speaking") == 0) {
 				g_tts_speaking = 1;
+				g_tts_last_active_ms = now_ms();
 				update_idle_voice_state(sf);
 			} else if (strcmp(st, "idle") == 0) {
 				g_tts_speaking = 0;
+				g_tts_last_active_ms = now_ms();
 				update_idle_voice_state(sf);
 			}
 			jarvis_plat_write_sock_all(cfd, "OK\n", 3);
@@ -1789,12 +1817,13 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 	(void)thresh_db;
 
 	int is_followup_window = (!operating_mode && followup_ms > 0) ? 1 : 0;
+	int followup_armed = (is_followup_window && !is_tts_audio_hot()) ? 1 : 0;
 	int steer_req_wake = operating_mode ? jarvis_rc_get_int("steer_require_wake", 0) : 1;
-	int wake_confirmed = is_followup_window;
-	int waiting_post_wake = is_followup_window;
-	int chime_played = is_followup_window;
+	int wake_confirmed = followup_armed;
+	int waiting_post_wake = followup_armed;
+	int chime_played = followup_armed;
 	int non_jarvis_utter = 0;
-	long post_wake_deadline_ms = is_followup_window ? (now_ms() + (long)followup_ms) : 0;
+	long post_wake_deadline_ms = followup_armed ? (now_ms() + (long)followup_ms) : 0;
 	/* Ignore first 12 frames (240ms) on follow-up entry so completion chime
 	 * (/tmp/dwm-voice-done-*.wav, ~80ms + room reverb) and TTS tail never trigger
 	 * false follow-up recording!
@@ -1807,7 +1836,7 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 	 * (which caused trailing words of the previous utterance or TTS startup to be
 	 * re-ingested). Start scanning 8 frames (160ms) forward.
 	 */
-	if (is_followup_window) {
+	if (followup_armed) {
 		chime_ignore_until_f = scan_f + 8;
 		wake_end_f = chime_ignore_until_f;
 		cmd_start_f = chime_ignore_until_f;
@@ -1821,9 +1850,12 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 	int tts_was_active_in_utter = is_tts_currently_speaking(NULL, 0) ? 1 : 0;
 	char live_cmd[4096] = {0};
 
-	if (is_followup_window) {
+	if (followup_armed) {
 		g_in_followup = 1;
 		write_state_file(state_file, "jarvis-cmd", NULL, NULL);
+	} else if (is_followup_window) {
+		g_in_followup = 0;
+		update_idle_voice_state(state_file);
 	}
 
 	int eff_silence_ms = operating_mode ? jarvis_rc_get_int("steer_silence_ms", 620) : cmd_silence_ms;
@@ -1852,7 +1884,7 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 			pthread_mutex_lock(&g_op_turn.mtx);
 			int op_active = g_op_turn.active;
 			pthread_mutex_unlock(&g_op_turn.mtx);
-			if (!op_active && !wake_confirmed && !in_speech) {
+			if (!op_active && !wake_confirmed && (!in_speech || tts_was_active_in_utter)) {
 				decode_reset_session();
 				audio_release(WARM_HOLD_MS);
 				free(wake_pcm);
@@ -1865,6 +1897,51 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 			break;
 
 		wait_next_audio_frame(scan_f + 1, 20);
+
+		/* Never run wake-word-free follow-up VAD while Jarvis's own TTS is playing
+		 * or draining through PipeWire/room reverb. Arm the follow-up window cleanly
+		 * once TTS finishes + TTS_DRAIN_COOLDOWN_MS, fast-forwarding past all TTS frames.
+		 */
+		if (is_followup_window) {
+			int tts_hot = is_tts_audio_hot();
+			if (!followup_armed && !wake_confirmed && !tts_hot) {
+				followup_armed = 1;
+				wake_confirmed = 1;
+				waiting_post_wake = 1;
+				chime_played = 1;
+				in_speech = 0;
+				consec_voiced = 0;
+				voiced_frames = 0;
+				silence_frames = 0;
+				trailing_soft_frames = 0;
+				decoded_wake_voiced_f = -1;
+				decoded_wake_paused = 0;
+				decoded_cmd_voiced_f = -1;
+				decoded_cmd_end_f = -1;
+				decoded_cmd_is_final = 0;
+				live_cmd[0] = '\0';
+				live_cmd_from_main = 0;
+				tts_was_active_in_utter = 0;
+				pthread_mutex_lock(&g_audio.mtx);
+				g_audio.in_speech_hint = 0;
+				chime_ignore_until_f = g_audio.total_frames;
+				wake_end_f = chime_ignore_until_f;
+				cmd_start_f = chime_ignore_until_f;
+				scan_f = chime_ignore_until_f;
+				pthread_mutex_unlock(&g_audio.mtx);
+				post_wake_deadline_ms = now_ms() + (long)followup_ms;
+				g_in_followup = 1;
+				write_state_file(state_file, "jarvis-cmd", NULL, NULL);
+			} else if (followup_armed && waiting_post_wake && tts_hot) {
+				followup_armed = 0;
+				wake_confirmed = 0;
+				waiting_post_wake = 0;
+				chime_played = 0;
+				consec_voiced = 0;
+				g_in_followup = 0;
+				update_idle_voice_state(state_file);
+			}
+		}
 
 		if (in_speech && is_tts_currently_speaking(NULL, 0))
 			tts_was_active_in_utter = 1;
@@ -1902,7 +1979,7 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 						if (tts_on)
 							interrupt_tts_and_clear_cache();
 					} else if (wm == 0) {
-						if (tts_on || (tts_was_active_in_utter && active_tts[0])) {
+						if (tts_on || tts_was_active_in_utter) {
 							if (operating_mode && (is_bargein_stop_phrase(raw_res) || is_op_abort_phrase(raw_res))) {
 								interrupt_tts_and_clear_cache();
 								candidate = raw_res;
@@ -1910,14 +1987,10 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 								interrupt_tts_and_clear_cache();
 								tts_was_active_in_utter = 0;
 								live_cmd[0] = '\0';
-							} else if (!is_tts_self_echo(raw_res, active_tts)) {
-								if (tts_on)
-									interrupt_tts_and_clear_cache();
-								candidate = raw_res;
 							}
-							/* While TTS is speaking (or overlapped this utterance), suppress
-							 * acoustic self-echo, while allowing explicit stop phrases or any
-							 * verified non-self-echo follow-up / barge-in / steering speech.
+							/* Never accept wake-word-free speech overlapping TTS:
+							 * AEC-distorted speaker bleed transcribes as garbled
+							 * words that defeat text-overlap echo checks.
 							 */
 						} else {
 							candidate = raw_res;
@@ -2091,6 +2164,7 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 			if (now_ms() >= post_wake_deadline_ms) {
 				if (is_followup_window) {
 					is_followup_window = 0;
+					followup_armed = 0;
 					g_in_followup = 0;
 					wake_confirmed = 0;
 					waiting_post_wake = 0;
@@ -2139,13 +2213,18 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 			 */
 			char active_tts_now[2048] = {0};
 			int tts_speaking_now = is_tts_currently_speaking(active_tts_now, sizeof(active_tts_now));
+			if (!tts_speaking_now && tts_was_active_in_utter) {
+				tts_speaking_now = 1;
+				if (g_last_tts_cache[0])
+					snprintf(active_tts_now, sizeof(active_tts_now), "%s", g_last_tts_cache);
+			}
 			int cont_step_f = tts_speaking_now ? 14 : 16;
 			int pause_wake_check = (((silence_frames >= 8 && voiced_frames >= 10) ||
 			                         (silence_frames >= 12 && voiced_frames >= 5)) &&
 			                        !decoded_wake_paused &&
 			                        (!tts_speaking_now || peak_speech_db >= utter_start_db + 8.0));
 			int cont_wake_check  = (voiced_frames >= cont_step_f && silence_frames < 8 &&
-			                        (!tts_speaking_now || peak_speech_db >= utter_start_db + 1.5) &&
+			                        (!tts_speaking_now || peak_speech_db >= utter_start_db + 5.0) &&
 			                        (decoded_wake_voiced_f < 0 ||
 			                         (last_voiced_f - decoded_wake_voiced_f) >= cont_step_f));
 
@@ -2183,6 +2262,10 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 						wmatch = match_wake_anywhere(heard, wake_word,
 						                             inline_cmd, sizeof(inline_cmd));
 					}
+					if (tts_speaking_now && wmatch >= 1 && is_tts_self_echo(heard, active_tts_now)) {
+						wmatch = 0;
+						inline_cmd[0] = '\0';
+					}
 
 					/* Check if the user kept speaking into the ring buffer while
 					 * Whisper was decoding the wake slice! If so, never chop off
@@ -2206,6 +2289,8 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 					if (wmatch == 1 && !cont_wake_check && !spoke_during_decode) {
 						/* User spoke ONLY wake word and genuinely paused: interrupt any TTS, warmup TTS engine, play chime, duck speaker, and wait for command */
 						interrupt_tts_and_clear_cache();
+						is_followup_window = 0;
+						followup_armed = 0;
 						tts_was_active_in_utter = 0;
 						jarvis_tts_speak_clause("warmup", "", 0);
 						wake_confirmed = 1;
@@ -2236,6 +2321,8 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 						 * Interrupt any active TTS immediately ("barge-in") and pre-warm TTS!
 						 */
 						interrupt_tts_and_clear_cache();
+						is_followup_window = 0;
+						followup_armed = 0;
 						jarvis_tts_speak_clause("warmup", "", 0);
 						duck_speaker_for_command();
 						wake_confirmed = 1;
@@ -2280,6 +2367,12 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 						continue;
 					} else if (tts_speaking_now && is_bargein_stop_phrase(heard)) {
 						interrupt_tts_and_clear_cache();
+						if (is_followup_window) {
+							is_followup_window = 0;
+							followup_armed = 0;
+							g_in_followup = 0;
+							update_idle_voice_state(state_file);
+						}
 						in_speech = 0;
 						consec_voiced = 0;
 						voiced_frames = 0;
@@ -2325,9 +2418,13 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 						                           &g_audio.ambient_std_db);
 						pthread_mutex_unlock(&g_audio.mtx);
 						continue;
-					} else if (operating_mode && !steer_req_wake && voiced_frames >= 10 &&
+					} else if (operating_mode && !steer_req_wake &&
+					           !tts_speaking_now && !tts_was_active_in_utter &&
+					           voiced_frames >= 10 &&
 					           !is_bargein_stop_phrase(heard) && !is_op_abort_phrase(heard)) {
-						/* Wake-word-free steering mode (steer_require_wake=0): promote non-echo speech directly */
+						/* Wake-word-free steering mode (steer_require_wake=0): promote non-echo speech directly
+						 * only when TTS is silent (during TTS, distorted speaker bleed must not steer ren).
+						 */
 						interrupt_tts_and_clear_cache();
 						duck_speaker_for_command();
 						wake_confirmed = 1;
@@ -2545,7 +2642,7 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 						notify_osd_async(ltitle, lbody, 4500);
 						continue;
 					} else if (wm == 0) {
-						if (tts_on || (tts_was_active_in_utter && active_tts[0])) {
+						if (tts_on || tts_was_active_in_utter) {
 							if (operating_mode && (is_bargein_stop_phrase(final_raw) || is_op_abort_phrase(final_raw))) {
 								if (tts_on)
 									interrupt_tts_and_clear_cache();
@@ -2556,11 +2653,6 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 								tts_was_active_in_utter = 0;
 								live_cmd[0] = '\0';
 								live_cmd_from_main = 0;
-							} else if ((is_followup_window || operating_mode) && !is_tts_self_echo(final_raw, active_tts)) {
-								if (tts_on)
-									interrupt_tts_and_clear_cache();
-								snprintf(live_cmd, sizeof(live_cmd), "%s", final_raw);
-								live_cmd_from_main = 1;
 							} else {
 								live_cmd[0] = '\0';
 								live_cmd_from_main = 0;
@@ -2863,7 +2955,7 @@ run_inprocess_jarvis_turn(stl_socket_t srv, struct whisper_context *ctx_wake, in
 		next_followup = is_speaker_playing_c() ? 0 : 3600000;
 	}
 
-	g_in_followup = (next_followup > 0) ? 1 : 0;
+	g_in_followup = (next_followup > 0 && !is_tts_audio_hot()) ? 1 : 0;
 	update_idle_voice_state(state_file);
 
 	char wake_buf[64];
@@ -3039,7 +3131,7 @@ run_inprocess_jarvis_turn(stl_socket_t srv, struct whisper_context *ctx_wake, in
 				if ((act_rc == 0 || act_rc == -1) && !started_media && !conv_exited && !is_speaker_playing_c())
 					*io_next_followup = eff_followup;
 			}
-			g_in_followup = (*io_next_followup > 0) ? 1 : 0;
+			g_in_followup = (*io_next_followup > 0 && !is_tts_audio_hot()) ? 1 : 0;
 			update_idle_voice_state(state_file);
 			break;
 		}
@@ -3227,9 +3319,11 @@ serve_client_request(stl_socket_t srv, stl_socket_t cli, char *buf,
 		jarvis_plat_state_path("jarvis-voice", ".state", sf, sizeof(sf));
 		if (strcmp(st, "speaking") == 0) {
 			g_tts_speaking = 1;
+			g_tts_last_active_ms = now_ms();
 			update_idle_voice_state(sf);
 		} else if (strcmp(st, "idle") == 0) {
 			g_tts_speaking = 0;
+			g_tts_last_active_ms = now_ms();
 			update_idle_voice_state(sf);
 		}
 		jarvis_plat_write_sock_all(cli, "OK\n", 3);
