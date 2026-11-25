@@ -512,10 +512,15 @@ static void resolve_local_voice(const char *def_lang, char *out_voice, size_t ou
 	snprintf(out_voice, out_sz, "bm_daniel");
 }
 
-static void get_tts_voice(char *out, size_t out_sz)
+static void get_tts_voice_for_lang(const char *lang_hint, char *out, size_t out_sz)
 {
-	char def_lang[32];
-	resolve_default_lang(def_lang, sizeof(def_lang));
+	char def_lang[32] = {0};
+	if (lang_hint && normalize_lang_tts(lang_hint, def_lang, sizeof(def_lang)) &&
+	    strcmp(def_lang, "auto") != 0 && strcmp(def_lang, "kbd") != 0) {
+		/* Use caller-supplied effective language */
+	} else {
+		resolve_default_lang(def_lang, sizeof(def_lang));
+	}
 
 	const char *req = getenv("JARVIS_VOICE");
 	char rc_v[64] = {0};
@@ -531,25 +536,61 @@ static void get_tts_voice(char *out, size_t out_sz)
 		return;
 	}
 
-	if (strcmp(def_lang, "pt-br") == 0) {
-		snprintf(out, out_sz, "edge:pt-BR-FranciscaNeural");
-	} else if (strncmp(def_lang, "pt", 2) == 0) {
-		snprintf(out, out_sz, "edge:pt-PT-RaquelNeural");
-	} else if (strcmp(def_lang, "en-us") == 0) {
-		snprintf(out, out_sz, "edge:en-US-AndrewNeural");
-	} else if (strncmp(def_lang, "en", 2) == 0) {
-		snprintf(out, out_sz, "edge:en-GB-RyanNeural");
-	} else if (strncmp(def_lang, "es", 2) == 0) {
-		snprintf(out, out_sz, "edge:es-ES-AlvaroNeural");
-	} else if (strncmp(def_lang, "fr", 2) == 0) {
-		snprintf(out, out_sz, "edge:fr-FR-HenriNeural");
-	} else if (strncmp(def_lang, "de", 2) == 0) {
-		snprintf(out, out_sz, "edge:de-DE-ConradNeural");
-	} else if (strncmp(def_lang, "it", 2) == 0) {
-		snprintf(out, out_sz, "edge:it-IT-DiegoNeural");
-	} else {
-		snprintf(out, out_sz, "edge:en-GB-RyanNeural");
+	static const struct { const char *prefix; const char *voice; } voice_map[] = {
+		{ "pt-br", "edge:pt-BR-FranciscaNeural" },
+		{ "pt",    "edge:pt-PT-RaquelNeural"    },
+		{ "en-us", "edge:en-US-AndrewNeural"    },
+		{ "en",    "edge:en-GB-RyanNeural"      },
+		{ "es",    "edge:es-ES-AlvaroNeural"    },
+		{ "fr",    "edge:fr-FR-HenriNeural"     },
+		{ "de",    "edge:de-DE-ConradNeural"    },
+		{ "it",    "edge:it-IT-DiegoNeural"     },
+		{ "nl",    "edge:nl-NL-MaartenNeural"   },
+		{ "pl",    "edge:pl-PL-MarekNeural"     },
+		{ "ru",    "edge:ru-RU-DmitryNeural"    },
+		{ "uk",    "edge:uk-UA-OstapNeural"     },
+		{ "ja",    "edge:ja-JP-KeitaNeural"     },
+		{ "zh",    "edge:zh-CN-YunxiNeural"     },
+		{ "ko",    "edge:ko-KR-InJoonNeural"    },
+		{ "ar",    "edge:ar-SA-HamedNeural"     },
+		{ "hi",    "edge:hi-IN-MadhurNeural"    },
+		{ "tr",    "edge:tr-TR-AhmetNeural"     },
+		{ "sv",    "edge:sv-SE-MattiasNeural"   },
+		{ "no",    "edge:nb-NO-FinnNeural"      },
+		{ "nb",    "edge:nb-NO-FinnNeural"      },
+		{ "da",    "edge:da-DK-JeppeNeural"     },
+		{ "fi",    "edge:fi-FI-HarriNeural"     },
+		{ "cs",    "edge:cs-CZ-AntoninNeural"   },
+		{ "el",    "edge:el-GR-NestorasNeural"  },
+		{ "ro",    "edge:ro-RO-EmilNeural"      },
+		{ "hu",    "edge:hu-HU-TamasNeural"     },
+		{ "he",    "edge:he-IL-AvriNeural"      },
+		{ "vi",    "edge:vi-VN-NamMinhNeural"   },
+		{ "th",    "edge:th-TH-NiwatNeural"     },
+		{ "id",    "edge:id-ID-ArdiNeural"      },
+		{ "ca",    "edge:ca-ES-EnricNeural"     },
+		{ "gl",    "edge:gl-ES-RoiNeural"       },
+		{ NULL,    NULL }
+	};
+	for (size_t i = 0; voice_map[i].prefix; i++) {
+		size_t plen = strlen(voice_map[i].prefix);
+		if (strncmp(def_lang, voice_map[i].prefix, plen) == 0 &&
+		    (def_lang[plen] == '\0' || def_lang[plen] == '-')) {
+			snprintf(out, out_sz, "%s", voice_map[i].voice);
+			return;
+		}
 	}
+	snprintf(out, out_sz, "edge:en-GB-RyanNeural");
+}
+
+static void get_tts_voice(char *out, size_t out_sz)
+{
+	get_tts_voice_for_lang(NULL, out, out_sz);
+}
+
+bool jarvis_tts_is_enabled(void)
+{
+	return is_tts_enabled();
 }
 
 void jarvis_tts_resolve_voice(char *out, size_t out_sz)
@@ -1242,9 +1283,10 @@ static void tts_onnx_unload_unlocked(void)
 static bool reap_draining_player_locked(bool block);
 static void close_persistent_player_locked(bool wait_for_drain);
 
-static void tts_engine_unload(void)
+static void tts_engine_unload(bool clear_cache)
 {
-	tts_cache_clear_locked();
+	if (clear_cache)
+		tts_cache_clear_locked();
 	close_persistent_player_locked(true);
 	reap_draining_player_locked(true);
 	close_edge_worker_locked(false);
@@ -2180,7 +2222,7 @@ static void *tts_worker_fn(void *arg)
 
 			/* If TTS was disabled, unload immediately without waiting */
 			if (!is_tts_enabled()) {
-				tts_engine_unload();
+				tts_engine_unload(true);
 				g_tts.worker_running = false;
 				pthread_mutex_unlock(&g_tts.mtx);
 				return NULL;
@@ -2191,8 +2233,8 @@ static void *tts_worker_fn(void *arg)
 			ts.tv_sec += IDLE_UNLOAD_SECONDS;
 			int rc = pthread_cond_timedwait(&g_tts.cond, &g_tts.mtx, &ts);
 			if (rc == ETIMEDOUT && g_tts.q_count == 0) {
-				/* Idle timeout: unload ONNX + Espeak + Voice style table -> 0 KB RAM */
-				tts_engine_unload();
+				/* Idle timeout: unload ONNX + Espeak + Voice style table (preserve tiny short-phrase PCM cache) */
+				tts_engine_unload(false);
 				g_tts.worker_running = false;
 				pthread_mutex_unlock(&g_tts.mtx);
 				return NULL;
@@ -2230,6 +2272,19 @@ static void *tts_worker_fn(void *arg)
 				pthread_mutex_lock(&g_tts.mtx);
 				continue;
 			}
+			/* Silent PCM pre-cache packet ("__PRECACHE__:<text>"): synthesize into LRU cache
+			 * without emitting audio or marking busy_speaking (instant zero-latency wake ack).
+			 */
+			if (strncmp(seg.text, "__PRECACHE__:", 13) == 0) {
+				const char *ptext = seg.text + 13;
+				pthread_mutex_unlock(&g_tts.mtx);
+				size_t p_samp = 0;
+				int p_rate = KOKORO_SAMPLE_RATE;
+				int16_t *pre = synthesize_segment_pcm(ptext, seg.voice, &p_samp, &p_rate, my_gen);
+				free(pre);
+				pthread_mutex_lock(&g_tts.mtx);
+				continue;
+			}
 
 			g_tts.busy_speaking = true;
 			pthread_mutex_unlock(&g_tts.mtx);
@@ -2244,12 +2299,12 @@ static void *tts_worker_fn(void *arg)
 			pthread_mutex_unlock(&g_tts.mtx);
 
 			if (!cancelled && play) {
-				notify_tts_state("speaking");
 				if (!mic_muted) {
 					set_mic_mute(true);
 					mic_muted = true;
 				}
 				size_t off_samp = 0;
+				bool notified_speaking = false;
 				while (off_samp < n_samples) {
 					pthread_mutex_lock(&g_tts.mtx);
 					bool now_canc = (g_tts.cancel_gen != my_gen || g_tts.player != play);
@@ -2260,6 +2315,10 @@ static void *tts_worker_fn(void *arg)
 					if (chunk_samp > 16384) chunk_samp = 16384;
 					if (jarvis_audio_play_write(play, pcm + off_samp, chunk_samp) != 0) break;
 					off_samp += chunk_samp;
+					if (!notified_speaking) {
+						notify_tts_state("speaking");
+						notified_speaking = true;
+					}
 				}
 
 				/* Immediately synthesize the next queued segment while PipeWire
@@ -2275,7 +2334,8 @@ static void *tts_worker_fn(void *arg)
 				}
 				pthread_mutex_unlock(&g_tts.mtx);
 
-				if (has_next && strcmp(next_seg.text, "__WARMUP__") != 0) {
+				if (has_next && strcmp(next_seg.text, "__WARMUP__") != 0 &&
+				    strncmp(next_seg.text, "__PRECACHE__:", 13) != 0) {
 					prefetched_pcm = synthesize_segment_pcm(next_seg.text, next_seg.voice,
 					                                        &prefetched_samples, &prefetched_rate, my_gen);
 					prefetched_gen = my_gen;
@@ -2296,7 +2356,7 @@ static void enqueue_segment_locked(const char *text, const char *voice)
 	snprintf(slot->voice, sizeof(slot->voice), "%s", voice);
 	g_tts.q_tail = (g_tts.q_tail + 1) % MAX_TTS_QUEUE;
 	g_tts.q_count++;
-	if (strcmp(text, "__WARMUP__") != 0) {
+	if (strcmp(text, "__WARMUP__") != 0 && strncmp(text, "__PRECACHE__:", 13) != 0) {
 		g_tts.busy_speaking = true;
 	}
 
@@ -2488,7 +2548,34 @@ jarvis_tts_interrupt(int dummy)
 }
 
 int
-jarvis_tts_speak_clause(const char *session_id, const char *clause_text, int is_final)
+jarvis_tts_precache_clause(const char *clause_text, const char *lang_hint)
+{
+	if (!is_tts_enabled() || !clause_text || !*clause_text)
+		return 0;
+
+	char voice[64];
+	get_tts_voice_for_lang(lang_hint, voice, sizeof(voice));
+
+	char clean[1024];
+	clean_speech_text(clause_text, clean, sizeof(clean));
+	if (!clean[0] || strlen(clean) >= TTS_CACHE_MAX_TEXT)
+		return 0;
+
+	char pkt[512];
+	int n = snprintf(pkt, sizeof(pkt), "__PRECACHE__:%s", clean);
+	if (n <= 0 || (size_t)n >= sizeof(pkt))
+		return 0;
+
+	pthread_mutex_lock(&g_tts.mtx);
+	if (g_tts.q_count == 0 && !g_tts.busy_speaking) {
+		enqueue_segment_locked(pkt, voice);
+	}
+	pthread_mutex_unlock(&g_tts.mtx);
+	return 0;
+}
+
+int
+jarvis_tts_speak_clause_lang(const char *session_id, const char *clause_text, const char *lang_hint, int is_final)
 {
 	if (!is_tts_enabled()) {
 		/* Ensure any loaded TTS resources are released if user disabled TTS */
@@ -2497,7 +2584,7 @@ jarvis_tts_speak_clause(const char *session_id, const char *clause_text, int is_
 	}
 
 	char voice[64];
-	get_tts_voice(voice, sizeof(voice));
+	get_tts_voice_for_lang(lang_hint, voice, sizeof(voice));
 
 	/* Speculative warmup on wake-word confirmation: pre-warm ONNX & eSpeak in the
 	 * background worker thread before the user even finishes speaking their command!
@@ -2539,4 +2626,10 @@ jarvis_tts_speak_clause(const char *session_id, const char *clause_text, int is_
 	}
 	pthread_mutex_unlock(&g_tts.mtx);
 	return 0;
+}
+
+int
+jarvis_tts_speak_clause(const char *session_id, const char *clause_text, int is_final)
+{
+	return jarvis_tts_speak_clause_lang(session_id, clause_text, NULL, is_final);
 }

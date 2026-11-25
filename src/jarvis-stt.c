@@ -28,7 +28,7 @@ jarvis_decode_worker_t g_dec = {
 	.n_threads         = 4,
 	.pcm               = NULL,
 	.n_samples         = 0,
-	.prompt            = NULL,
+	.prompt            = {0},
 	.job_end_f         = 0,
 	.has_job           = 0,
 	.busy              = 0,
@@ -111,20 +111,69 @@ jarvis_stt_load_wav_f32(const char *path, float **out_pcm, int *out_samples)
 }
 
 int
-jarvis_stt_compute_audio_ctx(int n_samples, int is_wake, int is_partial)
+jarvis_stt_compute_audio_ctx_ex(int n_samples, int is_wake, int is_partial, int final_min_ctx)
 {
+	if (!is_wake && !is_partial && final_min_ctx == 0)
+		return 0; /* Full native Whisper encoder window (1500 frames) */
+
 	int frames = (n_samples / 320) + (is_wake ? 24 : (is_partial ? 24 : 32));
 	int aligned = ((frames + 31) / 32) * 32;
-	int min_ctx = is_wake ? 128 : (is_partial ? 192 : 256);
+	int min_ctx;
+	if (is_wake) {
+		min_ctx = 128;
+	} else if (is_partial) {
+		min_ctx = 256;
+	} else {
+		min_ctx = (final_min_ctx > 0) ? final_min_ctx : 512;
+		if (min_ctx > 1500)
+			min_ctx = 1500;
+	}
 	if (aligned < min_ctx)
 		aligned = min_ctx;
-	if (aligned > 1500)
-		aligned = 1500;
+	if (aligned >= 1500)
+		return (!is_wake && !is_partial) ? 0 : 1500;
 	return aligned;
 }
 
+int
+jarvis_stt_compute_audio_ctx(int n_samples, int is_wake, int is_partial)
+{
+	return jarvis_stt_compute_audio_ctx_ex(n_samples, is_wake, is_partial, 512);
+}
+
+void
+jarvis_stt_apply_hpf_inplace(float *pcm, int n_samples)
+{
+	if (!pcm || n_samples <= 0)
+		return;
+	const float alpha = 0.9695f; /* ~80 Hz 1st-order DC/rumble blocker @ 16 kHz */
+	float prev_x = pcm[0];
+	float prev_y = 0.0f;
+	for (int i = 0; i < n_samples; i++) {
+		float x = pcm[i];
+		float y = alpha * (prev_y + x - prev_x);
+		prev_x = x;
+		prev_y = y;
+		pcm[i] = y;
+	}
+}
+
+/* C1-continuous soft-knee limiter above 0.85f asymptotically bounded at +-0.98f. */
+static inline float
+stt_soft_limit(float v)
+{
+	const float knee = 0.85f;
+	const float ceiling = 0.98f;
+	const float range = ceiling - knee;
+	float av = fabsf(v);
+	if (av <= knee)
+		return v;
+	float limited = knee + range * tanhf((av - knee) / range);
+	return (v < 0.0f) ? -limited : limited;
+}
+
 float *
-jarvis_stt_apply_preemphasis_and_agc(const float *pcm, int n_samples)
+jarvis_stt_normalize_pcm(const float *pcm, int n_samples, int apply_hpf)
 {
 	if (!pcm || n_samples <= 0)
 		return NULL;
@@ -132,27 +181,40 @@ jarvis_stt_apply_preemphasis_and_agc(const float *pcm, int n_samples)
 	if (!buf)
 		return NULL;
 
-	const float alpha = 0.9695f;
-	float prev_x = pcm[0];
-	float prev_y = 0.0f;
 	float peak = 0.0f;
 	double sum_sq = 0.0;
 
-	for (int i = 0; i < n_samples; i++) {
-		float x = pcm[i];
-		float y = alpha * (prev_y + x - prev_x);
-		prev_x = x;
-		prev_y = y;
-		buf[i] = y;
-		float ay = fabsf(y);
-		if (ay > peak)
-			peak = ay;
-		sum_sq += (double)y * (double)y;
+	if (apply_hpf) {
+		const float alpha = 0.9695f;
+		float prev_x = pcm[0];
+		float prev_y = 0.0f;
+		for (int i = 0; i < n_samples; i++) {
+			float x = pcm[i];
+			float y = alpha * (prev_y + x - prev_x);
+			prev_x = x;
+			prev_y = y;
+			buf[i] = y;
+			float ay = fabsf(y);
+			if (ay > peak)
+				peak = ay;
+			sum_sq += (double)y * (double)y;
+		}
+	} else {
+		for (int i = 0; i < n_samples; i++) {
+			float y = pcm[i];
+			buf[i] = y;
+			float ay = fabsf(y);
+			if (ay > peak)
+				peak = ay;
+			sum_sq += (double)y * (double)y;
+		}
 	}
 
 	double total_rms = sqrt(sum_sq / (double)n_samples);
-	/* Compute per-20ms-frame RMS envelope for self-referenced downward expansion
-	 * and active speech RMS measurement (works identically on any mic/gain).
+
+	/* O(N) per-20ms-frame RMS stats + 128-bin log-dB histogram (-80..0 dBFS,
+	 * 0.625 dB/bin, zero heap allocations) for quiet-floor estimation and
+	 * active-speech RMS. Never downward-expands quiet speech onsets.
 	 */
 	const int flen = 320;
 	int n_frames = n_samples / flen;
@@ -162,7 +224,7 @@ jarvis_stt_apply_preemphasis_and_agc(const float *pcm, int n_samples)
 	if (frame_thresh < 0.008f)
 		frame_thresh = 0.008f;
 
-	float *f_rms_arr = (n_frames >= 4) ? malloc((size_t)n_frames * sizeof(float)) : NULL;
+	int hist[128] = {0};
 	float peak_frame_rms = 0.0f;
 
 	for (int f = 0; f < n_frames; f++) {
@@ -173,70 +235,35 @@ jarvis_stt_apply_preemphasis_and_agc(const float *pcm, int n_samples)
 			f_sq += (double)v * (double)v;
 		}
 		float f_rms = (float)sqrt(f_sq / (double)flen);
-		if (f_rms_arr)
-			f_rms_arr[f] = f_rms;
 		if (f_rms > peak_frame_rms)
 			peak_frame_rms = f_rms;
 		if (f_rms >= frame_thresh) {
 			active_sq += f_sq;
 			active_n += flen;
 		}
+		float db = 20.0f * log10f(f_rms + 1e-7f);
+		int bin = (int)((db + 80.0f) * 1.6f);
+		if (bin < 0) bin = 0;
+		if (bin > 127) bin = 127;
+		hist[bin]++;
 	}
 
-	/* Estimate quiet-frame floor (20th percentile of 20ms frame RMS) */
+	/* 20th-percentile quiet-frame floor in O(1) (128 histogram bins) */
 	float floor_frame_rms = 0.0f;
-	if (f_rms_arr && n_frames >= 4) {
-		float *sorted = malloc((size_t)n_frames * sizeof(float));
-		if (sorted) {
-			memcpy(sorted, f_rms_arr, (size_t)n_frames * sizeof(float));
-			for (int i = 1; i < n_frames; i++) {
-				float key = sorted[i];
-				int j = i - 1;
-				while (j >= 0 && sorted[j] > key) {
-					sorted[j + 1] = sorted[j];
-					j--;
-				}
-				sorted[j + 1] = key;
+	if (n_frames >= 4) {
+		int target = (n_frames * 20) / 100;
+		int acc = 0;
+		int b20 = 0;
+		for (int b = 0; b < 128; b++) {
+			acc += hist[b];
+			if (acc > target) {
+				b20 = b;
+				break;
 			}
-			floor_frame_rms = sorted[(n_frames * 20) / 100];
-			free(sorted);
 		}
+		float db20 = ((float)b20 / 1.6f) - 80.0f;
+		floor_frame_rms = powf(10.0f, db20 / 20.0f);
 	}
-
-	/* Soft downward expander (relative to utterance peak):
-	 * When near-field speech stands out clearly over inter-word background
-	 * (peak_frame_rms >= 2.2x floor_frame_rms), smoothly attenuate quiet
-	 * inter-word frames (>14 dB below speech peak) so background talkers
-	 * between the user's words are not boosted into Whisper.
-	 */
-	if (f_rms_arr && n_frames >= 6 && peak_frame_rms > 0.012f &&
-	    peak_frame_rms > floor_frame_rms * 2.2f) {
-		float knee_rms = peak_frame_rms * 0.20f; /* -14 dB below speech peak */
-		float prev_g = 1.0f;
-		for (int f = 0; f < n_frames; f++) {
-			/* 1-frame lookahead prevents clipping plosive/consonant onsets */
-			float env = f_rms_arr[f];
-			if (f + 1 < n_frames && f_rms_arr[f + 1] > env)
-				env = f_rms_arr[f + 1];
-			float target_g = 1.0f;
-			if (env < knee_rms && knee_rms > 1e-6f) {
-				float r = env / knee_rms;
-				target_g = 0.15f + 0.85f * r * sqrtf(r);
-			}
-			/* Fast attack (open immediately), smooth release (~55ms) */
-			float cur_g = (target_g > prev_g)
-			            ? (0.25f * prev_g + 0.75f * target_g)
-			            : (0.65f * prev_g + 0.35f * target_g);
-			int base = f * flen;
-			float step = (cur_g - prev_g) / (float)flen;
-			for (int k = 0; k < flen; k++)
-				buf[base + k] *= (prev_g + step * (float)k);
-			prev_g = cur_g;
-		}
-		for (int i = n_frames * flen; i < n_samples; i++)
-			buf[i] *= prev_g;
-	}
-	free(f_rms_arr);
 
 	double rms = (active_n >= 1600) ? sqrt(active_sq / (double)active_n) : total_rms;
 
@@ -258,16 +285,167 @@ jarvis_stt_apply_preemphasis_and_agc(const float *pcm, int n_samples)
 			gain = max_gain;
 		if (gain < 0.85f)
 			gain = 0.85f;
-		if (fabsf(gain - 1.0f) > 0.05f) {
-			for (int i = 0; i < n_samples; i++) {
-				float v = buf[i] * gain;
-				if (v > 0.98f)
-					v = 0.98f;
-				else if (v < -0.98f)
-					v = -0.98f;
-				buf[i] = v;
+		if (fabsf(gain - 1.0f) > 0.05f || peak > 0.85f) {
+			for (int i = 0; i < n_samples; i++)
+				buf[i] = stt_soft_limit(buf[i] * gain);
+		}
+	} else if (peak > 0.85f) {
+		for (int i = 0; i < n_samples; i++)
+			buf[i] = stt_soft_limit(buf[i]);
+	}
+	return buf;
+}
+
+float *
+jarvis_stt_apply_preemphasis_and_agc(const float *pcm, int n_samples)
+{
+	return jarvis_stt_normalize_pcm(pcm, n_samples, 1);
+}
+
+static size_t
+stt_word_norm_len(const char *w)
+{
+	size_t l = strlen(w);
+	while (l > 0 && ispunct((unsigned char)w[l - 1]))
+		l--;
+	return l;
+}
+
+static uint32_t
+stt_word_hash_ci(const char *w, size_t len)
+{
+	uint32_t h = 2166136261u;
+	for (size_t i = 0; i < len; i++) {
+		unsigned char c = (unsigned char)tolower((unsigned char)w[i]);
+		h ^= c;
+		h *= 16777619u;
+	}
+	return h;
+}
+
+/* Collapse immediate repeated word sequences (1..24 words) in-place using
+ * precomputed normalized word hashes so long Whisper repetition loops collapse
+ * cleanly in linear time without quadratic string scans.
+ */
+void
+jarvis_stt_collapse_repetitions(char *s, size_t s_sz)
+{
+	char copy[4096];
+	char *words[1024];
+	size_t norm_len[1024];
+	uint32_t hashes[1024];
+	int n_words = 0;
+
+	if (!s || !*s || s_sz == 0)
+		return;
+	if (snprintf(copy, sizeof(copy), "%s", s) >= (int)sizeof(copy))
+		return;
+
+	char *p = copy;
+	while (*p) {
+		while (*p == ' ')
+			p++;
+		if (!*p)
+			break;
+		if (n_words >= 1024)
+			return;
+		char *tok = p;
+		while (*p && *p != ' ')
+			p++;
+		if (*p == ' ')
+			*p++ = '\0';
+		size_t nl = stt_word_norm_len(tok);
+		words[n_words] = tok;
+		norm_len[n_words] = nl;
+		hashes[n_words] = stt_word_hash_ci(tok, nl);
+		n_words++;
+	}
+	if (n_words < 2)
+		return;
+
+	int max_span = n_words / 2;
+	if (max_span > 24)
+		max_span = 24;
+
+	for (int span = max_span; span >= 1; span--) {
+		for (int i = 0; i + 2 * span <= n_words; ) {
+			int match = 1;
+			for (int k = 0; k < span; k++) {
+				int ia = i + k;
+				int ib = i + span + k;
+				if (hashes[ia] != hashes[ib] ||
+				    norm_len[ia] == 0 ||
+				    norm_len[ia] != norm_len[ib] ||
+				    strncasecmp(words[ia], words[ib], norm_len[ia]) != 0) {
+					match = 0;
+					break;
+				}
+			}
+			if (match && (span >= 2 || strlen(words[i]) >= 4)) {
+				int tail = n_words - (i + 2 * span);
+				if (tail > 0) {
+					memmove(&words[i + span], &words[i + 2 * span], (size_t)tail * sizeof(words[0]));
+					memmove(&norm_len[i + span], &norm_len[i + 2 * span], (size_t)tail * sizeof(norm_len[0]));
+					memmove(&hashes[i + span], &hashes[i + 2 * span], (size_t)tail * sizeof(hashes[0]));
+				}
+				n_words -= span;
+			} else {
+				i++;
 			}
 		}
 	}
-	return buf;
+
+	/* Strip trailing truncated prefix repetition (e.g. "open up miles davis open up miles"
+	 * or "Open T-MUX in this terminal. Open T").
+	 */
+	int max_tail_k = (n_words - 1) / 2;
+	if (max_tail_k > 12)
+		max_tail_k = 12;
+	for (int k = max_tail_k; k >= 1; k--) {
+		if (n_words >= 2 * k + 1) {
+			int tail_match = 1;
+			for (int j = 0; j < k; j++) {
+				int ia = j;
+				int ib = n_words - k + j;
+				size_t la = norm_len[ia];
+				size_t lb = norm_len[ib];
+				if (la == 0 || lb == 0) {
+					tail_match = 0;
+					break;
+				}
+				if (j == k - 1 && k >= 2 && lb < la) {
+					if (strncasecmp(words[ia], words[ib], lb) != 0) {
+						tail_match = 0;
+						break;
+					}
+				} else if (hashes[ia] != hashes[ib] || la != lb ||
+				           strncasecmp(words[ia], words[ib], la) != 0) {
+					tail_match = 0;
+					break;
+				}
+			}
+			if (tail_match) {
+				/* For k == 1, only strip if preceded by sentence punctuation */
+				if (k == 1) {
+					const char *prev_w = words[n_words - 2];
+					size_t pl = strlen(prev_w);
+					if (pl == 0 || (prev_w[pl - 1] != '.' && prev_w[pl - 1] != '!' && prev_w[pl - 1] != '?'))
+						continue;
+				}
+				n_words -= k;
+				break;
+			}
+		}
+	}
+
+	size_t off = 0;
+	s[0] = '\0';
+	for (int i = 0; i < n_words; i++) {
+		int n = snprintf(s + off, s_sz - off, "%s%s", (i > 0) ? " " : "", words[i]);
+		if (n < 0 || (size_t)n >= s_sz - off) {
+			s[s_sz - 1] = '\0';
+			break;
+		}
+		off += (size_t)n;
+	}
 }

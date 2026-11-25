@@ -153,7 +153,7 @@ process_hop(jarvis_dsp_t *dsp)
 		const float one_m = 1.0f - alpha;
 		float pm_hf = 0.0f;
 		float ps_hf = 0.0f;
-		float re_coh[JARVIS_DSP_BINS];
+		float mag_coh[JARVIS_DSP_BINS];
 
 		for (int k = 0; k < JARVIS_DSP_BINS; k++) {
 			float lr = xl_re[k], li = xl_im[k];
@@ -171,10 +171,16 @@ process_hop(jarvis_dsp_t *dsp)
 			dsp->plr_im[k] = alpha * dsp->plr_im[k] + one_m * ci;
 
 			float denom = sqrtf(dsp->pll[k] * dsp->prr[k] + 1e-18f);
-			float rc = dsp->plr_re[k] / denom;
-			if (rc < -1.0f) rc = -1.0f;
-			if (rc >  1.0f) rc =  1.0f;
-			re_coh[k] = rc;
+			/* Magnitude coherence |P_LR| / sqrt(P_LL * P_RR):
+			 * invariant to inter-channel time delay (off-axis head turns up to +-60 deg)
+			 * and asymmetric WebRTC/OS AEC channel phase, while rejecting diffuse noise.
+			 */
+			float c_mag = sqrtf(dsp->plr_re[k] * dsp->plr_re[k] +
+			                    dsp->plr_im[k] * dsp->plr_im[k]);
+			float mc = c_mag / denom;
+			if (mc < 0.0f) mc = 0.0f;
+			if (mc > 1.0f) mc = 1.0f;
+			mag_coh[k] = mc;
 
 			if (k >= b_hf_lo && k <= b_hf_hi) {
 				float mr = 0.5f * (lr + rr), mi = 0.5f * (li + ri);
@@ -195,38 +201,39 @@ process_hop(jarvis_dsp_t *dsp)
 				dsp->stereo_active = 1;
 		}
 
-		/* Asymmetric ambient coherence baseline tracker per bin:
-		 * Tracks down toward diffuse/room coherence quickly, rises only very slowly
-		 * when coherence is already low (<0.45) so near-field voice never corrupts it.
+		/* Asymmetric ambient magnitude-coherence baseline tracker per bin:
+		 * Tracks down toward diffuse/room coherence quickly (and absorbs the
+		 * finite-sample bias of |Coh| on uncorrelated noise), rises only slowly
+		 * when coherence is below 0.65 so near-field voice never corrupts it.
 		 */
-		if (dsp->amb_init < 10) {
+		if (dsp->amb_init < 12) {
 			float w_new = 1.0f / (float)(dsp->amb_init + 1);
 			float w_old = 1.0f - w_new;
 			for (int k = 0; k < JARVIS_DSP_BINS; k++)
-				dsp->amb_coh[k] = w_old * dsp->amb_coh[k] + w_new * re_coh[k];
+				dsp->amb_coh[k] = w_old * dsp->amb_coh[k] + w_new * mag_coh[k];
 			dsp->amb_init++;
 		} else {
 			for (int k = 0; k < JARVIS_DSP_BINS; k++) {
-				float rc = re_coh[k];
+				float mc = mag_coh[k];
 				float ac = dsp->amb_coh[k];
-				if (rc < ac)
-					dsp->amb_coh[k] = 0.96f * ac + 0.04f * rc;
-				else if (rc < 0.45f)
-					dsp->amb_coh[k] = 0.996f * ac + 0.004f * rc;
+				if (mc < ac)
+					dsp->amb_coh[k] = 0.94f * ac + 0.06f * mc;
+				else if (mc < 0.65f)
+					dsp->amb_coh[k] = 0.992f * ac + 0.008f * mc;
 			}
 		}
 
 		if (dsp->stereo_active) {
-			/* Compute energy- & resolvability-weighted excess coherence in 1.8-7.0 kHz */
+			/* Compute energy- & resolvability-weighted excess |Coh| in 1.8-7.0 kHz */
 			float num = 0.0f;
 			float den = 0.0f;
 			for (int k = b_hf_lo; k <= b_hf_hi; k++) {
 				float ac = dsp->amb_coh[k];
-				if (ac < -0.30f) ac = -0.30f;
-				if (ac >  0.85f) ac =  0.85f;
+				if (ac < 0.0f)  ac = 0.0f;
+				if (ac > 0.85f) ac = 0.85f;
 				float headroom = 1.0f - ac;
 				if (headroom < 0.15f) headroom = 0.15f;
-				float exc = (re_coh[k] - ac) / headroom;
+				float exc = (mag_coh[k] - ac) / headroom;
 				if (exc < 0.0f) exc = 0.0f;
 				if (exc > 1.0f) exc = 1.0f;
 				float mag = sqrtf(dsp->pll[k] * dsp->prr[k] + 1e-18f);
@@ -236,54 +243,69 @@ process_hop(jarvis_dsp_t *dsp)
 			}
 			near_score = (den > 1e-12f) ? (num / den) : 0.0f;
 
-			/* 160ms hangover hold once near-field speech is confirmed (>=0.52),
-			 * preserving consonants/plosives while preventing single-hop diffuse spikes
-			 * from latching the gate open. */
-			if (near_score >= 0.52f && dsp->last_near_score >= 0.46f)
-				dsp->hold_hops = 20;
-			else if (dsp->hold_hops > 0)
-				dsp->hold_hops--;
+			/* Lightweight GCC-PHAT TDOA search over [-3.0, +3.0] samples (+-187.5 us @ 16kHz)
+			 * using the already-computed cross-spectrum (0.3-6.0 kHz). When near-field speech
+			 * is present, phase-align R to L before summing so off-axis speech never suffers
+			 * a high-frequency comb-filter null.
+			 */
+			int b_tdoa_lo = (int)floorf(300.0f / df);
+			int b_tdoa_hi = (int)ceilf(6000.0f / df);
+			if (b_tdoa_lo < b_hpf) b_tdoa_lo = b_hpf;
+			if (b_tdoa_hi >= JARVIS_DSP_BINS) b_tdoa_hi = JARVIS_DSP_BINS - 1;
 
-			float target_fg;
-			if (dsp->hold_hops > 0) {
-				target_fg = 1.0f;
+			if (near_score >= 0.42f) {
+				float best_tau = dsp->tau_est;
+				float best_val = -1e30f;
+				const float base_w = (float)(2.0 * M_PI / (double)JARVIS_DSP_NFFT);
+				for (int step = -6; step <= 6; step++) {
+					float tau = 0.5f * (float)step;
+					float acc = 0.0f;
+					for (int k = b_tdoa_lo; k <= b_tdoa_hi; k++) {
+						float cr = dsp->plr_re[k];
+						float ci = dsp->plr_im[k];
+						float cm = sqrtf(cr * cr + ci * ci + 1e-18f);
+						float ang = base_w * (float)k * tau;
+						float ca = cosf(ang);
+						float sa = sinf(ang);
+						/* Re(P_LR * exp(-j * w_k * tau)) / |P_LR| */
+						acc += (cr * ca + ci * sa) / cm;
+					}
+					if (acc > best_val) {
+						best_val = acc;
+						best_tau = tau;
+					}
+				}
+				dsp->tau_est = 0.70f * dsp->tau_est + 0.30f * best_tau;
 			} else {
-				float t = (near_score - 0.28f) / 0.30f;
-				if (t < 0.0f) t = 0.0f;
-				if (t > 1.0f) t = 1.0f;
-				target_fg = 0.05f + 0.95f * powf(t, 1.5f);
+				/* Gently relax toward broadside during silence/diffuse background */
+				dsp->tau_est *= 0.96f;
 			}
 
-			if (target_fg > dsp->frame_gain_sm)
-				dsp->frame_gain_sm = 0.35f * dsp->frame_gain_sm + 0.65f * target_fg;
-			else
-				dsp->frame_gain_sm = 0.91f * dsp->frame_gain_sm + 0.09f * target_fg;
-
-			/* Synthesize Mid spectrum with smooth broadband gate + gentle HF coherence mask */
+			/* Clean, ungated ASR synthesis: 110 Hz HPF + phase-aligned stereo-to-mono sum.
+			 * Spatial gating is strictly decoupled from the ASR waveform; callers use
+			 * `out_near_score` alongside neural VAD for speech detection & barge-in.
+			 */
+			const float base_w = (float)(2.0 * M_PI / (double)JARVIS_DSP_NFFT);
+			const float tau = dsp->tau_est;
 			for (int k = 0; k < JARVIS_DSP_BINS; k++) {
-				float g;
 				if (k < b_hpf) {
-					g = 0.0f;
-				} else {
-					float ac = dsp->amb_coh[k];
-					if (ac < -0.30f) ac = -0.30f;
-					if (ac >  0.85f) ac =  0.85f;
-					float bh = 1.0f - ac;
-					if (bh < 0.15f) bh = 0.15f;
-					float be = (re_coh[k] - ac) / bh;
-					if (be < 0.0f) be = 0.0f;
-					if (be > 1.0f) be = 1.0f;
-					float bin_g = 0.25f + 0.75f * powf(be, 0.8f);
-					float fk = (float)k * df;
-					float hi_blend = (fk - 800.0f) / 1100.0f;
-					if (hi_blend < 0.0f) hi_blend = 0.0f;
-					if (hi_blend > 1.0f) hi_blend = 1.0f;
-					g = dsp->frame_gain_sm * ((1.0f - hi_blend) + hi_blend * bin_g);
+					y_re[k] = 0.0f;
+					y_im[k] = 0.0f;
+					continue;
 				}
-				float mr = 0.5f * (xl_re[k] + xr_re[k]);
-				float mi = 0.5f * (xl_im[k] + xr_im[k]);
-				y_re[k] = mr * g;
-				y_im[k] = mi * g;
+				float rr = xr_re[k], ri = xr_im[k];
+				if (fabsf(tau) > 0.05f) {
+					/* Align R to L: X_R(k) * exp(+j * w_k * tau) */
+					float ang = base_w * (float)k * tau;
+					float ca = cosf(ang);
+					float sa = sinf(ang);
+					float ar = rr * ca - ri * sa;
+					float ai = rr * sa + ri * ca;
+					rr = ar;
+					ri = ai;
+				}
+				y_re[k] = 0.5f * (xl_re[k] + rr);
+				y_im[k] = 0.5f * (xl_im[k] + ri);
 			}
 		} else {
 			/* Stereo open, but mono-summed hardware -> clean Mid + 110 Hz HPF only */

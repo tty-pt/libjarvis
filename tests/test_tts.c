@@ -157,14 +157,32 @@ int main(void)
 	printf("  [PASS] Persistent --serve worker reused (starts=%zu, reqs=%zu) & LRU cache hit in %ldms\n",
 	       count_file_lines(starts_log), count_file_lines(reqs_log), cache_ms);
 
+	/* 2b. Silent wake-ack precache fills LRU cache without invoking pw-cat,
+	 *     and subsequent jarvis_tts_speak_clause_lang hits cache with zero extra synthesis!
+	 */
+	assert(jarvis_tts_is_enabled());
+	size_t pw_before_precache = count_file_lines(pw_log);
+	size_t reqs_before_precache = count_file_lines(reqs_log);
+	assert(jarvis_tts_precache_clause("Sim?", "pt") == 0);
+	for (int i = 0; i < 50 && count_file_lines(reqs_log) < reqs_before_precache + 1; i++)
+		usleep(20000);
+	usleep(40000);
+	assert(count_file_lines(reqs_log) == reqs_before_precache + 1);
+	assert(count_file_lines(pw_log) == pw_before_precache);
+
+	assert(jarvis_tts_speak_clause_lang("wake_ack", "Sim?", "pt", 2) == 0);
+	assert(count_file_lines(reqs_log) == reqs_before_precache + 1);
+	assert(count_file_lines(pw_log) == pw_before_precache + 1);
+	printf("  [PASS] Silent wake-ack precache synthesized once (0 playback) & speak hit cache!\n");
+
 	/* 3. Edge timeout (>200ms) aborts cleanly and falls back without caching failure under edge: key */
 	t0 = monotonic_ms();
 	assert(jarvis_tts_speak_clause("s1", "Hang timeout test.", 1) == 0);
 	long fb_ms = monotonic_ms() - t0;
-	assert(count_file_lines(reqs_log) == 3);
+	assert(count_file_lines(reqs_log) == reqs_before_precache + 2);
 	/* Retry same phrase while mock still hangs: since fallback wasn't cached under edge:, it hits edge again */
 	assert(jarvis_tts_speak_clause("s1", "Hang timeout test.", 1) == 0);
-	assert(count_file_lines(reqs_log) == 4);
+	assert(count_file_lines(reqs_log) == reqs_before_precache + 3);
 	printf("  [PASS] Timeout/fallback path bounded (%ldms) and uncached under edge: key\n", fb_ms);
 
 	/* 4. Transient empty-PCM (pcm_len == 0) retries once and recovers without falling back,
@@ -205,6 +223,7 @@ int main(void)
 
 	/* Shutdown worker cleanly via JARVIS_NO_TTS=1 and confirm zero leftover child processes */
 	setenv("JARVIS_NO_TTS", "1", 1);
+	assert(!jarvis_tts_is_enabled());
 	assert(jarvis_tts_speak_clause("s1", "", 0) == 0);
 	int wst = 0;
 	int reaped_zombies = 0;
@@ -221,6 +240,7 @@ int main(void)
 	assert(no_children);
 	assert(reaped_zombies == 0);
 	unsetenv("JARVIS_NO_TTS");
+	assert(jarvis_tts_is_enabled());
 	printf("  [PASS] Busy barge-in interrupt (%ldms) & zero-child/zero-zombie cleanup verified!\n", barge_ms);
 
 	/* 5. Offline local voice mode (JARVIS_VOICE=local & tts_voice=local) */

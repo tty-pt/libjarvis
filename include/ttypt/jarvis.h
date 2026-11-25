@@ -96,6 +96,27 @@ void jarvis_ontology_format_ui(
 );
 const char *jarvis_ontology_get_reply_template(const jarvis_ontology_t *ont, const char *key);
 
+/**
+ * @brief Look up the wake-word acknowledgment phrase (e.g. "Yes?", "Sim?") for @p lang
+ *        from the ontology's loaded locales table, falling back to the active locale's
+ *        `ui_strings.wake_ack` if present.
+ */
+const char *jarvis_ontology_get_wake_ack_for_lang(const jarvis_ontology_t *ont, const char *lang);
+
+/**
+ * @brief Look up the natural 1-sentence regional dialect prose seed (`dictation_seed`)
+ *        for @p lang (exact regional match like "pt-pt"/"pt-br"/"en-gb" then base lang).
+ *        Returns NULL if no seed exists for that language.
+ */
+const char *jarvis_ontology_get_dictation_seed_for_lang(const jarvis_ontology_t *ont, const char *lang);
+
+/**
+ * @brief Return true if the trailing token of @p text matches one of the active
+ *        locale's `continuation_tokens` from ontology.json (e.g. "to", "with",
+ *        "para", "com", "que") so adaptive endpointing extends pause grace.
+ */
+bool jarvis_ontology_ends_with_continuation(const jarvis_ontology_t *ont, const char *text);
+
 /* ---------------------------------------------------------------------------
  * Streaming TTS Clause Extraction & RC Config
  * ------------------------------------------------------------------------- */
@@ -158,6 +179,14 @@ void jarvis_resolve_lang(const jarvis_ontology_t *ont, char *out, size_t out_sz)
  *        `$JARVIS_WAKE_WORD` -> `~/.jarvisrc` (`wake_word`) -> ontology -> `"jarbas"`/`"jarvis"` per lang.
  */
 void jarvis_resolve_wake_word(const jarvis_ontology_t *ont, char *out, size_t out_sz);
+
+/**
+ * @brief Resolve spoken wake-word acknowledgment (e.g. "Yes?", "Sim?", "Oui ?"):
+ *        `$JARVIS_WAKE_ACK` -> `~/.jarvisrc` (`wake_ack`, unless `"auto"`) -> ontology locale for @p lang_hint -> `"Yes?"`.
+ *
+ * Returns false (and writes `""`) when explicitly disabled via `"off"`, `"none"`, `"0"`, or `"false"`.
+ */
+bool jarvis_resolve_wake_ack(const jarvis_ontology_t *ont, const char *lang_hint, char *out, size_t out_sz);
 
 /**
  * @brief Resolve effective TTS voice with zero-config fallbacks:

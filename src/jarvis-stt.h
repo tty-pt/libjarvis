@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include <pthread.h>
 #include <signal.h>
-#include "whisper.h"
+#include "jarvis-stt-backend.h"
 #include <ttypt/stele.h>
 
 #define JARVIS_SAMPLE_RATE      16000
@@ -18,13 +18,15 @@
 #define JARVIS_MAX_UTTER_FRAMES 4500 /* 90 seconds max utterance */
 #define JARVIS_WARM_HOLD_MS     60000L
 
-/* Audio capture ring buffer & adaptive noise floor VAD state */
+/* Audio capture ring buffer & decoupled neural/spatial/echo telemetry */
 typedef struct {
 	pthread_mutex_t mtx;
 	pthread_cond_t  cond;
 	float           pcm[JARVIS_RING_SAMPLES];
 	float           db[JARVIS_RING_FRAMES];
 	float           near_score[JARVIS_RING_FRAMES];
+	float           vad_prob[JARVIS_RING_FRAMES];
+	uint8_t         tts_active[JARVIS_RING_FRAMES];
 	uint8_t         is_speech[JARVIS_RING_FRAMES];
 	int64_t         total_frames;
 	int64_t         last_cmd_end_f;
@@ -36,20 +38,25 @@ typedef struct {
 	int             in_speech_hint;
 	int             pw_open;
 	int             stereo_spatial;
+	int             vad_neural;
+	int             aec_active;
 } jarvis_audio_ring_t;
 
-/* Background Whisper decode worker state */
+/* Background STT decode worker state */
 typedef struct {
 	pthread_mutex_t         mtx;
 	pthread_cond_t          cond;
-	struct whisper_context *ctx;
+	jarvis_stt_ctx_t       *ctx;
 	int                     n_threads;
 	float                  *pcm;
 	int                     n_samples;
 	char                    lang[32];
-	const char             *prompt;
+	char                    prompt[256];
 	int                     max_tok;
 	int                     is_partial;
+	int                     use_context;
+	int                     want_timestamps;
+	int64_t                 job_start_f;
 	int64_t                 job_voiced_f;
 	int64_t                 job_end_f;
 	int                     has_job;
@@ -57,6 +64,9 @@ typedef struct {
 	volatile sig_atomic_t   abort_flag;
 	int                     has_result;
 	char                    result_text[4096];
+	jarvis_stt_word_t       result_words[JARVIS_STT_MAX_WORDS];
+	int                     result_n_words;
+	int64_t                 result_start_f;
 	int64_t                 result_voiced_f;
 	int64_t                 result_end_f;
 	int                     result_is_partial;
@@ -69,11 +79,12 @@ extern jarvis_audio_ring_t    g_audio;
 extern jarvis_decode_worker_t g_dec;
 
 /* DSP and Whisper helper routines */
+void   jarvis_stt_apply_hpf_inplace(float *pcm, int n_samples);
+float *jarvis_stt_normalize_pcm(const float *pcm, int n_samples, int apply_hpf);
 float *jarvis_stt_apply_preemphasis_and_agc(const float *pcm, int n_samples);
+int    jarvis_stt_compute_audio_ctx_ex(int n_samples, int is_wake, int is_partial, int final_min_ctx);
 int    jarvis_stt_compute_audio_ctx(int n_samples, int is_wake, int is_partial);
-void   jarvis_stt_run_whisper_slice(struct whisper_context *ctx, int n_threads, const float *pcm, int n_samples,
-                                   const char *lang, const char *prompt, int max_tok, int is_wake, int is_partial,
-                                   int use_abort_cb, char *out_text, size_t out_sz, int *out_all_silent);
+void   jarvis_stt_collapse_repetitions(char *s, size_t s_sz);
 
 int    jarvis_stt_ring_extract_pcm(int64_t start_f, int64_t end_f, float *out_pcm, int max_samples);
 int    jarvis_stt_load_wav_f32(const char *path, float **out_pcm, int *out_samples);

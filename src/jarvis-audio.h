@@ -32,6 +32,7 @@ void        jarvis_audio_unmute_mic(void);
 void        jarvis_audio_duck(void);
 void        jarvis_audio_restore(void);
 int         jarvis_audio_is_external_playing(void);
+int         jarvis_audio_has_aec_source(void);
 bool        jarvis_audio_has_capture_backend(void);
 const char *jarvis_audio_backend_name(void);
 

@@ -2,6 +2,7 @@
 #include "jarvis-audio.h"
 #include "jarvis-platform.h"
 
+#include <ttypt/jarvis.h>
 #include <ttypt/stele.h>
 
 #include <errno.h>
@@ -9,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 struct jarvis_audio_cap {
@@ -25,17 +27,42 @@ struct jarvis_audio_play {
 };
 
 static double g_duck_saved_vol = -1.0;
+static int    g_last_aec_active = 0;
 
-static void select_pw_source(char *out, size_t cap)
+static int has_tool(const char *name)
 {
+	char path[512];
+	return jarvis_plat_find_in_path(name, path, sizeof(path)) == 0;
+}
+
+static void select_pw_source(char *out, size_t cap, int *out_is_aec)
+{
+	if (out_is_aec) *out_is_aec = 0;
 	if (!out || cap == 0) return;
 	out[0] = '\0';
+
+	/* Honor ~/.jarvisrc `pw_target = auto | default | none | <node-name>` */
+	char cfg_target[128] = {0};
+	if (jarvis_rc_get("pw_target", "auto", cfg_target, sizeof(cfg_target)) && cfg_target[0]) {
+		if (strcasecmp(cfg_target, "default") == 0 ||
+		    strcasecmp(cfg_target, "none") == 0 ||
+		    strcmp(cfg_target, "-") == 0)
+			return;
+		if (strcasecmp(cfg_target, "auto") != 0) {
+			snprintf(out, cap, "%s", cfg_target);
+			if (out_is_aec && (strstr(cfg_target, "aec") || strstr(cfg_target, "echo")))
+				*out_is_aec = 1;
+			return;
+		}
+	}
+
 	FILE *fp = popen("pw-cli list-objects Node 2>/dev/null", "r");
 	if (!fp) return;
 	char line[512];
 	while (fgets(line, sizeof(line), fp)) {
 		if (strstr(line, "jarvis_aec_source")) {
 			snprintf(out, cap, "jarvis_aec_source");
+			if (out_is_aec) *out_is_aec = 1;
 			break;
 		}
 	}
@@ -52,30 +79,71 @@ jarvis_audio_cap_t *jarvis_audio_cap_open(int sample_rate, int channels)
 	char rate_buf[32], ch_buf[16], target[128];
 	snprintf(rate_buf, sizeof(rate_buf), "%d", cap->sample_rate);
 	snprintf(ch_buf, sizeof(ch_buf), "%d", cap->channels);
-	select_pw_source(target, sizeof(target));
 
-	const char *argv[13];
-	int i = 0;
-	argv[i++] = "pw-record";
-	argv[i++] = "--raw";
-	if (target[0]) {
-		argv[i++] = "--target";
-		argv[i++] = target;
+	int is_aec = 0;
+	if (has_tool("pw-record")) {
+		select_pw_source(target, sizeof(target), &is_aec);
+		const char *argv[16];
+		int i = 0;
+		argv[i++] = "pw-record";
+		argv[i++] = "--raw";
+		argv[i++] = "--latency";
+		argv[i++] = "20ms";
+		if (target[0]) {
+			argv[i++] = "--target";
+			argv[i++] = target;
+		}
+		argv[i++] = "--rate";
+		argv[i++] = rate_buf;
+		argv[i++] = "--channels";
+		argv[i++] = ch_buf;
+		argv[i++] = "--format";
+		argv[i++] = "s16";
+		argv[i++] = "-";
+		argv[i] = NULL;
+		if (stl_spawn(argv, STL_SPAWN_STDOUT | STL_SPAWN_NEW_GROUP, &cap->proc) == 0) {
+			__atomic_store_n(&g_last_aec_active, is_aec, __ATOMIC_RELEASE);
+			return cap;
+		}
 	}
-	argv[i++] = "--rate";
-	argv[i++] = rate_buf;
-	argv[i++] = "--channels";
-	argv[i++] = ch_buf;
-	argv[i++] = "--format";
-	argv[i++] = "s16";
-	argv[i++] = "-";
-	argv[i] = NULL;
 
-	if (stl_spawn(argv, STL_SPAWN_STDOUT | STL_SPAWN_NEW_GROUP, &cap->proc) < 0) {
-		free(cap);
-		return NULL;
+	__atomic_store_n(&g_last_aec_active, 0, __ATOMIC_RELEASE);
+
+	if (has_tool("parec")) {
+		char rate_arg[40], ch_arg[24];
+		snprintf(rate_arg, sizeof(rate_arg), "--rate=%d", cap->sample_rate);
+		snprintf(ch_arg, sizeof(ch_arg), "--channels=%d", cap->channels);
+		const char *argv[] = {
+			"parec", "--raw", rate_arg, ch_arg,
+			"--format=s16le", "--latency-msec=20", NULL
+		};
+		if (stl_spawn(argv, STL_SPAWN_STDOUT | STL_SPAWN_NEW_GROUP, &cap->proc) == 0)
+			return cap;
 	}
-	return cap;
+
+	if (has_tool("arecord")) {
+		const char *argv[] = {
+			"arecord", "-q", "-t", "raw",
+			"-r", rate_buf, "-c", ch_buf, "-f", "S16_LE",
+			"--buffer-time=40000", "-", NULL
+		};
+		if (stl_spawn(argv, STL_SPAWN_STDOUT | STL_SPAWN_NEW_GROUP, &cap->proc) == 0)
+			return cap;
+	}
+
+	if (has_tool("aucat")) {
+		char cspec[16];
+		snprintf(cspec, sizeof(cspec), "0:%d", cap->channels > 1 ? cap->channels - 1 : 0);
+		const char *argv[] = {
+			"aucat", "-r", rate_buf, "-c", cspec,
+			"-e", "s16le", "-h", "raw", "-o", "-", NULL
+		};
+		if (stl_spawn(argv, STL_SPAWN_STDOUT | STL_SPAWN_NEW_GROUP, &cap->proc) == 0)
+			return cap;
+	}
+
+	free(cap);
+	return NULL;
 }
 
 int jarvis_audio_cap_read(jarvis_audio_cap_t *cap, int16_t *dst, size_t n_samples)
@@ -121,19 +189,47 @@ jarvis_audio_play_t *jarvis_audio_play_open(int sample_rate, int channels, const
 	play->sample_rate = sample_rate > 0 ? sample_rate : 24000;
 	play->channels = channels > 0 ? channels : 1;
 
-	char rate_arg[32], ch_arg[32], prop_arg[128];
+	char rate_arg[32], ch_arg[32], rate_buf[32], ch_buf[16], prop_arg[128];
 	snprintf(rate_arg, sizeof(rate_arg), "--rate=%d", play->sample_rate);
 	snprintf(ch_arg, sizeof(ch_arg), "--channels=%d", play->channels);
+	snprintf(rate_buf, sizeof(rate_buf), "%d", play->sample_rate);
+	snprintf(ch_buf, sizeof(ch_buf), "%d", play->channels);
 	snprintf(prop_arg, sizeof(prop_arg), "application.name=%s",
 	         (app_name && *app_name) ? app_name : "jarvis-tts");
 
-	const char *argv[] = {
-		"pw-cat", "-p", "--raw", rate_arg,
-		ch_arg, "--format=s16",
-		"--media-role=Communication", "-P", prop_arg, "-", NULL
-	};
-
-	if (stl_spawn(argv, STL_SPAWN_STDIN | STL_SPAWN_NEW_GROUP, &play->proc) < 0) {
+	int spawned = -1;
+	if (has_tool("pw-cat")) {
+		const char *argv[] = {
+			"pw-cat", "-p", "--raw", rate_arg,
+			ch_arg, "--format=s16",
+			"--media-role=Communication", "-P", prop_arg, "-", NULL
+		};
+		spawned = stl_spawn(argv, STL_SPAWN_STDIN | STL_SPAWN_NEW_GROUP, &play->proc);
+	}
+	if (spawned < 0 && has_tool("pacat")) {
+		const char *argv[] = {
+			"pacat", "-p", "--raw", rate_arg,
+			ch_arg, "--format=s16le", NULL
+		};
+		spawned = stl_spawn(argv, STL_SPAWN_STDIN | STL_SPAWN_NEW_GROUP, &play->proc);
+	}
+	if (spawned < 0 && has_tool("aplay")) {
+		const char *argv[] = {
+			"aplay", "-q", "-t", "raw",
+			"-r", rate_buf, "-c", ch_buf, "-f", "S16_LE", "-", NULL
+		};
+		spawned = stl_spawn(argv, STL_SPAWN_STDIN | STL_SPAWN_NEW_GROUP, &play->proc);
+	}
+	if (spawned < 0 && has_tool("aucat")) {
+		char cspec[16];
+		snprintf(cspec, sizeof(cspec), "0:%d", play->channels > 1 ? play->channels - 1 : 0);
+		const char *argv[] = {
+			"aucat", "-r", rate_buf, "-c", cspec,
+			"-e", "s16le", "-h", "raw", "-i", "-", NULL
+		};
+		spawned = stl_spawn(argv, STL_SPAWN_STDIN | STL_SPAWN_NEW_GROUP, &play->proc);
+	}
+	if (spawned < 0) {
 		free(play);
 		return NULL;
 	}
@@ -215,19 +311,35 @@ void jarvis_audio_play_chime_async(const char *wav_path)
 {
 	if (!wav_path || !*wav_path || !jarvis_plat_is_readable(wav_path))
 		return;
-	const char *argv[] = { "pw-play", wav_path, NULL };
-	(void)stl_spawn_detached(argv);
+	if (has_tool("pw-play")) {
+		const char *argv[] = { "pw-play", wav_path, NULL };
+		(void)stl_spawn_detached(argv);
+	} else if (has_tool("paplay")) {
+		const char *argv[] = { "paplay", wav_path, NULL };
+		(void)stl_spawn_detached(argv);
+	} else if (has_tool("aplay")) {
+		const char *argv[] = { "aplay", "-q", wav_path, NULL };
+		(void)stl_spawn_detached(argv);
+	} else if (has_tool("aucat")) {
+		const char *argv[] = { "aucat", "-i", wav_path, NULL };
+		(void)stl_spawn_detached(argv);
+	}
 }
 
 void jarvis_audio_unmute_mic(void)
 {
-	const char *argv[] = { "wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", "0", NULL };
-	(void)stl_spawn_detached(argv);
+	if (has_tool("wpctl")) {
+		const char *argv[] = { "wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", "0", NULL };
+		(void)stl_spawn_detached(argv);
+	} else if (has_tool("pactl")) {
+		const char *argv[] = { "pactl", "set-source-mute", "@DEFAULT_SOURCE@", "0", NULL };
+		(void)stl_spawn_detached(argv);
+	}
 }
 
 void jarvis_audio_duck(void)
 {
-	if (g_duck_saved_vol >= 0.0)
+	if (g_duck_saved_vol >= 0.0 || !has_tool("wpctl"))
 		return;
 	FILE *fp = popen("wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null", "r");
 	if (!fp) return;
@@ -259,12 +371,15 @@ void jarvis_audio_restore(void)
 	char vstr[32];
 	snprintf(vstr, sizeof(vstr), "%.2f", g_duck_saved_vol);
 	g_duck_saved_vol = -1.0;
-	const char *argv[] = { "wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", vstr, NULL };
-	(void)stl_spawn_detached(argv);
+	if (has_tool("wpctl")) {
+		const char *argv[] = { "wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", vstr, NULL };
+		(void)stl_spawn_detached(argv);
+	}
 }
 
 int jarvis_audio_is_external_playing(void)
 {
+	if (!has_tool("pactl")) return 0;
 	FILE *fp = popen("pactl list sink-inputs 2>/dev/null", "r");
 	if (!fp) return 0;
 
@@ -298,13 +413,22 @@ int jarvis_audio_is_external_playing(void)
 	return external_playing;
 }
 
+int jarvis_audio_has_aec_source(void)
+{
+	return __atomic_load_n(&g_last_aec_active, __ATOMIC_ACQUIRE);
+}
+
 bool jarvis_audio_has_capture_backend(void)
 {
-	char path[512];
-	return jarvis_plat_find_in_path("pw-record", path, sizeof(path)) == 0;
+	return has_tool("pw-record") || has_tool("parec") ||
+	       has_tool("arecord") || has_tool("aucat");
 }
 
 const char *jarvis_audio_backend_name(void)
 {
-	return "pipewire";
+	if (has_tool("pw-record")) return "pipewire";
+	if (has_tool("parec"))     return "pulseaudio";
+	if (has_tool("arecord"))   return "alsa";
+	if (has_tool("aucat"))     return "sndio";
+	return "none";
 }

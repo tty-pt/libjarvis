@@ -389,6 +389,62 @@ static bool is_daemon_listening(void)
 	return false;
 }
 
+typedef struct {
+	bool ok;
+	char hw[64];
+	char stt[32];
+	char kws[32];
+	int  ac512_ms;
+	int  audio_ctx;
+	int  vad;
+	int  aec;
+	int  ptt;
+	unsigned long long wake_n;
+} daemon_telemetry_t;
+
+static bool parse_status_kv(const char *status, const char *key, char *out, size_t out_sz)
+{
+	if (!status || !key || !out || out_sz == 0) return false;
+	out[0] = '\0';
+	size_t klen = strlen(key);
+	const char *p = status;
+	while ((p = strstr(p, key)) != NULL) {
+		if ((p == status || p[-1] == '|') && p[klen] == '=') {
+			const char *v = p + klen + 1;
+			size_t n = 0;
+			while (v[n] && v[n] != '|' && v[n] != '\r' && v[n] != '\n' && n + 1 < out_sz)
+				n++;
+			memcpy(out, v, n);
+			out[n] = '\0';
+			return n > 0;
+		}
+		p += klen;
+	}
+	return false;
+}
+
+static bool daemon_query_telemetry(daemon_telemetry_t *out)
+{
+	if (!out) return false;
+	memset(out, 0, sizeof(*out));
+	char resp[512] = {0};
+	if (!daemon_cmd("STATUS", resp, sizeof(resp)) || strncmp(resp, "STATUS|", 7) != 0)
+		return false;
+
+	char num[32];
+	parse_status_kv(resp, "hw", out->hw, sizeof(out->hw));
+	parse_status_kv(resp, "stt", out->stt, sizeof(out->stt));
+	parse_status_kv(resp, "kws", out->kws, sizeof(out->kws));
+	if (parse_status_kv(resp, "ac512", num, sizeof(num)))  out->ac512_ms = atoi(num);
+	if (parse_status_kv(resp, "ac", num, sizeof(num)))     out->audio_ctx = atoi(num);
+	if (parse_status_kv(resp, "vad", num, sizeof(num)))    out->vad = atoi(num);
+	if (parse_status_kv(resp, "aec", num, sizeof(num)))    out->aec = atoi(num);
+	if (parse_status_kv(resp, "ptt", num, sizeof(num)))    out->ptt = atoi(num);
+	if (parse_status_kv(resp, "wake_n", num, sizeof(num))) out->wake_n = strtoull(num, NULL, 10);
+	out->ok = (out->hw[0] != '\0' || out->stt[0] != '\0');
+	return out->ok;
+}
+
 static void ensure_daemon_running(bool activate_listener)
 {
 	char resp[64];
@@ -1545,6 +1601,9 @@ static int do_jarvis_doctor(bool as_json)
 	bool daemon_up = daemon_cmd("PING", ping_resp, sizeof(ping_resp));
 	bool daemon_listening = daemon_up && daemon_cmd("JARVIS_STATUS", st_resp, sizeof(st_resp)) &&
 	                        (strcmp(st_resp, "ON") == 0);
+	daemon_telemetry_t dt = {0};
+	if (daemon_up)
+		daemon_query_telemetry(&dt);
 
 	bool healthy = (ont != NULL) && has_capture_audio && has_model &&
 	               !en_model_mismatch &&
@@ -1553,6 +1612,7 @@ static int do_jarvis_doctor(bool as_json)
 
 	if (as_json) {
 		char e_rc[640], e_lang[64], e_wake[128], e_voice[128], e_wm[64], e_mod[1024], e_ab[64];
+		char e_hw[128], e_stt[64], e_kws[64];
 		desktop_core_json_escape(has_rc ? rc_path : "none (zero-config defaults)", e_rc, sizeof(e_rc));
 		desktop_core_json_escape(lang, e_lang, sizeof(e_lang));
 		desktop_core_json_escape(wake, e_wake, sizeof(e_wake));
@@ -1560,13 +1620,16 @@ static int do_jarvis_doctor(bool as_json)
 		desktop_core_json_escape(wm, e_wm, sizeof(e_wm));
 		desktop_core_json_escape(has_model ? model_path : "", e_mod, sizeof(e_mod));
 		desktop_core_json_escape(audio_backend, e_ab, sizeof(e_ab));
+		desktop_core_json_escape(dt.ok ? dt.hw : "", e_hw, sizeof(e_hw));
+		desktop_core_json_escape(dt.ok ? dt.stt : "", e_stt, sizeof(e_stt));
+		desktop_core_json_escape(dt.ok ? dt.kws : "", e_kws, sizeof(e_kws));
 		printf("{\"healthy\":%s,"
 		       "\"config\":{\"rc_file\":\"%s\",\"has_rc\":%s,\"lang\":\"%s\",\"wake_word\":\"%s\",\"tts_voice\":\"%s\",\"wm\":\"%s\",\"ontology_loaded\":%s},"
 		       "\"audio\":{\"backend\":\"%s\",\"capture_ready\":%s,\"pw_record\":%s,\"pw_cat\":%s,\"wpctl\":%s,\"aec_conf\":%s,\"aec_source_active\":%s},"
 		       "\"whisper\":{\"model\":\"%s\",\"model_found\":%s,\"en_model_mismatch\":%s,\"vulkan_render_node\":%s},"
 		       "\"tts\":{\"edge_tts_pcm\":%s,\"edge_tts_python\":%s,\"ffmpeg\":%s,\"local_onnx\":%s,\"espeak_ng\":%s,\"native_tts\":%s},"
 		       "\"ren\":{\"ren_bin\":%s,\"ren_jarvis_so\":%s,\"ren_wm_so\":%s,\"axil_auren_health\":%s},"
-		       "\"daemon\":{\"running\":%s,\"listening\":%s}}\n",
+		       "\"daemon\":{\"running\":%s,\"listening\":%s,\"hw\":\"%s\",\"stt\":\"%s\",\"kws\":\"%s\",\"wake_stt_calls\":%llu,\"ac512_ms\":%d,\"audio_ctx\":%d,\"vad\":%s,\"aec\":%s}}\n",
 		       healthy ? "true" : "false",
 		       e_rc, has_rc ? "true" : "false", e_lang, e_wake, e_voice, e_wm, ont ? "true" : "false",
 		       e_ab, has_capture_audio ? "true" : "false",
@@ -1580,7 +1643,9 @@ static int do_jarvis_doctor(bool as_json)
 		       has_espeak ? "true" : "false", has_native_tts ? "true" : "false",
 		       has_ren ? "true" : "false", has_ren_jarvis ? "true" : "false",
 		       has_ren_wm ? "true" : "false", auren_ok ? "true" : "false",
-		       daemon_up ? "true" : "false", daemon_listening ? "true" : "false");
+		       daemon_up ? "true" : "false", daemon_listening ? "true" : "false",
+		       e_hw, e_stt, e_kws, dt.wake_n, dt.ac512_ms, dt.audio_ctx,
+		       dt.vad ? "true" : "false", dt.aec ? "true" : "false");
 	} else {
 		printf("Jarvis Doctor (%s)\n", healthy ? "READY" : "NEEDS ATTENTION");
 		printf("  [Config]\n");
@@ -1609,6 +1674,16 @@ static int do_jarvis_doctor(bool as_json)
 #else
 		printf("    %-18s %s\n", "vulkan GPU:", has_vulkan ? "/dev/dri/renderD128 OK" : "not detected (CPU fallback)");
 #endif
+		if (dt.ok) {
+			printf("    %-18s hw=%s stt=%s kws=%s wake_n=%llu ac512=%dms ctx=%d vad=%s aec=%s\n", "calibrated:",
+			       dt.hw[0] ? dt.hw : "unknown",
+			       dt.stt[0] ? dt.stt : "unknown",
+			       dt.kws[0] ? dt.kws : "vad",
+			       dt.wake_n,
+			       dt.ac512_ms, dt.audio_ctx,
+			       dt.vad ? "on" : "off",
+			       dt.aec ? "on" : "off");
+		}
 		printf("  [TTS Backends]\n");
 		printf("    %-18s edge-tts-pcm=%s python-edge_tts=%s ffmpeg=%s\n", "neural:",
 		       has_edge_pcm ? "OK" : "missing", has_edge_py ? "OK" : "missing", has_ffmpeg ? "OK" : "missing");
@@ -1831,6 +1906,7 @@ int main(int argc, char **argv)
 			    strcmp(argv[i], "listen") == 0 ||
 			    strcmp(argv[i], "status") == 0 || strcmp(argv[i], "doctor") == 0 ||
 			    strcmp(argv[i], "setup") == 0 ||
+			    strcmp(argv[i], "ptt-start") == 0 || strcmp(argv[i], "ptt-stop") == 0 ||
 			    strcmp(argv[i], "lockdown") == 0 || strcmp(argv[i], "lock") == 0 ||
 			    strcmp(argv[i], "menu") == 0 || strcmp(argv[i], "ren") == 0 ||
 			    strcmp(argv[i], "ren-show") == 0 || strcmp(argv[i], "tts-off") == 0) {
@@ -1898,13 +1974,43 @@ int main(int argc, char **argv)
 			do_jarvis_toggle(quiet);
 			return 0;
 		}
+		if (strcmp(subcmd, "ptt-start") == 0) {
+			char resp[64] = {0};
+			ensure_daemon_running(true);
+			bool ok = daemon_cmd("JARVIS_PTT_START", resp, sizeof(resp));
+			if (as_json) printf("{\"ptt\":true,\"ok\":%s}\n", ok ? "true" : "false");
+			return ok ? 0 : 1;
+		}
+		if (strcmp(subcmd, "ptt-stop") == 0) {
+			char resp[64] = {0};
+			bool ok = daemon_cmd("JARVIS_PTT_STOP", resp, sizeof(resp));
+			if (as_json) printf("{\"ptt\":false,\"ok\":%s}\n", ok ? "true" : "false");
+			return ok ? 0 : 1;
+		}
 		if (strcmp(subcmd, "listen") == 0) {
 			return do_jarvis_listen(as_json, quiet, wm_override, extra_mod);
 		}
 		if (strcmp(subcmd, "status") == 0) {
 			bool on = is_daemon_listening();
-			if (as_json) printf("{\"listening\":%s}\n", on ? "true" : "false");
-			else printf("%s\n", on ? "on" : "off");
+			if (as_json) {
+				daemon_telemetry_t dt = {0};
+				if (daemon_query_telemetry(&dt)) {
+					char e_hw[128], e_stt[64], e_kws[64];
+					desktop_core_json_escape(dt.hw, e_hw, sizeof(e_hw));
+					desktop_core_json_escape(dt.stt, e_stt, sizeof(e_stt));
+					desktop_core_json_escape(dt.kws[0] ? dt.kws : "vad", e_kws, sizeof(e_kws));
+					printf("{\"listening\":%s,\"hw\":\"%s\",\"stt\":\"%s\",\"kws\":\"%s\",\"wake_stt_calls\":%llu,\"ptt\":%s,\"ac512_ms\":%d,\"audio_ctx\":%d,\"vad\":%s,\"aec\":%s}\n",
+					       on ? "true" : "false", e_hw, e_stt, e_kws,
+					       dt.wake_n, dt.ptt ? "true" : "false",
+					       dt.ac512_ms, dt.audio_ctx,
+					       dt.vad ? "true" : "false",
+					       dt.aec ? "true" : "false");
+				} else {
+					printf("{\"listening\":%s}\n", on ? "true" : "false");
+				}
+			} else {
+				printf("%s\n", on ? "on" : "off");
+			}
 			return 0;
 		}
 		if (strcmp(subcmd, "doctor") == 0) {

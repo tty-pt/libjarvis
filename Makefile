@@ -21,10 +21,10 @@ LDLIBS-libjarvis-Darwin := -framework AudioUnit -framework AudioToolbox -framewo
 LDLIBS-libjarvis-Windows := -lws2_32 -lwinmm -lole32 -luuid
 LDLIBS-jarvis := -Llib -ljarvis -lstele -lm
 LDLIBS-jarvis-Windows := -lws2_32
-LDFLAGS-libjarvis-Linux := -Wl,--disable-new-dtags -Wl,-rpath,'$$ORIGIN' -Wl,-rpath,'${CURDIR}/../libstele/lib'
-LDFLAGS-jarvis-Linux := -Wl,--disable-new-dtags -Wl,-rpath,'$$ORIGIN/../lib' -Wl,-rpath,'$$ORIGIN' -Wl,-rpath,'${CURDIR}/../libstele/lib'
-LDFLAGS-libjarvis-Darwin := -Wl,-rpath,@loader_path -Wl,-rpath,'${CURDIR}/../libstele/lib'
-LDFLAGS-jarvis-Darwin := -Wl,-rpath,@loader_path/../lib -Wl,-rpath,@loader_path -Wl,-rpath,'${CURDIR}/../libstele/lib'
+LDFLAGS-libjarvis-Linux := -Wl,--disable-new-dtags -Wl,-rpath,'$$ORIGIN'
+LDFLAGS-jarvis-Linux := -Wl,--disable-new-dtags -Wl,-rpath,'$$ORIGIN/../lib' -Wl,-rpath,'$$ORIGIN'
+LDFLAGS-libjarvis-Darwin := -Wl,-rpath,@loader_path
+LDFLAGS-jarvis-Darwin := -Wl,-rpath,@loader_path/../lib -Wl,-rpath,@loader_path
 LDFLAGS-libjarvis-Windows := -Wl,--export-all-symbols
 CFLAGS-BIN-Windows :=
 
@@ -36,7 +36,7 @@ WASM_EXTRA_CFLAGS := -Iinclude -I../libstele/include
 
 include ../mk/include.mk
 
-MOD_RPATH_Linux := -Wl,--disable-new-dtags -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib' -Wl,-rpath,'${CURDIR}/../libstele/lib'
+MOD_RPATH_Linux := -Wl,--disable-new-dtags -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
 MOD_RPATH_Unix := ${MOD_RPATH_Linux}
 MOD_RPATH_Darwin := -Wl,-rpath,@loader_path/.. -Wl,-rpath,@loader_path/../../lib
 MOD_RPATH_Windows :=
@@ -56,64 +56,88 @@ ifeq ($(WM_MODS),)
 WM_MODS := mods/firefox/ren-firefox.$(SO) mods/desktop/ren-desktop.$(SO) mods/ren-jarvis/ren-jarvis.$(SO)
 endif
 
-whispercpp := submodules/whisper.cpp/build
-WHISPER_A := $(whispercpp)/src/libwhisper.a
-JARVISD_BIN := bin/jarvisd$(EXE)
-
+JARVIS_BACKEND ?= auto
 LINUX_VULKAN_SDK := third_party/1.4.328.1
 VULKAN_SDK_URL := https://sdk.lunarg.com/sdk/download/1.4.328.1/linux/vulkansdk-linux-x86_64-1.4.328.1.tar.xz
+
+HAVE_CUDA := $(shell command -v nvcc >/dev/null 2>&1 && (ldconfig -p 2>/dev/null | grep -q libcudart || [ -f /usr/local/cuda/lib64/libcudart.so ]) && echo 1)
+HAVE_SYS_VULKAN := $(shell pkg-config --exists vulkan 2>/dev/null && command -v glslc >/dev/null 2>&1 && echo 1)
+HAVE_SDK_VULKAN := $(shell [ -f "$(LINUX_VULKAN_SDK)/x86_64/share/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake" ] && echo 1)
+HAVE_OPENBLAS := $(shell pkg-config --exists openblas 2>/dev/null && echo 1)
+
+ifeq ($(JARVIS_BACKEND),auto)
+  ifeq (${uname},Darwin)
+    JARVIS_BACKEND_EFF := metal
+  else ifeq (${uname},Linux)
+    ifneq ($(HAVE_CUDA),)
+      JARVIS_BACKEND_EFF := cuda
+    else ifneq ($(or $(HAVE_SYS_VULKAN),$(HAVE_SDK_VULKAN)),)
+      JARVIS_BACKEND_EFF := vulkan
+    else
+      JARVIS_BACKEND_EFF := cpu
+    endif
+  else ifeq (${SYS},Windows)
+    ifneq ($(HAVE_CUDA),)
+      JARVIS_BACKEND_EFF := cuda
+    else ifneq ($(VULKAN_SDK),)
+      JARVIS_BACKEND_EFF := vulkan
+    else
+      JARVIS_BACKEND_EFF := cpu
+    endif
+  else
+    JARVIS_BACKEND_EFF := cpu
+  endif
+  whispercpp := submodules/whisper.cpp/build
+else
+  JARVIS_BACKEND_EFF := $(JARVIS_BACKEND)
+  whispercpp := submodules/whisper.cpp/build-$(JARVIS_BACKEND_EFF)
+endif
+
+WHISPER_A := $(whispercpp)/src/libwhisper.a
+PARAKEET_A := $(whispercpp)/src/libparakeet.a
+JARVISD_BIN := bin/jarvisd$(EXE)
 
 $(LINUX_VULKAN_SDK)/x86_64/share/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake:
 	mkdir -p third_party
 	(curl -fsSL "$(VULKAN_SDK_URL)" -o third_party/vulkan-sdk.tar.xz || wget -qO third_party/vulkan-sdk.tar.xz "$(VULKAN_SDK_URL)")
 	tar -xf third_party/vulkan-sdk.tar.xz -C third_party
 
-ifeq (${uname},Linux)
-$(whispercpp)/Makefile: $(LINUX_VULKAN_SDK)/x86_64/share/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake
-	@echo "[INFO] Vulkan SDK extracted at $(LINUX_VULKAN_SDK)"
-	@mkdir -p $(whispercpp)
-	cd $(whispercpp) && cmake .. \
-		-DCMAKE_PREFIX_PATH=$(CURDIR)/$(LINUX_VULKAN_SDK)/x86_64 \
-		-DGGML_VULKAN=ON \
-		-DBUILD_SHARED_LIBS=OFF \
-		-DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-		-DWHISPER_BUILD_EXAMPLES=OFF \
-		-DWHISPER_BUILD_TESTS=OFF \
-		-DWHISPER_BUILD_SERVER=OFF
-else ifeq (${uname},Darwin)
-$(whispercpp)/Makefile:
-	@mkdir -p $(whispercpp)
-	cd $(whispercpp) && cmake .. \
-		-DGGML_METAL=ON \
-		-DGGML_OPENMP=OFF \
-		-DBUILD_SHARED_LIBS=OFF \
-		-DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-		-DWHISPER_BUILD_EXAMPLES=OFF \
-		-DWHISPER_BUILD_TESTS=OFF \
-		-DWHISPER_BUILD_SERVER=OFF
-else ifeq (${SYS},Windows)
-$(whispercpp)/Makefile:
-	@mkdir -p $(whispercpp)
-	cd $(whispercpp) && cmake .. \
-		-G "MSYS Makefiles" \
-		-DGGML_VULKAN=$(if $(VULKAN_SDK),ON,OFF) \
-		-DGGML_OPENMP=OFF \
-		-DBUILD_SHARED_LIBS=OFF \
-		-DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-		-DWHISPER_BUILD_EXAMPLES=OFF \
-		-DWHISPER_BUILD_TESTS=OFF \
-		-DWHISPER_BUILD_SERVER=OFF
+WHISPER_CMAKE_COMMON := -DBUILD_SHARED_LIBS=OFF \
+	-DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+	-DWHISPER_BUILD_EXAMPLES=OFF \
+	-DWHISPER_BUILD_TESTS=OFF \
+	-DWHISPER_BUILD_SERVER=OFF
+
+ifeq ($(JARVIS_BACKEND_EFF),cuda)
+  WHISPER_CMAKE_BACKEND := -DGGML_CUDA=ON -DGGML_VULKAN=OFF -DGGML_METAL=OFF
+else ifeq ($(JARVIS_BACKEND_EFF),vulkan)
+  ifeq (${uname},Linux)
+    ifneq ($(HAVE_SYS_VULKAN),)
+      WHISPER_CMAKE_BACKEND := -DGGML_VULKAN=ON -DGGML_CUDA=OFF
+      WHISPER_CMAKE_DEPS :=
+    else
+      WHISPER_CMAKE_BACKEND := -DCMAKE_PREFIX_PATH=$(CURDIR)/$(LINUX_VULKAN_SDK)/x86_64 -DGGML_VULKAN=ON -DGGML_CUDA=OFF
+      WHISPER_CMAKE_DEPS := $(LINUX_VULKAN_SDK)/x86_64/share/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake
+    endif
+  else
+    WHISPER_CMAKE_BACKEND := -DGGML_VULKAN=ON -DGGML_CUDA=OFF
+  endif
+else ifeq ($(JARVIS_BACKEND_EFF),metal)
+  WHISPER_CMAKE_BACKEND := -DGGML_METAL=ON -DGGML_OPENMP=OFF
 else
-$(whispercpp)/Makefile:
-	@mkdir -p $(whispercpp)
-	cd $(whispercpp) && cmake .. \
-		-DGGML_VULKAN=OFF \
-		-DBUILD_SHARED_LIBS=OFF \
-		-DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-		-DWHISPER_BUILD_EXAMPLES=OFF \
-		-DWHISPER_BUILD_TESTS=OFF \
-		-DWHISPER_BUILD_SERVER=OFF
+  WHISPER_CMAKE_BACKEND := -DGGML_VULKAN=OFF -DGGML_CUDA=OFF -DGGML_METAL=OFF $(if $(HAVE_OPENBLAS),-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS)
 endif
+
+ifeq (${SYS},Windows)
+  WHISPER_CMAKE_GEN := -G "MSYS Makefiles" -DGGML_OPENMP=OFF
+else
+  WHISPER_CMAKE_GEN :=
+endif
+
+$(whispercpp)/Makefile: $(WHISPER_CMAKE_DEPS)
+	@echo "[INFO] Configuring whisper.cpp ($(JARVIS_BACKEND_EFF)) in $(whispercpp)"
+	@mkdir -p $(whispercpp)
+	cd $(whispercpp) && cmake .. $(WHISPER_CMAKE_GEN) $(WHISPER_CMAKE_BACKEND) $(WHISPER_CMAKE_COMMON)
 
 all: $(WM_MODS) $(JARVISD_BIN)
 
@@ -156,32 +180,35 @@ mods/ren-jarvis/ren-jarvis.$(SO): mods/ren-jarvis/ren-jarvis.c
 	@mkdir -p mods/ren-jarvis
 	$(cc) $(CFLAGS) -I../axil-auren/include -I../libxylem/include -fPIC -shared -o $@ mods/ren-jarvis/ren-jarvis.c $(LDFLAGS) $(MOD_DEPS_LDFLAGS) $(MOD_RPATH_${SYS})
 
-$(WHISPER_A): $(whispercpp)/Makefile
-	$(MAKE) -C $(whispercpp) -j4 whisper
+$(WHISPER_A) $(PARAKEET_A): $(whispercpp)/Makefile
+	$(MAKE) -C $(whispercpp) -j4 whisper parakeet
 
 GGML_STATIC_LIBS = $(whispercpp)/ggml/src/libggml.a \
+	$(shell [ -f "$(whispercpp)/ggml/src/ggml-cuda/libggml-cuda.a" ] && echo "$(whispercpp)/ggml/src/ggml-cuda/libggml-cuda.a") \
 	$(shell [ -f "$(whispercpp)/ggml/src/ggml-vulkan/libggml-vulkan.a" ] && echo "$(whispercpp)/ggml/src/ggml-vulkan/libggml-vulkan.a") \
 	$(shell [ -f "$(whispercpp)/ggml/src/ggml-metal/libggml-metal.a" ] && echo "$(whispercpp)/ggml/src/ggml-metal/libggml-metal.a") \
 	$(shell [ -f "$(whispercpp)/ggml/src/ggml-blas/libggml-blas.a" ] && echo "$(whispercpp)/ggml/src/ggml-blas/libggml-blas.a") \
 	$(whispercpp)/ggml/src/libggml-cpu.a \
 	$(whispercpp)/ggml/src/libggml-base.a
 
-JARVISD_LIBS-Linux := -lvulkan -lstdc++ -lgomp -lpthread -ldl -lm
-JARVISD_LIBS-Darwin := -lc++ -framework Accelerate -framework Metal -framework Foundation -framework CoreFoundation -framework AudioUnit -framework AudioToolbox -framework CoreAudio -framework ApplicationServices -framework Carbon -lpthread -ldl -lm
-JARVISD_LIBS-Windows := $(if $(VULKAN_SDK),-L"$(VULKAN_SDK)/Lib" -lvulkan-1) -lstdc++ -lws2_32 -lwinmm -lole32 -luuid -lm
-JARVISD_LIBS := $(or $(JARVISD_LIBS-${uname}),$(JARVISD_LIBS-${SYS}))
-ifeq ($(JARVISD_LIBS),)
-JARVISD_LIBS := -lstdc++ -lpthread -ldl -lm
-endif
+GGML_LINK_EXTRA = \
+	$(shell [ -f "$(whispercpp)/ggml/src/ggml-cuda/libggml-cuda.a" ] && echo "-lcudart -lcublas -lcublasLt -lcuda") \
+	$(shell [ -f "$(whispercpp)/ggml/src/ggml-vulkan/libggml-vulkan.a" ] && (if [ "${SYS}" = "Windows" ]; then echo "-L\"$(VULKAN_SDK)/Lib\" -lvulkan-1"; else echo "-lvulkan"; fi)) \
+	$(shell [ -f "$(whispercpp)/ggml/src/ggml-blas/libggml-blas.a" ] && (if [ "${uname}" != "Darwin" ]; then echo "-lopenblas"; fi))
 
-$(JARVISD_BIN): src/jarvisd.c src/jarvis-dsp.c src/jarvis-dsp.h src/jarvis-stt.c src/jarvis-dispatch.c src/jarvis-ipc-srv.c src/jarvis-tts.c src/jarvis-tts.h $(WHISPER_A) lib/libjarvis.$(SO)
+JARVISD_LIBS-Linux = $(GGML_LINK_EXTRA) -lstdc++ -lgomp -lpthread -ldl -lm
+JARVISD_LIBS-Darwin = -lc++ -framework Accelerate -framework Metal -framework Foundation -framework CoreFoundation -framework AudioUnit -framework AudioToolbox -framework CoreAudio -framework ApplicationServices -framework Carbon -lpthread -ldl -lm
+JARVISD_LIBS-Windows = $(GGML_LINK_EXTRA) -lstdc++ -lws2_32 -lwinmm -lole32 -luuid -lm
+JARVISD_LIBS = $(or $(JARVISD_LIBS-${uname}),$(JARVISD_LIBS-${SYS}),$(GGML_LINK_EXTRA) -lstdc++ -lpthread -ldl -lm)
+
+$(JARVISD_BIN): src/jarvisd.c src/jarvis-dsp.c src/jarvis-dsp.h src/jarvis-vad.c src/jarvis-vad.h src/jarvis-kws.c src/jarvis-kws.h src/jarvis-stt.c src/jarvis-stt.h src/jarvis-stt-backend.h src/jarvis-stt-whisper.c src/jarvis-stt-parakeet.c src/jarvis-stream.c src/jarvis-stream.h src/jarvis-dispatch.c src/jarvis-ipc-srv.c src/jarvis-ipc-srv.h src/jarvis-tts.c src/jarvis-tts.h $(WHISPER_A) $(PARAKEET_A) lib/libjarvis.$(SO)
 	@mkdir -p bin
-	$(cc) -Iinclude -Isrc -I$(whispercpp)/../include -I$(whispercpp)/../ggml/include $(CFLAGS) -o $@ src/jarvisd.c src/jarvis-dsp.c src/jarvis-stt.c src/jarvis-dispatch.c src/jarvis-ipc-srv.c src/jarvis-tts.c \
-		$(WHISPER_A) $(GGML_STATIC_LIBS) \
+	$(cc) -Iinclude -Isrc -I$(whispercpp)/../include -I$(whispercpp)/../ggml/include $(CFLAGS) -o $@ src/jarvisd.c src/jarvis-dsp.c src/jarvis-vad.c src/jarvis-kws.c src/jarvis-stt.c src/jarvis-stt-whisper.c src/jarvis-stt-parakeet.c src/jarvis-stream.c src/jarvis-dispatch.c src/jarvis-ipc-srv.c src/jarvis-tts.c \
+		$(WHISPER_A) $(PARAKEET_A) $(GGML_STATIC_LIBS) \
 		-Llib -ljarvis -L../libstele/lib -lstele $(LDFLAGS) $(JARVISD_LIBS) $(or $(LDFLAGS-jarvis-${uname}),$(LDFLAGS-jarvis-${SYS}))
 
 test: all
-	$(MAKE) -C tests test
+	$(MAKE) -C tests WHISPER_BUILD=../$(whispercpp) test
 
 ${DESTDIR}${PREFIX}/lib/pkgconfig/jarvis.pc: jarvis.pc
 	install -d ${DESTDIR}${PREFIX}/lib/pkgconfig
@@ -225,8 +252,11 @@ install-extra: ${DESTDIR}${PREFIX}/lib/pkgconfig/jarvis.pc $(INSTALLED_WM_MODS)
 	@rm -f ${DESTDIR}${PREFIX}/lib/mod_sway.so ${DESTDIR}${PREFIX}/lib/mod_hyprland.so ${DESTDIR}${PREFIX}/lib/mod_tts.so ${DESTDIR}${PREFIX}/lib/ren/mod_jarvis.so
 	@rm -f ${DESTDIR}${PREFIX}/lib/jarvis/jarvis-*.so
 	@rmdir ${DESTDIR}${PREFIX}/lib/jarvis 2>/dev/null || true
-	@install -d ${DESTDIR}${PREFIX}/bin ${DESTDIR}${PREFIX}/share/jarvis
+	@install -d ${DESTDIR}${PREFIX}/bin ${DESTDIR}${PREFIX}/share/jarvis ${DESTDIR}${PREFIX}/share/jarvis/models
 	@install -m 644 data/ontology.json ${DESTDIR}${PREFIX}/share/jarvis/ontology.json
+	@if [ -f submodules/whisper.cpp/models/for-tests-silero-v6.2.0-ggml.bin ]; then \
+		install -m 644 submodules/whisper.cpp/models/for-tests-silero-v6.2.0-ggml.bin ${DESTDIR}${PREFIX}/share/jarvis/models/ggml-silero-v6.2.0.bin; \
+	fi
 	@if [ -f data/99-jarvis-aec.conf ]; then \
 		install -m 644 data/99-jarvis-aec.conf ${DESTDIR}${PREFIX}/share/jarvis/99-jarvis-aec.conf; \
 	fi

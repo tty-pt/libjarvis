@@ -314,6 +314,28 @@ bool jarvis_is_non_speech_hallucination(const char *text)
 		}
 		if (most * 10 >= n * 8) return true;
 	}
+
+	/* Multi-codepoint periodic loop detector (period 2..4): catches laughter and
+	 * gibberish cycles like "Jajajajajaja...", "hahahahaha...", or repeating
+	 * multi-script glyph loops that bypass single-codepoint checks.
+	 */
+	if (n >= 8) {
+		size_t exact2 = 0;
+		for (size_t i = 2; i < n; i++) {
+			if (cps[i] == cps[i - 2]) exact2++;
+		}
+		if (exact2 == n - 2) return true;
+	}
+	if (n >= 12) {
+		for (size_t p = 2; p <= 4; p++) {
+			size_t matches = 0;
+			size_t total = n - p;
+			for (size_t i = p; i < n; i++) {
+				if (cps[i] == cps[i - p]) matches++;
+			}
+			if (matches * 10 >= total * 8) return true;
+		}
+	}
 	return false;
 }
 
@@ -471,53 +493,24 @@ static void upsert_kv_str_obj(const jjson_val_t *obj, jarvis_kv_str_t *dst, size
 	}
 }
 
-static const jjson_val_t *find_locale_obj(const jjson_val_t *locales, const char *lang)
+static const jjson_val_t *find_exact_locale_obj(const jjson_val_t *locales, const char *norm_key)
 {
-	if (!locales || locales->type != JJSON_OBJECT || !lang || !*lang) return NULL;
-
-	char norm[JARVIS_SHORT_LEN];
-	size_t nw = 0;
-	for (size_t i = 0; lang[i] && nw + 1 < sizeof(norm); i++) {
-		char c = lang[i];
-		if (c == '.' || c == '@') break;
-		if (c == '_') c = '-';
-		if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-		norm[nw++] = c;
-	}
-	norm[nw] = '\0';
-	if (!norm[0]) return NULL;
-
-	const jjson_val_t *v = jjson_obj_get(locales, norm);
+	if (!locales || locales->type != JJSON_OBJECT || !norm_key || !*norm_key) return NULL;
+	const jjson_val_t *v = jjson_obj_get(locales, norm_key);
 	if (v && v->type == JJSON_OBJECT) return v;
-
 	for (size_t i = 0; i < locales->u.obj.count; i++) {
 		const char *k = locales->u.obj.pairs[i].key;
 		const jjson_val_t *kv = locales->u.obj.pairs[i].val;
-		if (k && kv && kv->type == JJSON_OBJECT && strcasecmp(k, norm) == 0) {
+		if (k && kv && kv->type == JJSON_OBJECT && strcasecmp(k, norm_key) == 0) {
 			return kv;
-		}
-	}
-
-	char *dash = strchr(norm, '-');
-	if (dash) {
-		*dash = '\0';
-		v = jjson_obj_get(locales, norm);
-		if (v && v->type == JJSON_OBJECT) return v;
-		for (size_t i = 0; i < locales->u.obj.count; i++) {
-			const char *k = locales->u.obj.pairs[i].key;
-			const jjson_val_t *kv = locales->u.obj.pairs[i].val;
-			if (k && kv && kv->type == JJSON_OBJECT && strcasecmp(k, norm) == 0) {
-				return kv;
-			}
 		}
 	}
 	return NULL;
 }
 
-static void apply_locale_override(jarvis_ontology_t *ont, const jjson_val_t *locales, const char *target_lang)
+static void apply_locale_obj(jarvis_ontology_t *ont, const jjson_val_t *loc)
 {
-	const jjson_val_t *loc = find_locale_obj(locales, target_lang);
-	if (!loc) return;
+	if (!ont || !loc) return;
 
 	const char *s = jjson_obj_get_str(loc, "lang", NULL);
 	if (s && *s) snprintf(ont->lang, sizeof(ont->lang), "%s", s);
@@ -534,6 +527,9 @@ static void apply_locale_override(jarvis_ontology_t *ont, const jjson_val_t *loc
 	s = jjson_obj_get_str(loc, "whisper_cmd_prompt", NULL);
 	if (s && *s) snprintf(ont->whisper_cmd_prompt, sizeof(ont->whisper_cmd_prompt), "%s", s);
 
+	s = jjson_obj_get_str(loc, "dictation_seed", NULL);
+	if (s && *s) snprintf(ont->dictation_seed, sizeof(ont->dictation_seed), "%s", s);
+
 	upsert_kv_str_obj(jjson_obj_get(loc, "ui_strings"), ont->ui_strings, JARVIS_MAX_UI_STRINGS, &ont->ui_string_count);
 	upsert_kv_str_obj(jjson_obj_get(loc, "reply_templates"), ont->reply_templates, JARVIS_MAX_REPLY_TEMPLATES, &ont->reply_template_count);
 
@@ -547,6 +543,60 @@ static void apply_locale_override(jarvis_ontology_t *ont, const jjson_val_t *loc
 	append_id_str_list(jjson_obj_get(loc, "hallucination_phrases"), ont->hallucinations, JARVIS_MAX_HALLUCINATIONS, &ont->hallucination_count);
 	append_short_str_list(jjson_obj_get(loc, "stopwords"), ont->stopwords, JARVIS_MAX_STOPWORDS, &ont->stopword_count);
 	append_short_str_list(jjson_obj_get(loc, "conjunctions"), ont->conjunctions, JARVIS_MAX_CONJUNCTIONS, &ont->conjunction_count);
+	const jjson_val_t *loc_cont = jjson_obj_get(loc, "continuation_tokens");
+	if (loc_cont && loc_cont->type == JJSON_ARRAY && loc_cont->u.arr.count > 0) {
+		ont->continuation_token_count = 0;
+		load_short_str_list(loc_cont, ont->continuation_tokens, JARVIS_MAX_CONTINUATION_TOKENS, &ont->continuation_token_count);
+	}
+}
+
+static void apply_locale_override(jarvis_ontology_t *ont, const jjson_val_t *locales, const char *target_lang)
+{
+	if (!locales || locales->type != JJSON_OBJECT || !target_lang || !*target_lang) return;
+
+	char norm[JARVIS_SHORT_LEN];
+	size_t nw = 0;
+	for (size_t i = 0; target_lang[i] && nw + 1 < sizeof(norm); i++) {
+		char c = target_lang[i];
+		if (c == '.' || c == '@') break;
+		if (c == '_') c = '-';
+		if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+		norm[nw++] = c;
+	}
+	norm[nw] = '\0';
+	if (!norm[0]) return;
+
+	/* Inherit base language first (e.g. "pt"), then overlay exact regional entry (e.g. "pt-br"). */
+	char *dash = strchr(norm, '-');
+	if (dash) {
+		char base[JARVIS_SHORT_LEN];
+		size_t blen = (size_t)(dash - norm);
+		if (blen >= sizeof(base)) blen = sizeof(base) - 1;
+		memcpy(base, norm, blen);
+		base[blen] = '\0';
+		const jjson_val_t *base_loc = find_exact_locale_obj(locales, base);
+		if (base_loc) apply_locale_obj(ont, base_loc);
+	}
+
+	const jjson_val_t *exact_loc = find_exact_locale_obj(locales, norm);
+	if (exact_loc) apply_locale_obj(ont, exact_loc);
+}
+
+static void upsert_locale_kv(jarvis_kv_str_t *tbl, size_t max_items, size_t *io_count,
+                             const char *key, const char *val)
+{
+	if (!tbl || !io_count || !key || !*key || !val || !*val) return;
+	for (size_t j = 0; j < *io_count; j++) {
+		if (strcmp(tbl[j].key, key) == 0) {
+			snprintf(tbl[j].val, sizeof(tbl[j].val), "%s", val);
+			return;
+		}
+	}
+	if (*io_count < max_items) {
+		jarvis_kv_str_t *kv = &tbl[(*io_count)++];
+		snprintf(kv->key, sizeof(kv->key), "%s", key);
+		snprintf(kv->val, sizeof(kv->val), "%s", val);
+	}
 }
 
 jarvis_ontology_t *jarvis_ontology_create_from_json_for_lang(const char *json_str, const char *lang)
@@ -570,6 +620,7 @@ jarvis_ontology_t *jarvis_ontology_create_from_json_for_lang(const char *json_st
 	snprintf(ont->wake_word, sizeof(ont->wake_word), "%s", jjson_obj_get_str(root, "wake_word", ""));
 	snprintf(ont->whisper_wake_prompt, sizeof(ont->whisper_wake_prompt), "%s", jjson_obj_get_str(root, "whisper_wake_prompt", ""));
 	snprintf(ont->whisper_cmd_prompt, sizeof(ont->whisper_cmd_prompt), "%s", jjson_obj_get_str(root, "whisper_cmd_prompt", ""));
+	snprintf(ont->dictation_seed, sizeof(ont->dictation_seed), "%s", jjson_obj_get_str(root, "dictation_seed", ""));
 
 	load_kv_str_obj(jjson_obj_get(root, "ui_strings"), ont->ui_strings, JARVIS_MAX_UI_STRINGS, &ont->ui_string_count);
 	load_kv_str_obj(jjson_obj_get(root, "reply_templates"), ont->reply_templates, JARVIS_MAX_REPLY_TEMPLATES, &ont->reply_template_count);
@@ -583,13 +634,59 @@ jarvis_ontology_t *jarvis_ontology_create_from_json_for_lang(const char *json_st
 	load_short_str_list(jjson_obj_get(root, "tier1_triggers"), ont->tier1_triggers, JARVIS_MAX_TIER1_TRIGGERS, &ont->tier1_trigger_count);
 	load_id_str_list(jjson_obj_get(root, "hallucination_phrases"), ont->hallucinations, JARVIS_MAX_HALLUCINATIONS, &ont->hallucination_count);
 
-	/* 1. Stopwords & conjunctions */
+	/* 1. Stopwords, conjunctions & syntactic continuation tokens */
 	load_short_str_list(jjson_obj_get(root, "stopwords"), ont->stopwords, JARVIS_MAX_STOPWORDS, &ont->stopword_count);
 	load_short_str_list(jjson_obj_get(root, "conjunctions"), ont->conjunctions, JARVIS_MAX_CONJUNCTIONS, &ont->conjunction_count);
+	load_short_str_list(jjson_obj_get(root, "continuation_tokens"), ont->continuation_tokens, JARVIS_MAX_CONTINUATION_TOKENS, &ont->continuation_token_count);
 
-	/* 1b. Optional locale overlay (`"locales": { "en": {...}, "pt": {...} }`) */
+	/* 1a. Seed locale wake_ack & dictation_seed tables from root + all locale entries */
+	{
+		const char *root_ack = jarvis_ontology_get_ui_string(ont, "wake_ack", NULL);
+		if (root_ack && *root_ack && ont->lang[0]) {
+			upsert_locale_kv(ont->locale_wake_acks, JARVIS_MAX_LOCALE_ACKS,
+			                 &ont->locale_wake_ack_count, ont->lang, root_ack);
+		}
+		if (ont->dictation_seed[0] && ont->lang[0]) {
+			upsert_locale_kv(ont->locale_dictation_seeds, JARVIS_MAX_DICTATION_SEEDS,
+			                 &ont->locale_dictation_seed_count, ont->lang, ont->dictation_seed);
+		}
+	}
+
+	/* 1b. Optional locale overlay (`"locales": { "en": {...}, "pt": {...}, "pt-br": {...} }`) */
 	const jjson_val_t *locales = jjson_obj_get(root, "locales");
 	if (locales && locales->type == JJSON_OBJECT) {
+		for (size_t i = 0; i < locales->u.obj.count; i++) {
+			const char *lk = locales->u.obj.pairs[i].key;
+			const jjson_val_t *lv = locales->u.obj.pairs[i].val;
+			if (!lk || !*lk || !lv || lv->type != JJSON_OBJECT) continue;
+
+			char norm[JARVIS_WORD_LEN];
+			size_t nw = 0;
+			for (size_t k = 0; lk[k] && nw + 1 < sizeof(norm); k++) {
+				char c = lk[k];
+				if (c == '.' || c == '@') break;
+				if (c == '_') c = '-';
+				if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+				norm[nw++] = c;
+			}
+			norm[nw] = '\0';
+			if (!norm[0]) continue;
+
+			const char *ack = jjson_obj_get_str(lv, "wake_ack", NULL);
+			if (!ack || !*ack)
+				ack = jjson_obj_get_str(jjson_obj_get(lv, "ui_strings"), "wake_ack", NULL);
+			if (ack && *ack) {
+				upsert_locale_kv(ont->locale_wake_acks, JARVIS_MAX_LOCALE_ACKS,
+				                 &ont->locale_wake_ack_count, norm, ack);
+			}
+
+			const char *dseed = jjson_obj_get_str(lv, "dictation_seed", NULL);
+			if (dseed && *dseed) {
+				upsert_locale_kv(ont->locale_dictation_seeds, JARVIS_MAX_DICTATION_SEEDS,
+				                 &ont->locale_dictation_seed_count, norm, dseed);
+			}
+		}
+
 		char eff_lang[JARVIS_SHORT_LEN] = {0};
 		if (lang && *lang) {
 			snprintf(eff_lang, sizeof(eff_lang), "%s", lang);
@@ -656,6 +753,11 @@ jarvis_ontology_t *jarvis_ontology_create_from_json_for_lang(const char *json_st
 		char c[JARVIS_ID_LEN];
 		jarvis_clean_phrase(ont->hallucinations[i], c, sizeof(c));
 		snprintf(ont->hallucinations[i], sizeof(ont->hallucinations[i]), "%s", c);
+	}
+	for (size_t i = 0; i < ont->continuation_token_count; i++) {
+		char c[JARVIS_SHORT_LEN];
+		jarvis_clean_phrase(ont->continuation_tokens[i], c, sizeof(c));
+		snprintf(ont->continuation_tokens[i], sizeof(ont->continuation_tokens[i]), "%s", c);
 	}
 
 	jjson_free(root);
@@ -837,6 +939,93 @@ const char *jarvis_ontology_get_reply_template(const jarvis_ontology_t *ont, con
 	return NULL;
 }
 
+const char *jarvis_ontology_get_wake_ack_for_lang(const jarvis_ontology_t *ont, const char *lang)
+{
+	if (!ont) ont = jarvis_ontology_get_active();
+	if (!ont) return NULL;
+
+	if (lang && *lang) {
+		char norm[JARVIS_WORD_LEN];
+		size_t nw = 0;
+		for (size_t i = 0; lang[i] && nw + 1 < sizeof(norm); i++) {
+			char c = lang[i];
+			if (c == '.' || c == '@') break;
+			if (c == '_') c = '-';
+			if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+			norm[nw++] = c;
+		}
+		norm[nw] = '\0';
+
+		if (norm[0]) {
+			for (size_t i = 0; i < ont->locale_wake_ack_count; i++) {
+				if (strcmp(ont->locale_wake_acks[i].key, norm) == 0 &&
+				    ont->locale_wake_acks[i].val[0]) {
+					return ont->locale_wake_acks[i].val;
+				}
+			}
+			char *dash = strchr(norm, '-');
+			if (dash) {
+				*dash = '\0';
+				for (size_t i = 0; i < ont->locale_wake_ack_count; i++) {
+					if (strcmp(ont->locale_wake_acks[i].key, norm) == 0 &&
+					    ont->locale_wake_acks[i].val[0]) {
+						return ont->locale_wake_acks[i].val;
+					}
+				}
+			}
+		}
+	}
+
+	const char *fallback = jarvis_ontology_get_ui_string(ont, "wake_ack", NULL);
+	return (fallback && *fallback) ? fallback : NULL;
+}
+
+const char *jarvis_ontology_get_dictation_seed_for_lang(const jarvis_ontology_t *ont, const char *lang)
+{
+	if (!ont) ont = jarvis_ontology_get_active();
+	if (!ont) return NULL;
+
+	if (lang && *lang) {
+		if (strcasecmp(lang, "auto") == 0)
+			return NULL;
+		if (strcasecmp(lang, "kbd") != 0) {
+			char norm[JARVIS_WORD_LEN];
+			size_t nw = 0;
+			for (size_t i = 0; lang[i] && nw + 1 < sizeof(norm); i++) {
+				char c = lang[i];
+				if (c == '.' || c == '@') break;
+				if (c == '_') c = '-';
+				if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+				norm[nw++] = c;
+			}
+			norm[nw] = '\0';
+
+			if (norm[0]) {
+				for (size_t i = 0; i < ont->locale_dictation_seed_count; i++) {
+					if (strcmp(ont->locale_dictation_seeds[i].key, norm) == 0 &&
+					    ont->locale_dictation_seeds[i].val[0]) {
+						return ont->locale_dictation_seeds[i].val;
+					}
+				}
+				char *dash = strchr(norm, '-');
+				if (dash) {
+					*dash = '\0';
+					for (size_t i = 0; i < ont->locale_dictation_seed_count; i++) {
+						if (strcmp(ont->locale_dictation_seeds[i].key, norm) == 0 &&
+						    ont->locale_dictation_seeds[i].val[0]) {
+							return ont->locale_dictation_seeds[i].val;
+						}
+					}
+				}
+			}
+			/* Never leak another language's seed when a specific language was requested */
+			return NULL;
+		}
+	}
+
+	return ont->dictation_seed[0] ? ont->dictation_seed : NULL;
+}
+
 void jarvis_ontology_destroy(jarvis_ontology_t *ont)
 {
 	if (g_active_ontology == ont) g_active_ontology = NULL;
@@ -848,6 +1037,38 @@ bool jarvis_ontology_is_stopword(const jarvis_ontology_t *ont, const char *word)
 	if (!ont || !word) return false;
 	for (size_t i = 0; i < ont->stopword_count; i++) {
 		if (strcmp(ont->stopwords[i], word) == 0) return true;
+	}
+	return false;
+}
+
+bool jarvis_ontology_ends_with_continuation(const jarvis_ontology_t *ont, const char *text)
+{
+	if (!ont) ont = jarvis_ontology_get_active();
+	if (!ont || !text || !*text || ont->continuation_token_count == 0)
+		return false;
+
+	char clean[JARVIS_CLAUSE_LEN];
+	size_t clen = jarvis_clean_phrase(text, clean, sizeof(clean));
+	if (clen == 0)
+		return false;
+
+	const char *last_sp = strrchr(clean, ' ');
+	const char *tok = last_sp ? (last_sp + 1) : clean;
+	size_t tlen = strlen(tok);
+	if (tlen == 0)
+		return false;
+
+	for (size_t i = 0; i < ont->continuation_token_count; i++) {
+		const char *ct = ont->continuation_tokens[i];
+		if (!ct[0]) continue;
+		if (strcmp(tok, ct) == 0)
+			return true;
+		/* Non-space-delimited scripts (CJK/Thai/Devanagari: 3-byte UTF-8 >= 0xE0) */
+		if ((unsigned char)ct[0] >= 0xE0) {
+			size_t ctlen = strlen(ct);
+			if (tlen >= ctlen && memcmp(tok + tlen - ctlen, ct, ctlen) == 0)
+				return true;
+		}
 	}
 	return false;
 }

@@ -132,7 +132,6 @@ test_stereo_coherence_separation(void)
 	float out[320];
 
 	/* Phase 1 (1.0s): Diffuse uncorrelated background noise/chatter */
-	double bg_in_sq = 0.0, bg_out_sq = 0.0;
 	double bg_ns_sum = 0.0;
 	int bg_cnt = 0;
 	for (int f = 0; f < 50; f++) {
@@ -141,24 +140,20 @@ test_stereo_coherence_separation(void)
 			float r = 0.25f * rand_uniform();
 			in[i * 2] = f2s16(l);
 			in[i * 2 + 1] = f2s16(r);
-			if (f >= 15)
-				bg_in_sq += (double)(0.5f * (l + r)) * (double)(0.5f * (l + r));
 		}
 		float ns = 0.0f;
 		jarvis_dsp_process_frame(&dsp, in, 320, out, &ns);
-		if (f >= 15) {
-			for (int i = 0; i < 320; i++)
-				bg_out_sq += (double)out[i] * (double)out[i];
+		if (f >= 20) {
 			bg_ns_sum += ns;
 			bg_cnt++;
 		}
 	}
 	assert(jarvis_dsp_is_stereo_active(&dsp) == 1);
 	double bg_ns_avg = bg_ns_sum / (double)bg_cnt;
-	double bg_atten_db = 10.0 * log10((bg_out_sq + 1e-12) / (bg_in_sq + 1e-12));
 
-	/* Phase 2 (0.8s): Near-field centered broadband speech (in-phase L == R harmonics 250-5500 Hz)
-	 * mixed with weaker diffuse room noise */
+	/* Phase 2 (0.8s): Near-field centered broadband speech (in-phase L == R harmonics 350-5200 Hz)
+	 * mixed with weaker diffuse room noise -> must yield high near_score AND unity ASR RMS.
+	 */
 	double sp_in_sq = 0.0, sp_out_sq = 0.0;
 	double sp_ns_sum = 0.0;
 	int sp_cnt = 0;
@@ -169,17 +164,17 @@ test_stereo_coherence_separation(void)
 			        + 0.12f * sinf(2.0f * (float)M_PI * 2200.0f * (float)t / 16000.0f)
 			        + 0.12f * sinf(2.0f * (float)M_PI * 3800.0f * (float)t / 16000.0f)
 			        + 0.10f * sinf(2.0f * (float)M_PI * 5200.0f * (float)t / 16000.0f);
-			float nl = 0.05f * rand_uniform();
-			float nr = 0.05f * rand_uniform();
+			float nl = 0.04f * rand_uniform();
+			float nr = 0.04f * rand_uniform();
 			float l = v + nl, r = v + nr;
 			in[i * 2] = f2s16(l);
 			in[i * 2 + 1] = f2s16(r);
-			if (f >= 6)
+			if (f >= 8)
 				sp_in_sq += (double)v * (double)v;
 		}
 		float ns = 0.0f;
 		jarvis_dsp_process_frame(&dsp, in, 320, out, &ns);
-		if (f >= 6) {
+		if (f >= 8) {
 			for (int i = 0; i < 320; i++)
 				sp_out_sq += (double)out[i] * (double)out[i];
 			sp_ns_sum += ns;
@@ -188,36 +183,92 @@ test_stereo_coherence_separation(void)
 	}
 	double sp_ns_avg = sp_ns_sum / (double)sp_cnt;
 	double sp_atten_db = 10.0 * log10((sp_out_sq + 1e-12) / (sp_in_sq + 1e-12));
-	double snr_gain_db = sp_atten_db - bg_atten_db;
 
-	assert(bg_ns_avg < 0.25);
-	assert(sp_ns_avg > 0.70);
-	assert(snr_gain_db > 10.0);
-	printf("[PASS] Stereo coherence separation: bg_near=%.2f (%.1f dB) vs speech_near=%.2f (%.1f dB), SNR gain=+%.1f dB\n",
-	       bg_ns_avg, bg_atten_db, sp_ns_avg, sp_atten_db, snr_gain_db);
+	assert(bg_ns_avg < 0.30);
+	assert(sp_ns_avg > 0.75);
+	assert(fabs(sp_atten_db) < 0.8);
+
+	/* Phase 3: Off-axis stereo speech (tau = -2, +2, +3 samples @ 16kHz = +-125..187.5 us,
+	 * simulating 35-60 deg head turn where naive L+R cancels 4 kHz completely).
+	 * Must preserve BOTH near_score >= 0.75 AND unity RMS via GCC-PHAT delay alignment.
+	 */
+	const int taus[3] = { -2, 2, 3 };
+	for (int ti = 0; ti < 3; ti++) {
+		int tau = taus[ti];
+		jarvis_dsp_reset(&dsp);
+		/* Prime diffuse ambient baseline for 0.8s */
+		for (int f = 0; f < 40; f++) {
+			for (int i = 0; i < 320; i++) {
+				in[i * 2]     = f2s16(0.20f * rand_uniform());
+				in[i * 2 + 1] = f2s16(0.20f * rand_uniform());
+			}
+			jarvis_dsp_process_frame(&dsp, in, 320, out, NULL);
+		}
+		assert(jarvis_dsp_is_stereo_active(&dsp) == 1);
+
+		double oa_in_sq = 0.0, oa_out_sq = 0.0, oa_ns_sum = 0.0;
+		int oa_cnt = 0;
+		for (int f = 0; f < 45; f++) {
+			for (int i = 0; i < 320; i++) {
+				int t = f * 320 + i;
+				int tr = t - tau;
+				float vl = 0.12f * sinf(2.0f * (float)M_PI * 400.0f  * (float)t  / 16000.0f)
+				         + 0.14f * sinf(2.0f * (float)M_PI * 2400.0f * (float)t  / 16000.0f)
+				         + 0.14f * sinf(2.0f * (float)M_PI * 4000.0f * (float)t  / 16000.0f)
+				         + 0.10f * sinf(2.0f * (float)M_PI * 5200.0f * (float)t  / 16000.0f);
+				float vr = 0.12f * sinf(2.0f * (float)M_PI * 400.0f  * (float)tr / 16000.0f)
+				         + 0.14f * sinf(2.0f * (float)M_PI * 2400.0f * (float)tr / 16000.0f)
+				         + 0.14f * sinf(2.0f * (float)M_PI * 4000.0f * (float)tr / 16000.0f)
+				         + 0.10f * sinf(2.0f * (float)M_PI * 5200.0f * (float)tr / 16000.0f);
+				in[i * 2]     = f2s16(vl + 0.03f * rand_uniform());
+				in[i * 2 + 1] = f2s16(vr + 0.03f * rand_uniform());
+				if (f >= 12)
+					oa_in_sq += (double)vl * (double)vl;
+			}
+			float ns = 0.0f;
+			jarvis_dsp_process_frame(&dsp, in, 320, out, &ns);
+			if (f >= 12) {
+				for (int i = 0; i < 320; i++)
+					oa_out_sq += (double)out[i] * (double)out[i];
+				oa_ns_sum += ns;
+				oa_cnt++;
+			}
+		}
+		double oa_ns = oa_ns_sum / (double)oa_cnt;
+		double oa_db = 10.0 * log10((oa_out_sq + 1e-12) / (oa_in_sq + 1e-12));
+		assert(oa_ns >= 0.75);
+		assert(fabs(oa_db) < 0.8);
+		printf("[PASS] Off-axis stereo (tau=%+d smp): near=%.2f, unity_gain=%+.2f dB, tau_est=%+.2f\n",
+		       tau, oa_ns, oa_db, dsp.tau_est);
+	}
+
+	printf("[PASS] Stereo |Coh| separation (decoupled ASR): bg_near=%.2f vs on-axis_near=%.2f (%+.2f dB)\n",
+	       bg_ns_avg, sp_ns_avg, sp_atten_db);
 }
 
 static void
-test_downward_expander_and_agc(void)
+test_agc_onset_preservation_and_soft_limiter(void)
 {
-	/* 1. Speech burst (0.5s @ 0.25 amp) flanked by quiet background chatter (0.5s @ 0.015 amp) */
+	/* 1. Loud syllable (0.25 amp) flanked by quiet unstressed onset/tail (0.018 amp):
+	 *    Must preserve dynamic ratio (no -14 dB downward expander crushing onsets).
+	 */
 	const int n = 16000; /* 1.0s */
 	float *pcm = calloc((size_t)n, sizeof(float));
 	assert(pcm != NULL);
 	for (int i = 0; i < n; i++) {
-		float amp = (i >= 4000 && i < 12000) ? 0.25f : 0.015f;
+		float amp = (i >= 4000 && i < 12000) ? 0.25f : 0.018f;
 		pcm[i] = amp * sinf(2.0f * (float)M_PI * 700.0f * (float)i / 16000.0f);
 	}
-	float *out = jarvis_stt_apply_preemphasis_and_agc(pcm, n);
+	float *out = jarvis_stt_normalize_pcm(pcm, n, 0);
 	assert(out != NULL);
 
-	double bg_in  = calc_rms(pcm, 3200);
-	double sp_in  = calc_rms(pcm + 5000, 6000);
-	double bg_out = calc_rms(out, 3200);
-	double sp_out = calc_rms(out + 5000, 6000);
-	double in_ratio_db  = 20.0 * log10((sp_in + 1e-9) / (bg_in + 1e-9));
-	double out_ratio_db = 20.0 * log10((sp_out + 1e-9) / (bg_out + 1e-9));
-	assert(out_ratio_db > in_ratio_db + 6.0);
+	double onset_in  = calc_rms(pcm + 320, 3200);
+	double sp_in     = calc_rms(pcm + 5000, 6000);
+	double onset_out = calc_rms(out + 320, 3200);
+	double sp_out    = calc_rms(out + 5000, 6000);
+	double in_ratio_db  = 20.0 * log10((sp_in + 1e-9) / (onset_in + 1e-9));
+	double out_ratio_db = 20.0 * log10((sp_out + 1e-9) / (onset_out + 1e-9));
+	assert(fabs(out_ratio_db - in_ratio_db) < 0.5);
 	free(out);
 
 	/* 2. Flat steady quiet noise should NOT be boosted by full 5x (+14 dB) AGC */
@@ -230,10 +281,78 @@ test_downward_expander_and_agc(void)
 	double flat_gain = flat_out / (flat_in + 1e-9);
 	assert(flat_gain < 2.2);
 	free(out);
+
+	/* 3. Smooth soft-knee limiter bounds peaks strictly inside [-0.98, +0.98] without hard clip */
+	for (int i = 0; i < n; i++)
+		pcm[i] = 1.40f * sinf(2.0f * (float)M_PI * 600.0f * (float)i / 16000.0f);
+	out = jarvis_stt_normalize_pcm(pcm, n, 0);
+	assert(out != NULL);
+	float max_abs = 0.0f;
+	for (int i = 0; i < n; i++) {
+		float a = fabsf(out[i]);
+		if (a > max_abs) max_abs = a;
+	}
+	assert(max_abs > 0.85f && max_abs < 0.9801f);
+	free(out);
 	free(pcm);
 
-	printf("[PASS] Soft downward expander improved speech/gap ratio %.1f dB -> %.1f dB (+%.1f dB); flat-noise AGC capped (gain=%.2fx)\n",
-	       in_ratio_db, out_ratio_db, out_ratio_db - in_ratio_db, flat_gain);
+	/* 4. Linear-time scaling on max 90s utterance buffer (4500 frames) */
+	const int n90 = JARVIS_MAX_UTTER_FRAMES * JARVIS_FRAME_SAMPLES;
+	float *big = calloc((size_t)n90, sizeof(float));
+	assert(big != NULL);
+	for (int i = 0; i < n90; i++)
+		big[i] = 0.05f * sinf(2.0f * (float)M_PI * 440.0f * (float)i / 16000.0f);
+	out = jarvis_stt_normalize_pcm(big, n90, 0);
+	assert(out != NULL);
+	free(out);
+	free(big);
+
+	printf("[PASS] AGC preserved onset ratio (%.1f -> %.1f dB), capped flat noise (%.2fx), soft-limited peaks (%.3f), and scaled linearly on 90s buffer\n",
+	       in_ratio_db, out_ratio_db, flat_gain, max_abs);
+}
+
+static void
+test_audio_ctx_and_repetition_collapse(void)
+{
+	/* audio_ctx floors: >= 512 final, >= 256 partial, >= 128 wake, 0 = full native */
+	assert(jarvis_stt_compute_audio_ctx(16000, 0, 0) == 512);
+	assert(jarvis_stt_compute_audio_ctx(16000, 0, 1) == 256);
+	assert(jarvis_stt_compute_audio_ctx(16000, 1, 0) == 128);
+	assert(jarvis_stt_compute_audio_ctx_ex(16000, 0, 0, 0) == 0);
+	assert(jarvis_stt_compute_audio_ctx_ex(16000, 0, 0, 768) == 768);
+	assert(jarvis_stt_compute_audio_ctx_ex(480000, 0, 0, 512) == 0);
+
+	/* Short phrase repetition */
+	char buf[1024];
+	snprintf(buf, sizeof(buf), "Go to workspace 1 Go to workspace 1");
+	jarvis_stt_collapse_repetitions(buf, sizeof(buf));
+	assert(strcmp(buf, "Go to workspace 1") == 0);
+
+	/* Long 12-word clause repetition (>8 words previously escaped) */
+	snprintf(buf, sizeof(buf),
+	         "please open the calculator and check the monthly budget for this quarter "
+	         "please open the calculator and check the monthly budget for this quarter");
+	jarvis_stt_collapse_repetitions(buf, sizeof(buf));
+	assert(strcmp(buf, "please open the calculator and check the monthly budget for this quarter") == 0);
+
+	/* Long 20-word clause repetition */
+	snprintf(buf, sizeof(buf),
+	         "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty "
+	         "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty");
+	jarvis_stt_collapse_repetitions(buf, sizeof(buf));
+	assert(strcmp(buf, "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty") == 0);
+
+	/* Trailing truncated prefix repetition */
+	snprintf(buf, sizeof(buf), "open up miles davis open up miles");
+	jarvis_stt_collapse_repetitions(buf, sizeof(buf));
+	assert(strcmp(buf, "open up miles davis") == 0);
+
+	/* Distinct normal sentence preserved */
+	snprintf(buf, sizeof(buf), "abre a calculadora e o calendário por favor");
+	jarvis_stt_collapse_repetitions(buf, sizeof(buf));
+	assert(strcmp(buf, "abre a calculadora e o calendário por favor") == 0);
+
+	printf("[PASS] audio_ctx floors (final>=512, partial>=256, 0=full) and 1..24-word repetition collapse verified\n");
 }
 
 int
@@ -242,7 +361,8 @@ main(void)
 	test_mono_cola_and_hpf();
 	test_mono_summed_stereo_auto_bypass();
 	test_stereo_coherence_separation();
-	test_downward_expander_and_agc();
+	test_agc_onset_preservation_and_soft_limiter();
+	test_audio_ctx_and_repetition_collapse();
 	printf("[PASS] All jarvis-dsp + jarvis-stt DSP unit tests passed!\n");
 	return 0;
 }

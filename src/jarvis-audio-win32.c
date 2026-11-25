@@ -142,9 +142,13 @@ jarvis_audio_cap_t *jarvis_audio_cap_open(int sample_rate, int channels)
 		return NULL;
 	}
 
+	DWORD cap_buf_bytes = (DWORD)((cap->sample_rate * cap->channels * 2) / 50);
+	if (cap_buf_bytes < 640) cap_buf_bytes = 640;
+	if (cap_buf_bytes > CAP_BUF_BYTES) cap_buf_bytes = CAP_BUF_BYTES;
+
 	for (int i = 0; i < CAP_NUM_BUFS; i++) {
 		cap->hdrs[i].lpData = (LPSTR)cap->bufs[i];
-		cap->hdrs[i].dwBufferLength = CAP_BUF_BYTES;
+		cap->hdrs[i].dwBufferLength = cap_buf_bytes;
 		waveInPrepareHeader(cap->hwi, &cap->hdrs[i], sizeof(WAVEHDR));
 		waveInAddBuffer(cap->hwi, &cap->hdrs[i], sizeof(WAVEHDR));
 	}
@@ -485,6 +489,11 @@ int jarvis_audio_is_external_playing(void)
 	}
 	if (need_uninit) CoUninitialize();
 	return playing;
+}
+
+int jarvis_audio_has_aec_source(void)
+{
+	return 0;
 }
 
 bool jarvis_audio_has_capture_backend(void)

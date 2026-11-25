@@ -126,8 +126,12 @@ jarvis_audio_cap_t *jarvis_audio_cap_open(int sample_rate, int channels)
 		return NULL;
 	}
 
+	UInt32 cap_buf_bytes = (UInt32)((cap->sample_rate * cap->channels * 2) / 50);
+	if (cap_buf_bytes < 640) cap_buf_bytes = 640;
+	if (cap_buf_bytes > CAP_BUF_BYTES) cap_buf_bytes = CAP_BUF_BYTES;
+
 	for (int i = 0; i < CAP_NUM_BUFS; i++) {
-		if (AudioQueueAllocateBuffer(cap->queue, CAP_BUF_BYTES, &cap->bufs[i]) != noErr) {
+		if (AudioQueueAllocateBuffer(cap->queue, cap_buf_bytes, &cap->bufs[i]) != noErr) {
 			AudioQueueDispose(cap->queue, true);
 			pthread_cond_destroy(&cap->cv);
 			pthread_mutex_destroy(&cap->mu);
@@ -501,6 +505,11 @@ int jarvis_audio_is_external_playing(void)
 	    AudioObjectGetPropertyData(dev, &addr, 0, NULL, &sz, &running) == noErr) {
 		return running ? 1 : 0;
 	}
+	return 0;
+}
+
+int jarvis_audio_has_aec_source(void)
+{
 	return 0;
 }
 

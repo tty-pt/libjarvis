@@ -621,6 +621,56 @@ void jarvis_resolve_wake_word(const jarvis_ontology_t *ont, char *out, size_t ou
 	}
 }
 
+static bool is_wake_ack_disabled_val(const char *v)
+{
+	if (!v || !*v) return false;
+	return j_strcasecmp(v, "off") == 0 ||
+	       j_strcasecmp(v, "none") == 0 ||
+	       j_strcasecmp(v, "0") == 0 ||
+	       j_strcasecmp(v, "false") == 0;
+}
+
+bool jarvis_resolve_wake_ack(const jarvis_ontology_t *ont, const char *lang_hint, char *out, size_t out_sz)
+{
+	if (!out || out_sz == 0) return false;
+	out[0] = '\0';
+
+	const char *env_ack = getenv("JARVIS_WAKE_ACK");
+	if (env_ack && *env_ack) {
+		if (is_wake_ack_disabled_val(env_ack)) return false;
+		if (j_strcasecmp(env_ack, "auto") != 0) {
+			snprintf(out, out_sz, "%s", env_ack);
+			return true;
+		}
+	}
+
+	char rc_ack[128] = {0};
+	if (jarvis_rc_get("wake_ack", NULL, rc_ack, sizeof(rc_ack)) && rc_ack[0]) {
+		if (is_wake_ack_disabled_val(rc_ack)) return false;
+		if (j_strcasecmp(rc_ack, "auto") != 0) {
+			snprintf(out, out_sz, "%s", rc_ack);
+			return true;
+		}
+	}
+
+	char eff_lang[32] = {0};
+	if (lang_hint && normalize_lang_tag(lang_hint, eff_lang, sizeof(eff_lang)) &&
+	    strcmp(eff_lang, "auto") != 0 && strcmp(eff_lang, "kbd") != 0) {
+		/* Use caller-supplied effective language */
+	} else {
+		jarvis_resolve_lang(ont, eff_lang, sizeof(eff_lang));
+	}
+
+	const char *ack = jarvis_ontology_get_wake_ack_for_lang(ont, eff_lang);
+	if (ack && *ack) {
+		snprintf(out, out_sz, "%s", ack);
+		return true;
+	}
+
+	snprintf(out, out_sz, "Yes?");
+	return true;
+}
+
 void jarvis_resolve_tts_voice(const jarvis_ontology_t *ont, char *out, size_t out_sz)
 {
 	if (!out || out_sz == 0) return;
@@ -649,25 +699,51 @@ void jarvis_resolve_tts_voice(const jarvis_ontology_t *ont, char *out, size_t ou
 		}
 	}
 
-	if (strcmp(lang, "pt-br") == 0) {
-		snprintf(out, out_sz, "edge:pt-BR-FranciscaNeural");
-	} else if (strncmp(lang, "pt", 2) == 0) {
-		snprintf(out, out_sz, "edge:pt-PT-RaquelNeural");
-	} else if (strcmp(lang, "en-us") == 0) {
-		snprintf(out, out_sz, "edge:en-US-AndrewNeural");
-	} else if (strncmp(lang, "en", 2) == 0) {
-		snprintf(out, out_sz, "edge:en-GB-RyanNeural");
-	} else if (strncmp(lang, "es", 2) == 0) {
-		snprintf(out, out_sz, "edge:es-ES-AlvaroNeural");
-	} else if (strncmp(lang, "fr", 2) == 0) {
-		snprintf(out, out_sz, "edge:fr-FR-HenriNeural");
-	} else if (strncmp(lang, "de", 2) == 0) {
-		snprintf(out, out_sz, "edge:de-DE-ConradNeural");
-	} else if (strncmp(lang, "it", 2) == 0) {
-		snprintf(out, out_sz, "edge:it-IT-DiegoNeural");
-	} else {
-		snprintf(out, out_sz, "edge:en-GB-RyanNeural");
+	static const struct { const char *prefix; const char *voice; } voice_map[] = {
+		{ "pt-br", "edge:pt-BR-FranciscaNeural" },
+		{ "pt",    "edge:pt-PT-RaquelNeural"    },
+		{ "en-us", "edge:en-US-AndrewNeural"    },
+		{ "en",    "edge:en-GB-RyanNeural"      },
+		{ "es",    "edge:es-ES-AlvaroNeural"    },
+		{ "fr",    "edge:fr-FR-HenriNeural"     },
+		{ "de",    "edge:de-DE-ConradNeural"    },
+		{ "it",    "edge:it-IT-DiegoNeural"     },
+		{ "nl",    "edge:nl-NL-MaartenNeural"   },
+		{ "pl",    "edge:pl-PL-MarekNeural"     },
+		{ "ru",    "edge:ru-RU-DmitryNeural"    },
+		{ "uk",    "edge:uk-UA-OstapNeural"     },
+		{ "ja",    "edge:ja-JP-KeitaNeural"     },
+		{ "zh",    "edge:zh-CN-YunxiNeural"     },
+		{ "ko",    "edge:ko-KR-InJoonNeural"    },
+		{ "ar",    "edge:ar-SA-HamedNeural"     },
+		{ "hi",    "edge:hi-IN-MadhurNeural"    },
+		{ "tr",    "edge:tr-TR-AhmetNeural"     },
+		{ "sv",    "edge:sv-SE-MattiasNeural"   },
+		{ "no",    "edge:nb-NO-FinnNeural"      },
+		{ "nb",    "edge:nb-NO-FinnNeural"      },
+		{ "da",    "edge:da-DK-JeppeNeural"     },
+		{ "fi",    "edge:fi-FI-HarriNeural"     },
+		{ "cs",    "edge:cs-CZ-AntoninNeural"   },
+		{ "el",    "edge:el-GR-NestorasNeural"  },
+		{ "ro",    "edge:ro-RO-EmilNeural"      },
+		{ "hu",    "edge:hu-HU-TamasNeural"     },
+		{ "he",    "edge:he-IL-AvriNeural"      },
+		{ "vi",    "edge:vi-VN-NamMinhNeural"   },
+		{ "th",    "edge:th-TH-NiwatNeural"     },
+		{ "id",    "edge:id-ID-ArdiNeural"      },
+		{ "ca",    "edge:ca-ES-EnricNeural"     },
+		{ "gl",    "edge:gl-ES-RoiNeural"       },
+		{ NULL,    NULL }
+	};
+	for (size_t i = 0; voice_map[i].prefix; i++) {
+		size_t plen = strlen(voice_map[i].prefix);
+		if (strncmp(lang, voice_map[i].prefix, plen) == 0 &&
+		    (lang[plen] == '\0' || lang[plen] == '-')) {
+			snprintf(out, out_sz, "%s", voice_map[i].voice);
+			return;
+		}
 	}
+	snprintf(out, out_sz, "edge:en-GB-RyanNeural");
 }
 
 static bool str_contains_ci(const char *hay, const char *needle)

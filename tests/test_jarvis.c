@@ -28,7 +28,16 @@ static void test_01_text_normalization_and_safety(void)
 	assert(jarvis_is_non_speech_hallucination("vvvvvvvvvvvvvvvv"));
 	assert(jarvis_is_non_speech_hallucination("v v v v v"));
 	assert(jarvis_is_non_speech_hallucination("..."));
+	assert(jarvis_is_non_speech_hallucination("Jajajaja"));
+	assert(jarvis_is_non_speech_hallucination("Jajajajajajajaja"));
+	assert(jarvis_is_non_speech_hallucination("hahahahahahaha"));
+	assert(jarvis_is_non_speech_hallucination("abcabcabcabc"));
+	assert(jarvis_is_non_speech_hallucination("abcdabcdabcd"));
+	assert(jarvis_is_non_speech_hallucination("のののののののの"));
+	assert(jarvis_is_non_speech_hallucination("あいうあいうあいうあいう"));
 	assert(!jarvis_is_non_speech_hallucination("open a terminal"));
+	assert(!jarvis_is_non_speech_hallucination("abre a calculadora"));
+	assert(!jarvis_is_non_speech_hallucination("banana banana"));
 
 	assert(jarvis_is_destructive_command("rm -rf /tmp/build"));
 	assert(jarvis_is_destructive_command("git reset --hard HEAD~1"));
@@ -334,6 +343,7 @@ static void test_06_zero_config_and_locales(void)
 	assert(ont_en != NULL);
 	assert(strcmp(jarvis_ontology_get_lang(ont_en), "en") == 0);
 	assert(strcmp(jarvis_ontology_get_wake_word(ont_en), "jarvis") == 0);
+	assert(strcmp(jarvis_ontology_get_cmd_prompt(ont_en), "") == 0);
 	assert(strcmp(jarvis_ontology_get_reply_template(ont_en, "default"), "Done.") == 0);
 	assert(strcmp(jarvis_ontology_get_ui_string(ont_en, "menu_voice_auto", ""),
 	              "auto                         (Automatic neural voice for active language)") == 0);
@@ -342,6 +352,7 @@ static void test_06_zero_config_and_locales(void)
 	assert(ont_pt != NULL);
 	assert(strcmp(jarvis_ontology_get_lang(ont_pt), "pt") == 0);
 	assert(strcmp(jarvis_ontology_get_wake_word(ont_pt), "jarbas") == 0);
+	assert(strcmp(jarvis_ontology_get_cmd_prompt(ont_pt), "") == 0);
 	assert(strcmp(jarvis_ontology_get_reply_template(ont_pt, "default"), "Concluído.") == 0);
 	assert(strcmp(jarvis_ontology_get_ui_string(ont_pt, "thinking", ""), "A pensar...") == 0);
 
@@ -423,6 +434,199 @@ static void test_06_zero_config_and_locales(void)
 	printf("  [PASS] Locale overrides, zero-config resolution, and one-line switch!\n");
 }
 
+static void test_07_multilang_wake_ack(void)
+{
+	printf("Running test_07_multilang_wake_ack...\n");
+
+	const char *keys[] = {
+		"JARVISRC", "JARVIS_LANG", "JARVIS_WAKE_ACK", "JARVIS_VOICE",
+		"LC_ALL", "LC_MESSAGES", "LANG"
+	};
+	char *saved[7];
+	for (size_t i = 0; i < 7; i++) {
+		const char *v = getenv(keys[i]);
+		saved[i] = v ? strdup(v) : NULL;
+		unsetenv(keys[i]);
+	}
+
+	jarvis_ontology_t *ont = jarvis_ontology_create_for_lang("../data/ontology.json", "en");
+	assert(ont != NULL);
+
+	/* 1. Per-language lookup from ontology.json without hardcoding in C */
+	assert(strcmp(jarvis_ontology_get_wake_ack_for_lang(ont, "en"), "Yes?") == 0);
+	assert(strcmp(jarvis_ontology_get_wake_ack_for_lang(ont, "en-US"), "Yes?") == 0);
+	assert(strcmp(jarvis_ontology_get_wake_ack_for_lang(ont, "pt"), "Sim?") == 0);
+	assert(strcmp(jarvis_ontology_get_wake_ack_for_lang(ont, "pt-PT"), "Sim?") == 0);
+	assert(strcmp(jarvis_ontology_get_wake_ack_for_lang(ont, "pt_BR"), "Sim?") == 0);
+	assert(strcmp(jarvis_ontology_get_wake_ack_for_lang(ont, "es"), "¿Sí?") == 0);
+	assert(strcmp(jarvis_ontology_get_wake_ack_for_lang(ont, "fr"), "Oui ?") == 0);
+	assert(strcmp(jarvis_ontology_get_wake_ack_for_lang(ont, "de"), "Ja?") == 0);
+	assert(strcmp(jarvis_ontology_get_wake_ack_for_lang(ont, "it"), "Sì?") == 0);
+	assert(strcmp(jarvis_ontology_get_wake_ack_for_lang(ont, "ja"), "はい？") == 0);
+	assert(strcmp(jarvis_ontology_get_wake_ack_for_lang(ont, "zh-CN"), "嗯？") == 0);
+	/* Unknown language falls back cleanly to active ontology wake_ack ("Yes?") */
+	assert(strcmp(jarvis_ontology_get_wake_ack_for_lang(ont, "zz"), "Yes?") == 0);
+
+	/* 2. jarvis_resolve_wake_ack honors lang_hint, active config, env override, and opt-out */
+	char tmp_rc[] = "/tmp/test_wake_ack_rc_XXXXXX";
+	int fd = mkstemp(tmp_rc);
+	assert(fd >= 0);
+	dprintf(fd, "lang = pt-pt\n");
+	close(fd);
+	setenv("JARVISRC", tmp_rc, 1);
+
+	char buf[128];
+	assert(jarvis_resolve_wake_ack(ont, NULL, buf, sizeof(buf)));
+	assert(strcmp(buf, "Sim?") == 0);
+	/* Explicit Whisper auto-detected language hint overrides default */
+	assert(jarvis_resolve_wake_ack(ont, "fr", buf, sizeof(buf)));
+	assert(strcmp(buf, "Oui ?") == 0);
+	assert(jarvis_resolve_wake_ack(ont, "es", buf, sizeof(buf)));
+	assert(strcmp(buf, "¿Sí?") == 0);
+
+	/* RC custom override, opt-out, and auto fallthrough */
+	assert(jarvis_rc_set("wake_ack", "Pois não?"));
+	assert(jarvis_resolve_wake_ack(ont, "en", buf, sizeof(buf)));
+	assert(strcmp(buf, "Pois não?") == 0);
+
+	assert(jarvis_rc_set("wake_ack", "off"));
+	assert(!jarvis_resolve_wake_ack(ont, "pt", buf, sizeof(buf)));
+	assert(buf[0] == '\0');
+
+	assert(jarvis_rc_set("wake_ack", "auto"));
+	assert(jarvis_resolve_wake_ack(ont, "de", buf, sizeof(buf)));
+	assert(strcmp(buf, "Ja?") == 0);
+
+	/* Environment variable override takes precedence over RC */
+	setenv("JARVIS_WAKE_ACK", "Listening?", 1);
+	assert(jarvis_resolve_wake_ack(ont, "pt", buf, sizeof(buf)));
+	assert(strcmp(buf, "Listening?") == 0);
+
+	setenv("JARVIS_WAKE_ACK", "none", 1);
+	assert(!jarvis_resolve_wake_ack(ont, "pt", buf, sizeof(buf)));
+	assert(buf[0] == '\0');
+	unsetenv("JARVIS_WAKE_ACK");
+
+	/* Multi-language auto TTS voice mapping */
+	assert(jarvis_rc_set("lang", "es"));
+	jarvis_resolve_tts_voice(NULL, buf, sizeof(buf));
+	assert(strcmp(buf, "edge:es-ES-AlvaroNeural") == 0);
+	assert(jarvis_rc_set("lang", "fr"));
+	jarvis_resolve_tts_voice(NULL, buf, sizeof(buf));
+	assert(strcmp(buf, "edge:fr-FR-HenriNeural") == 0);
+	assert(jarvis_rc_set("lang", "ja"));
+	jarvis_resolve_tts_voice(NULL, buf, sizeof(buf));
+	assert(strcmp(buf, "edge:ja-JP-KeitaNeural") == 0);
+
+	unlink(tmp_rc);
+	jarvis_ontology_destroy(ont);
+
+	for (size_t i = 0; i < 7; i++) {
+		if (saved[i]) {
+			setenv(keys[i], saved[i], 1);
+			free(saved[i]);
+		} else {
+			unsetenv(keys[i]);
+		}
+	}
+	printf("  [PASS] Multi-language wake acks, overrides, opt-out, and TTS voices!\n");
+}
+
+static void test_08_continuation_tokens(void)
+{
+	printf("Running test_08_continuation_tokens...\n");
+
+	jarvis_ontology_t *ont_en = jarvis_ontology_create_for_lang("../data/ontology.json", "en");
+	assert(ont_en != NULL);
+	assert(jarvis_ontology_ends_with_continuation(ont_en, "open the file to"));
+	assert(jarvis_ontology_ends_with_continuation(ont_en, "search the logs with..."));
+	assert(jarvis_ontology_ends_with_continuation(ont_en, "send email for,"));
+	assert(jarvis_ontology_ends_with_continuation(ont_en, "play music and"));
+	assert(!jarvis_ontology_ends_with_continuation(ont_en, "open a terminal."));
+	assert(!jarvis_ontology_ends_with_continuation(ont_en, "close firefox"));
+	assert(!jarvis_ontology_ends_with_continuation(ont_en, ""));
+	jarvis_ontology_destroy(ont_en);
+
+	jarvis_ontology_t *ont_pt = jarvis_ontology_create_for_lang("../data/ontology.json", "pt-PT");
+	assert(ont_pt != NULL);
+	assert(jarvis_ontology_ends_with_continuation(ont_pt, "abre o ficheiro para"));
+	assert(jarvis_ontology_ends_with_continuation(ont_pt, "fala com..."));
+	assert(jarvis_ontology_ends_with_continuation(ont_pt, "mostra a lista de"));
+	assert(jarvis_ontology_ends_with_continuation(ont_pt, "acho que,"));
+	assert(!jarvis_ontology_ends_with_continuation(ont_pt, "abre o terminal."));
+	assert(!jarvis_ontology_ends_with_continuation(ont_pt, "fecha a janela"));
+	jarvis_ontology_destroy(ont_pt);
+
+	jarvis_ontology_t *ont_es = jarvis_ontology_create_for_lang("../data/ontology.json", "es");
+	assert(ont_es != NULL);
+	assert(jarvis_ontology_ends_with_continuation(ont_es, "abre el archivo para"));
+	assert(jarvis_ontology_ends_with_continuation(ont_es, "busca con"));
+	assert(!jarvis_ontology_ends_with_continuation(ont_es, "cierra el navegador"));
+	jarvis_ontology_destroy(ont_es);
+
+	jarvis_ontology_t *ont_fr = jarvis_ontology_create_for_lang("../data/ontology.json", "fr");
+	assert(ont_fr != NULL);
+	assert(jarvis_ontology_ends_with_continuation(ont_fr, "ouvre le fichier pour"));
+	assert(jarvis_ontology_ends_with_continuation(ont_fr, "cherche avec"));
+	assert(!jarvis_ontology_ends_with_continuation(ont_fr, "ferme la fenetre"));
+	jarvis_ontology_destroy(ont_fr);
+
+	jarvis_ontology_t *ont_de = jarvis_ontology_create_for_lang("../data/ontology.json", "de");
+	assert(ont_de != NULL);
+	assert(jarvis_ontology_ends_with_continuation(ont_de, "offne die datei mit"));
+	assert(jarvis_ontology_ends_with_continuation(ont_de, "suche fur"));
+	assert(!jarvis_ontology_ends_with_continuation(ont_de, "schliesse das fenster"));
+	jarvis_ontology_destroy(ont_de);
+
+	jarvis_ontology_t *ont_ja = jarvis_ontology_create_for_lang("../data/ontology.json", "ja");
+	assert(ont_ja != NULL);
+	assert(jarvis_ontology_ends_with_continuation(ont_ja, "ターミナルを"));
+	assert(!jarvis_ontology_ends_with_continuation(ont_ja, "ターミナル開く"));
+	jarvis_ontology_destroy(ont_ja);
+
+	printf("  [PASS] Locale-driven continuation_tokens verified across en, pt-PT, es, fr, de, ja!\n");
+}
+
+static void test_09_regional_dictation_seeds(void)
+{
+	printf("[TEST 09] Regional dialect dictation_seed & base-locale inheritance...\n");
+
+	jarvis_ontology_t *ont_pt_br = jarvis_ontology_create_for_lang("../data/ontology.json", "pt-BR");
+	assert(ont_pt_br != NULL);
+	/* Must inherit base "pt" lang, wake_word & continuation_tokens while applying pt-BR seed */
+	assert(strcmp(jarvis_ontology_get_lang(ont_pt_br), "pt") == 0);
+	assert(strcmp(jarvis_ontology_get_wake_word(ont_pt_br), "jarbas") == 0);
+	assert(jarvis_ontology_ends_with_continuation(ont_pt_br, "abre para"));
+
+	const char *s_pt_pt = jarvis_ontology_get_dictation_seed_for_lang(ont_pt_br, "pt-PT");
+	const char *s_pt_br = jarvis_ontology_get_dictation_seed_for_lang(ont_pt_br, "pt-BR");
+	const char *s_pt_def = jarvis_ontology_get_dictation_seed_for_lang(ont_pt_br, NULL);
+	assert(s_pt_pt && strstr(s_pt_pt, "registar") != NULL);
+	assert(s_pt_br && strstr(s_pt_br, "registrar") != NULL);
+	assert(s_pt_def && strcmp(s_pt_def, s_pt_br) == 0);
+
+	const char *s_en_gb = jarvis_ontology_get_dictation_seed_for_lang(ont_pt_br, "en_GB.UTF-8");
+	const char *s_en_us = jarvis_ontology_get_dictation_seed_for_lang(ont_pt_br, "en-US");
+	assert(s_en_gb && strstr(s_en_gb, "colour") != NULL);
+	assert(s_en_us && strstr(s_en_us, "color") != NULL);
+
+	const char *s_es_es = jarvis_ontology_get_dictation_seed_for_lang(ont_pt_br, "es-ES");
+	const char *s_es_mx = jarvis_ontology_get_dictation_seed_for_lang(ont_pt_br, "es-MX");
+	assert(s_es_es && strstr(s_es_es, "ordenador") != NULL);
+	assert(s_es_mx && strstr(s_es_mx, "computadora") != NULL);
+
+	const char *s_zh_cn = jarvis_ontology_get_dictation_seed_for_lang(ont_pt_br, "zh-CN");
+	const char *s_zh_tw = jarvis_ontology_get_dictation_seed_for_lang(ont_pt_br, "zh-TW");
+	assert(s_zh_cn && s_zh_tw && strcmp(s_zh_cn, s_zh_tw) != 0);
+
+	/* Never bias auto-detection or leak a wrong language seed */
+	assert(jarvis_ontology_get_dictation_seed_for_lang(ont_pt_br, "auto") == NULL);
+	assert(jarvis_ontology_get_dictation_seed_for_lang(ont_pt_br, "ja") == NULL);
+
+	jarvis_ontology_destroy(ont_pt_br);
+	printf("  [PASS] Regional dictation_seed and base-locale inheritance verified!\n");
+}
+
 int main(void)
 {
 	test_01_text_normalization_and_safety();
@@ -431,6 +635,9 @@ int main(void)
 	test_04_vad_wake_and_earcon();
 	test_05_desktop_core();
 	test_06_zero_config_and_locales();
-	printf("\nALL libjarvis unit tests passed (6/6 suites)!\n");
+	test_07_multilang_wake_ack();
+	test_08_continuation_tokens();
+	test_09_regional_dictation_seeds();
+	printf("\nALL libjarvis unit tests passed (9/9 suites)!\n");
 	return 0;
 }

@@ -4665,7 +4665,7 @@
   "lang": "en",
   "lang_name": "English",
   "whisper_wake_prompt": "Jarvis",
-  "whisper_cmd_prompt": "Jarvis; open, close, switch, increase, decrease, search, terminal, calculator, Firefox, window, music, volume, workspace, please.",
+  "whisper_cmd_prompt": "",
   "ui_strings": {
     "listening": "Listening...",
     "say_command": "Speak your command now.",
@@ -4700,6 +4700,7 @@
     "confirm_no": "No, cancel",
     "confirm_prompt": "Confirm",
     "tts_greeting": "At your service.",
+    "wake_ack": "Yes?",
     "tts_on_title": "🗣  Neural Voice Active",
     "tts_off_title": "🗣  Neural Voice Disabled",
     "tts_off_body": "Silent mode active.",
@@ -4790,14 +4791,41 @@
       "lang_name": "English",
       "wake_word": "jarvis",
       "whisper_wake_prompt": "Jarvis",
-      "whisper_cmd_prompt": "Jarvis; open, close, switch, increase, decrease, search, terminal, calculator, Firefox, window, music, volume, workspace, please."
+      "whisper_cmd_prompt": "",
+      "ui_strings": {
+        "wake_ack": "Yes?"
+      },
+      "continuation_tokens": [
+        "to",
+        "for",
+        "with",
+        "and",
+        "or",
+        "but",
+        "the",
+        "a",
+        "an",
+        "in",
+        "on",
+        "at",
+        "of",
+        "from",
+        "into",
+        "about",
+        "that",
+        "because",
+        "if",
+        "when",
+        "then"
+      ],
+      "dictation_seed": "Today I am organizing the color notes and summarizing the draft clearly."
     },
     "pt": {
       "lang": "pt",
       "lang_name": "European Portuguese (pt-PT)",
       "wake_word": "jarbas",
       "whisper_wake_prompt": "Jarbas",
-      "whisper_cmd_prompt": "Jarbas; abre, fecha, muda, aumenta, baixa, pesquisa, terminal, calculadora, Firefox, janela, música, volume, espaço de trabalho, se faz favor.",
+      "whisper_cmd_prompt": "",
       "ui_strings": {
         "listening": "A ouvir...",
         "say_command": "Diga o seu comando agora.",
@@ -4832,6 +4860,7 @@
         "confirm_no": "Não, cancelar",
         "confirm_prompt": "Confirmar",
         "tts_greeting": "Às suas ordens.",
+        "wake_ack": "Sim?",
         "tts_on_title": "🗣  Voz Neural Ativa",
         "tts_off_title": "🗣  Voz Neural Desativada",
         "tts_off_body": "Modo silencioso ativo.",
@@ -4915,7 +4944,787 @@
         "multi_step": "Tudo concluído.",
         "error": "Lamento, não consegui concluir esse pedido.",
         "default": "Concluído."
-      }
+      },
+      "continuation_tokens": [
+        "para",
+        "pra",
+        "com",
+        "de",
+        "do",
+        "da",
+        "dos",
+        "das",
+        "a",
+        "o",
+        "os",
+        "as",
+        "um",
+        "uma",
+        "e",
+        "ou",
+        "mas",
+        "que",
+        "em",
+        "no",
+        "na",
+        "nos",
+        "nas",
+        "por",
+        "pelo",
+        "pela",
+        "se",
+        "quando",
+        "porque",
+        "sobre"
+      ],
+      "dictation_seed": "Hoje estive a planear o projeto e vou registar as notas com calma e clareza."
+    },
+    "es": {
+      "lang": "es",
+      "ui_strings": {
+        "wake_ack": "¿Sí?"
+      },
+      "continuation_tokens": [
+        "para",
+        "con",
+        "de",
+        "del",
+        "a",
+        "al",
+        "el",
+        "la",
+        "los",
+        "las",
+        "un",
+        "una",
+        "y",
+        "o",
+        "pero",
+        "que",
+        "en",
+        "por",
+        "si",
+        "cuando",
+        "porque",
+        "sobre"
+      ],
+      "dictation_seed": "Hoy estoy ordenando las notas del proyecto en el ordenador con calma y claridad."
+    },
+    "fr": {
+      "lang": "fr",
+      "ui_strings": {
+        "wake_ack": "Oui ?"
+      },
+      "continuation_tokens": [
+        "pour",
+        "avec",
+        "de",
+        "du",
+        "des",
+        "a",
+        "au",
+        "aux",
+        "le",
+        "la",
+        "les",
+        "un",
+        "une",
+        "et",
+        "ou",
+        "mais",
+        "que",
+        "dans",
+        "sur",
+        "par",
+        "si",
+        "quand",
+        "parce"
+      ],
+      "dictation_seed": "Aujourd’hui, je prépare mes notes calmement afin de rédiger un texte clair."
+    },
+    "de": {
+      "lang": "de",
+      "ui_strings": {
+        "wake_ack": "Ja?"
+      },
+      "continuation_tokens": [
+        "fur",
+        "mit",
+        "von",
+        "zu",
+        "zum",
+        "zur",
+        "der",
+        "die",
+        "das",
+        "den",
+        "dem",
+        "ein",
+        "eine",
+        "und",
+        "oder",
+        "aber",
+        "dass",
+        "in",
+        "im",
+        "auf",
+        "an",
+        "uber",
+        "wenn",
+        "weil"
+      ]
+    },
+    "it": {
+      "lang": "it",
+      "ui_strings": {
+        "wake_ack": "Sì?"
+      },
+      "continuation_tokens": [
+        "per",
+        "con",
+        "di",
+        "del",
+        "della",
+        "a",
+        "al",
+        "il",
+        "lo",
+        "la",
+        "i",
+        "gli",
+        "le",
+        "un",
+        "una",
+        "e",
+        "o",
+        "ma",
+        "che",
+        "in",
+        "nel",
+        "su",
+        "se",
+        "quando",
+        "perche"
+      ]
+    },
+    "nl": {
+      "lang": "nl",
+      "ui_strings": {
+        "wake_ack": "Ja?"
+      },
+      "continuation_tokens": [
+        "voor",
+        "met",
+        "van",
+        "naar",
+        "te",
+        "de",
+        "het",
+        "een",
+        "en",
+        "of",
+        "maar",
+        "dat",
+        "in",
+        "op",
+        "aan",
+        "over",
+        "als",
+        "omdat"
+      ]
+    },
+    "pl": {
+      "lang": "pl",
+      "ui_strings": {
+        "wake_ack": "Tak?"
+      },
+      "continuation_tokens": [
+        "dla",
+        "z",
+        "ze",
+        "do",
+        "od",
+        "w",
+        "we",
+        "na",
+        "o",
+        "i",
+        "oraz",
+        "lub",
+        "ale",
+        "ze",
+        "gdy",
+        "poniewaz"
+      ]
+    },
+    "ru": {
+      "lang": "ru",
+      "ui_strings": {
+        "wake_ack": "Да?"
+      },
+      "continuation_tokens": [
+        "для",
+        "с",
+        "со",
+        "к",
+        "от",
+        "в",
+        "во",
+        "на",
+        "о",
+        "об",
+        "и",
+        "или",
+        "но",
+        "что",
+        "чтобы",
+        "если",
+        "когда",
+        "потому"
+      ]
+    },
+    "uk": {
+      "lang": "uk",
+      "ui_strings": {
+        "wake_ack": "Так?"
+      },
+      "continuation_tokens": [
+        "для",
+        "з",
+        "зі",
+        "до",
+        "від",
+        "в",
+        "у",
+        "на",
+        "про",
+        "і",
+        "та",
+        "або",
+        "але",
+        "що",
+        "щоб",
+        "якщо",
+        "коли"
+      ]
+    },
+    "ja": {
+      "lang": "ja",
+      "ui_strings": {
+        "wake_ack": "はい？"
+      },
+      "continuation_tokens": [
+        "を",
+        "に",
+        "で",
+        "と",
+        "の",
+        "が",
+        "は",
+        "へ",
+        "から",
+        "まで",
+        "そして",
+        "けど",
+        "から"
+      ]
+    },
+    "zh": {
+      "lang": "zh",
+      "ui_strings": {
+        "wake_ack": "嗯？"
+      },
+      "continuation_tokens": [
+        "的",
+        "和",
+        "与",
+        "在",
+        "把",
+        "给",
+        "对",
+        "为",
+        "从",
+        "到",
+        "或者",
+        "但是",
+        "因为",
+        "如果"
+      ],
+      "dictation_seed": "今天我在整理项目笔记，希望把内容写得清楚自然。"
+    },
+    "ko": {
+      "lang": "ko",
+      "ui_strings": {
+        "wake_ack": "네?"
+      },
+      "continuation_tokens": [
+        "을",
+        "를",
+        "에",
+        "에서",
+        "와",
+        "과",
+        "의",
+        "으로",
+        "로",
+        "그리고",
+        "하지만",
+        "또는",
+        "만약"
+      ]
+    },
+    "ar": {
+      "lang": "ar",
+      "ui_strings": {
+        "wake_ack": "نعم؟"
+      },
+      "continuation_tokens": [
+        "في",
+        "من",
+        "الى",
+        "على",
+        "عن",
+        "مع",
+        "و",
+        "او",
+        "لكن",
+        "ان",
+        "ل",
+        "ب"
+      ]
+    },
+    "hi": {
+      "lang": "hi",
+      "ui_strings": {
+        "wake_ack": "हाँ?"
+      },
+      "continuation_tokens": [
+        "को",
+        "से",
+        "में",
+        "पर",
+        "के",
+        "का",
+        "की",
+        "और",
+        "या",
+        "लेकिन",
+        "अगर",
+        "कि"
+      ]
+    },
+    "tr": {
+      "lang": "tr",
+      "ui_strings": {
+        "wake_ack": "Evet?"
+      },
+      "continuation_tokens": [
+        "ve",
+        "veya",
+        "ama",
+        "fakat",
+        "icin",
+        "ile",
+        "gibi",
+        "eger",
+        "cunku",
+        "ki"
+      ]
+    },
+    "sv": {
+      "lang": "sv",
+      "ui_strings": {
+        "wake_ack": "Ja?"
+      },
+      "continuation_tokens": [
+        "for",
+        "med",
+        "av",
+        "till",
+        "i",
+        "pa",
+        "om",
+        "och",
+        "eller",
+        "men",
+        "att",
+        "nar",
+        "eftersom",
+        "en",
+        "ett"
+      ]
+    },
+    "no": {
+      "lang": "no",
+      "ui_strings": {
+        "wake_ack": "Ja?"
+      },
+      "continuation_tokens": [
+        "for",
+        "med",
+        "av",
+        "til",
+        "i",
+        "pa",
+        "om",
+        "og",
+        "eller",
+        "men",
+        "at",
+        "nar",
+        "fordi",
+        "en",
+        "et"
+      ]
+    },
+    "nb": {
+      "lang": "nb",
+      "ui_strings": {
+        "wake_ack": "Ja?"
+      },
+      "continuation_tokens": [
+        "for",
+        "med",
+        "av",
+        "til",
+        "i",
+        "pa",
+        "om",
+        "og",
+        "eller",
+        "men",
+        "at",
+        "nar",
+        "fordi",
+        "en",
+        "et"
+      ]
+    },
+    "da": {
+      "lang": "da",
+      "ui_strings": {
+        "wake_ack": "Ja?"
+      },
+      "continuation_tokens": [
+        "for",
+        "med",
+        "af",
+        "til",
+        "i",
+        "pa",
+        "om",
+        "og",
+        "eller",
+        "men",
+        "at",
+        "nar",
+        "fordi",
+        "en",
+        "et"
+      ]
+    },
+    "fi": {
+      "lang": "fi",
+      "ui_strings": {
+        "wake_ack": "Niin?"
+      },
+      "continuation_tokens": [
+        "ja",
+        "tai",
+        "mutta",
+        "etta",
+        "kun",
+        "jos",
+        "koska",
+        "kuin",
+        "seka",
+        "vaan"
+      ]
+    },
+    "cs": {
+      "lang": "cs",
+      "ui_strings": {
+        "wake_ack": "Ano?"
+      },
+      "continuation_tokens": [
+        "pro",
+        "s",
+        "se",
+        "do",
+        "od",
+        "v",
+        "ve",
+        "na",
+        "o",
+        "a",
+        "nebo",
+        "ale",
+        "ze",
+        "kdyz",
+        "protoze"
+      ]
+    },
+    "el": {
+      "lang": "el",
+      "ui_strings": {
+        "wake_ack": "Ναι;"
+      },
+      "continuation_tokens": [
+        "για",
+        "με",
+        "απο",
+        "σε",
+        "στο",
+        "στη",
+        "στον",
+        "το",
+        "τη",
+        "τον",
+        "και",
+        "η",
+        "αλλα",
+        "οτι",
+        "αν",
+        "οταν"
+      ]
+    },
+    "ro": {
+      "lang": "ro",
+      "ui_strings": {
+        "wake_ack": "Da?"
+      },
+      "continuation_tokens": [
+        "pentru",
+        "cu",
+        "de",
+        "la",
+        "in",
+        "pe",
+        "din",
+        "si",
+        "sau",
+        "dar",
+        "ca",
+        "daca",
+        "cand"
+      ]
+    },
+    "hu": {
+      "lang": "hu",
+      "ui_strings": {
+        "wake_ack": "Igen?"
+      },
+      "continuation_tokens": [
+        "es",
+        "vagy",
+        "de",
+        "hogy",
+        "ha",
+        "mert",
+        "amikor",
+        "a",
+        "az",
+        "egy",
+        "meg"
+      ]
+    },
+    "he": {
+      "lang": "he",
+      "ui_strings": {
+        "wake_ack": "כן?"
+      },
+      "continuation_tokens": [
+        "של",
+        "עם",
+        "אל",
+        "על",
+        "מן",
+        "ב",
+        "ל",
+        "ו",
+        "או",
+        "אבל",
+        "ש",
+        "אם",
+        "כי"
+      ]
+    },
+    "vi": {
+      "lang": "vi",
+      "ui_strings": {
+        "wake_ack": "Dạ?"
+      },
+      "continuation_tokens": [
+        "va",
+        "hoac",
+        "nhung",
+        "de",
+        "voi",
+        "cua",
+        "trong",
+        "tren",
+        "cho",
+        "neu",
+        "vi",
+        "khi"
+      ]
+    },
+    "th": {
+      "lang": "th",
+      "ui_strings": {
+        "wake_ack": "ครับ?"
+      },
+      "continuation_tokens": [
+        "และ",
+        "หรือ",
+        "แต่",
+        "ของ",
+        "ใน",
+        "บน",
+        "กับ",
+        "เพื่อ",
+        "ที่",
+        "ถ้า",
+        "เพราะ"
+      ]
+    },
+    "id": {
+      "lang": "id",
+      "ui_strings": {
+        "wake_ack": "Ya?"
+      },
+      "continuation_tokens": [
+        "dan",
+        "atau",
+        "tetapi",
+        "tapi",
+        "untuk",
+        "dengan",
+        "dari",
+        "di",
+        "ke",
+        "pada",
+        "yang",
+        "jika",
+        "karena"
+      ]
+    },
+    "ca": {
+      "lang": "ca",
+      "ui_strings": {
+        "wake_ack": "Sí?"
+      },
+      "continuation_tokens": [
+        "per",
+        "amb",
+        "de",
+        "del",
+        "a",
+        "al",
+        "el",
+        "la",
+        "els",
+        "les",
+        "un",
+        "una",
+        "i",
+        "o",
+        "pero",
+        "que",
+        "en",
+        "si",
+        "quan"
+      ]
+    },
+    "gl": {
+      "lang": "gl",
+      "ui_strings": {
+        "wake_ack": "Si?"
+      },
+      "continuation_tokens": [
+        "para",
+        "con",
+        "de",
+        "do",
+        "da",
+        "a",
+        "o",
+        "os",
+        "as",
+        "un",
+        "unha",
+        "e",
+        "ou",
+        "pero",
+        "que",
+        "en",
+        "por",
+        "se",
+        "cando"
+      ]
+    },
+    "en-us": {
+      "lang_name": "English (US)",
+      "dictation_seed": "Today I am organizing the color notes and summarizing the draft clearly."
+    },
+    "en-gb": {
+      "lang_name": "English (UK)",
+      "dictation_seed": "Today I am organising the colour notes and summarising the draft clearly."
+    },
+    "pt-pt": {
+      "lang_name": "European Portuguese (pt-PT)",
+      "dictation_seed": "Hoje estive a planear o projeto e vou registar as notas com calma e clareza."
+    },
+    "pt-br": {
+      "lang_name": "Brazilian Portuguese (pt-BR)",
+      "dictation_seed": "Hoje eu estava planejando o projeto e vou registrar as notas com calma e clareza."
+    },
+    "es-es": {
+      "lang_name": "Spanish (Spain)",
+      "dictation_seed": "Hoy estoy ordenando las notas del proyecto en el ordenador con calma y claridad."
+    },
+    "es-mx": {
+      "lang_name": "Spanish (Mexico)",
+      "dictation_seed": "Hoy estoy ordenando las notas del proyecto en la computadora con calma y claridad."
+    },
+    "fr-fr": {
+      "lang_name": "French (France)",
+      "dictation_seed": "Aujourd’hui, je prépare mes notes calmement afin de rédiger un texte clair."
+    },
+    "fr-ca": {
+      "lang_name": "French (Canada)",
+      "dictation_seed": "Aujourd’hui, je prépare mes notes calmement pour rédiger un texte clair et précis."
+    },
+    "zh-cn": {
+      "lang_name": "Chinese (Simplified)",
+      "dictation_seed": "今天我在整理项目笔记，希望把内容写得清楚自然。"
+    },
+    "zh-tw": {
+      "lang_name": "Chinese (Traditional)",
+      "dictation_seed": "今天我在整理專案筆記，希望把內容寫得清楚自然。"
     }
-  }
+  },
+  "continuation_tokens": [
+    "to",
+    "for",
+    "with",
+    "and",
+    "or",
+    "but",
+    "the",
+    "a",
+    "an",
+    "in",
+    "on",
+    "at",
+    "of",
+    "from",
+    "into",
+    "about",
+    "that",
+    "because",
+    "if",
+    "when",
+    "then"
+  ]
 }

@@ -81,6 +81,9 @@ size_t             jjson_escape_str(const char *src, char *dst, size_t dst_sz);
 #define JARVIS_MAX_SCREEN_LOCK_KW     16
 #define JARVIS_MAX_TIER1_TRIGGERS     64
 #define JARVIS_MAX_HALLUCINATIONS     64
+#define JARVIS_MAX_LOCALE_ACKS        64
+#define JARVIS_MAX_DICTATION_SEEDS    64
+#define JARVIS_MAX_CONTINUATION_TOKENS 64
 
 typedef struct {
 	char key[JARVIS_WORD_LEN];
@@ -96,12 +99,19 @@ struct jarvis_ontology {
 
 	char            whisper_wake_prompt[JARVIS_CLAUSE_LEN];
 	char            whisper_cmd_prompt[JARVIS_CLAUSE_LEN];
+	char            dictation_seed[JARVIS_CLAUSE_LEN];
 
 	jarvis_kv_str_t ui_strings[JARVIS_MAX_UI_STRINGS];
 	size_t          ui_string_count;
 
 	jarvis_kv_str_t reply_templates[JARVIS_MAX_REPLY_TEMPLATES];
 	size_t          reply_template_count;
+
+	jarvis_kv_str_t locale_wake_acks[JARVIS_MAX_LOCALE_ACKS];
+	size_t          locale_wake_ack_count;
+
+	jarvis_kv_str_t locale_dictation_seeds[JARVIS_MAX_DICTATION_SEEDS];
+	size_t          locale_dictation_seed_count;
 
 	char            polite_prefixes[JARVIS_MAX_POLITE_PREFIXES][JARVIS_SHORT_LEN];
 	size_t          polite_prefix_count;
@@ -129,6 +139,9 @@ struct jarvis_ontology {
 
 	char            conjunctions[JARVIS_MAX_CONJUNCTIONS][JARVIS_SHORT_LEN];
 	size_t          conjunction_count;
+
+	char            continuation_tokens[JARVIS_MAX_CONTINUATION_TOKENS][JARVIS_SHORT_LEN];
+	size_t          continuation_token_count;
 };
 
 bool jarvis_ontology_is_stopword(const jarvis_ontology_t *ont, const char *word);
