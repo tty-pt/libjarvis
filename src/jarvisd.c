@@ -1229,7 +1229,9 @@ contains_wake_word(const char *text, const char *wake_word)
 #define TTS_DRAIN_COOLDOWN_AEC_MS  350L
 #define TTS_DRAIN_COOLDOWN_MS      650L
 #define WAKE_ACK_DRAIN_MS          160L
-#define JARVIS_FOLLOWUP_PERSISTENT 3600000
+#define JARVIS_FOLLOWUP_PERSISTENT      3600000
+#define JARVIS_DEFAULT_CONV_FOLLOWUP_MS 10000
+#define JARVIS_DEFAULT_POST_WAKE_MS     10000L
 
 static char g_last_tts_cache[2048] = {0};
 static long g_last_tts_ms = 0;
@@ -2652,13 +2654,23 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, jarvis_stt_ctx_t *ctx_
 				voiced_frames = 0;
 				silence_frames = 0;
 				trailing_soft_frames = 0;
-				wake_end_f = scan_f;
-				chime_ignore_until_f = scan_f + (spoke_ack ? 18 : 12);
-				post_wake_deadline_ms = now_ms() + (spoke_ack ? 14000 : 12000);
-				write_state_file(state_file, "jarvis-cmd", NULL, NULL);
 				pthread_mutex_lock(&g_audio.mtx);
 				g_audio.in_speech_hint = 0;
+				if (spoke_ack) {
+					waiting_wake_ack = 1;
+					wake_ack_start_ms = now_ms();
+					wake_ack_done_ms = 0;
+					chime_ignore_until_f = g_audio.total_frames;
+					wake_end_f = g_audio.total_frames;
+				} else {
+					chime_ignore_until_f = g_audio.total_frames + 5;
+					wake_end_f = g_audio.total_frames + 2;
+				}
 				pthread_mutex_unlock(&g_audio.mtx);
+				if (!spoke_ack && post_wake_timeout_ms > 0)
+					duck_speaker_for_command();
+				post_wake_deadline_ms = calc_post_wake_deadline(post_wake_timeout_ms);
+				write_state_file(state_file, "jarvis-cmd", NULL, NULL);
 				continue;
 			}
 		}
@@ -2679,6 +2691,8 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, jarvis_stt_ctx_t *ctx_
 					wake_confirmed = 0;
 					waiting_post_wake = 0;
 					chime_played = 0;
+					consec_voiced = 0;
+					post_wake_deadline_ms = 0;
 					update_idle_voice_state(state_file);
 					continue;
 				}
@@ -3187,9 +3201,8 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, jarvis_stt_ctx_t *ctx_
 					decode_try_submit(cmd_start_f, end_f, last_voiced_f,
 					                  lang, eff_prompt, 256, 1);
 				}
-			} else if (!ep.suppress_endpoint &&
-			           (silence_frames >= ep.spec_silence_f ||
-			            trailing_soft_frames >= (ep.final_silence_ms / FRAME_MS)) &&
+			} else if (((!ep.suppress_endpoint && silence_frames >= ep.spec_silence_f) ||
+			            (!ep_in.ptt_held && trailing_soft_frames >= (ep.final_silence_ms / FRAME_MS))) &&
 			           voiced_frames >= 8 &&
 			           (!decoded_cmd_is_final || last_voiced_f > decoded_cmd_voiced_f)) {
 				/* Preempt any stale partial decode so speculative final starts immediately */
@@ -3216,14 +3229,15 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, jarvis_stt_ctx_t *ctx_
 			 * 1. Speculative final decode completed on matching speech + adaptive ep.spec_early_f silence, OR
 			 * 2. Full silence reaches adaptive ep.final_silence_ms (+450ms grace on continuation token), OR
 			 * 3. Energy has stayed below utter_start_db and >= 16.0 dB below speech peak
-			 *    for eff_soft_limit_f so steady noise never hangs, OR
+			 *    for eff_soft_limit_f so steady noise/distant chatter never hangs (unless PTT held), OR
 			 * 4. Utterance reaches configurable max_utter_frames (default 60s, max 90s).
 			 */
 			if (ptt_released ||
 			    (!ep.suppress_endpoint &&
 			     (spec_final_ready ||
-			      (silence_frames * FRAME_MS) >= ep.final_silence_ms ||
-			      (voiced_frames >= 8 && trailing_soft_frames >= eff_soft_limit_f))) ||
+			      (silence_frames * FRAME_MS) >= ep.final_silence_ms)) ||
+			    (!ep_in.ptt_held && voiced_frames >= 8 &&
+			     trailing_soft_frames >= eff_soft_limit_f) ||
 			    cmd_len_f >= max_utter_frames) {
 				int keep_post_wake = (chime_played && !operating_mode &&
 				                      (post_wake_deadline_ms == 0 || now_ms() < post_wake_deadline_ms));
@@ -3382,6 +3396,8 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, jarvis_stt_ctx_t *ctx_
 							tts_was_active_in_utter = 0;
 							live_cmd[0] = '\0';
 							live_cmd_from_main = 0;
+							keep_post_wake = 0;
+							resumed_speaking = 0;
 						} else {
 							snprintf(live_cmd, sizeof(live_cmd), "%s", final_raw);
 							live_cmd_from_main = 1;
@@ -3431,6 +3447,8 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, jarvis_stt_ctx_t *ctx_
 	}
 
 	g_in_post_wake = 0;
+	if (!operating_mode)
+		g_in_followup = 0;
 	set_can_preempt_wait(0);
 
 	if (g_cancel_req || (cli == STL_INVALID_SOCKET && !g_jarvis_active)) {
@@ -3518,7 +3536,7 @@ read_jarvis_runtime_cfg(char *lang, size_t lang_sz,
 	if (*out_followup_ms < 0 || *out_followup_ms > JARVIS_FOLLOWUP_PERSISTENT)
 		*out_followup_ms = 0;
 
-	int def_conv = (has_followup && *out_followup_ms == 0) ? 0 : JARVIS_FOLLOWUP_PERSISTENT;
+	int def_conv = (has_followup && *out_followup_ms == 0) ? 0 : JARVIS_DEFAULT_CONV_FOLLOWUP_MS;
 	*out_conv_followup_ms = has_conv_followup ? atoi(rc_cf) : def_conv;
 	if (*out_conv_followup_ms < 0 || *out_conv_followup_ms > JARVIS_FOLLOWUP_PERSISTENT)
 		*out_conv_followup_ms = def_conv;
@@ -3680,12 +3698,19 @@ run_inprocess_jarvis_turn(stl_socket_t srv, jarvis_stt_ctx_t *ctx_wake, int n_th
 	jarvis_plat_state_path("jarvis-acting", ".pid", acting_pid, sizeof(acting_pid));
 
 	char lang[32], wm_surface[64];
-	int fcfg = 0, conv_followup_ms = JARVIS_FOLLOWUP_PERSISTENT, cmd_silence_ms = 750;
+	int fcfg = 0, conv_followup_ms = JARVIS_DEFAULT_CONV_FOLLOWUP_MS, cmd_silence_ms = 750;
 	read_jarvis_runtime_cfg(lang, sizeof(lang), &fcfg, &conv_followup_ms, &cmd_silence_ms);
 	jarvis_resolve_wm(wm_surface, sizeof(wm_surface));
 
 	int eff_conv = (fcfg > 0) ? fcfg : conv_followup_ms;
-	long post_wake_timeout_ms = (eff_conv >= JARVIS_FOLLOWUP_PERSISTENT) ? 0L : 6000L;
+	long def_post_wake = (eff_conv >= JARVIS_FOLLOWUP_PERSISTENT) ? 0L : JARVIS_DEFAULT_POST_WAKE_MS;
+	char rc_pw[32] = {0};
+	long post_wake_timeout_ms = def_post_wake;
+	if (jarvis_rc_get("post_wake_timeout_ms", NULL, rc_pw, sizeof(rc_pw)) && rc_pw[0]) {
+		long v = atol(rc_pw);
+		if (v == 0L || (v >= 2000L && v <= 120000L))
+			post_wake_timeout_ms = v;
+	}
 
 	int next_followup = *io_next_followup;
 	if (fcfg == JARVIS_FOLLOWUP_PERSISTENT) {
@@ -3716,6 +3741,8 @@ run_inprocess_jarvis_turn(stl_socket_t srv, jarvis_stt_ctx_t *ctx_wake, int n_th
 	if (rc == 130) {
 		if (was_followup >= JARVIS_FOLLOWUP_PERSISTENT)
 			*io_next_followup = was_followup;
+		else
+			update_idle_voice_state(state_file);
 		return;
 	}
 
