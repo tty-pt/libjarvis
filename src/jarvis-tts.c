@@ -2459,6 +2459,11 @@ jarvis_tts_interrupt(int dummy)
 {
 	(void)dummy;
 	pthread_mutex_lock(&g_tts.mtx);
+	bool was_active = (g_tts.busy_speaking ||
+	                   g_tts.player != NULL ||
+	                   g_tts.draining_player != NULL ||
+	                   g_tts.q_count > 0 ||
+	                   g_tts.edge_busy);
 	g_tts.cancel_gen++;
 	g_tts.q_head = 0;
 	g_tts.q_tail = 0;
@@ -2477,7 +2482,8 @@ jarvis_tts_interrupt(int dummy)
 	pthread_cond_broadcast(&g_tts.cond);
 	pthread_cond_broadcast(&g_tts.done_cond);
 	pthread_mutex_unlock(&g_tts.mtx);
-	notify_tts_state("idle");
+	if (was_active)
+		notify_tts_state("idle");
 	return 0;
 }
 

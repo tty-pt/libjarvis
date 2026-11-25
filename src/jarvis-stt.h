@@ -24,6 +24,7 @@ typedef struct {
 	pthread_cond_t  cond;
 	float           pcm[JARVIS_RING_SAMPLES];
 	float           db[JARVIS_RING_FRAMES];
+	float           near_score[JARVIS_RING_FRAMES];
 	uint8_t         is_speech[JARVIS_RING_FRAMES];
 	int64_t         total_frames;
 	int64_t         last_cmd_end_f;
@@ -34,6 +35,7 @@ typedef struct {
 	long            hold_until_ms;
 	int             in_speech_hint;
 	int             pw_open;
+	int             stereo_spatial;
 } jarvis_audio_ring_t;
 
 /* Background Whisper decode worker state */

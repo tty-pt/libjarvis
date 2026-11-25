@@ -311,18 +311,21 @@ static void notify_status_bar(void)
 {
 #ifndef _WIN32
 	char path[256] = {0};
-	if (jarvis_rc_get("status_notify_pid_file", NULL, path, sizeof(path)) && path[0]) {
-		FILE *fp = fopen(path, "r");
-		if (fp) {
-			int pid = 0;
-			if (fscanf(fp, "%d", &pid) == 1 && pid > 1) {
+	if (!jarvis_rc_get("status_notify_pid_file", NULL, path, sizeof(path)) || !path[0]) {
+		char user[64] = {0};
+		stl_username(user, sizeof(user));
+		snprintf(path, sizeof(path), "/tmp/dwm-bar-%s.pid", user[0] ? user : "user");
+	}
+	FILE *fp = fopen(path, "r");
+	if (fp) {
+		int pid = 0;
+		if (fscanf(fp, "%d", &pid) == 1 && pid > 1) {
 #ifdef SIGUSR1
-				kill((pid_t)pid, SIGUSR1);
+			kill((pid_t)pid, SIGUSR1);
 #endif
-			}
-			fclose(fp);
-			return;
 		}
+		fclose(fp);
+		return;
 	}
 #endif
 	jarvis_plat_notify_bar();
@@ -667,6 +670,42 @@ static void do_jarvis_stop(bool quiet)
 		jarvis_ontology_format_ui(ont, "disabled_title", wake, "  {Wake} Disabled", title, sizeof(title));
 		jarvis_ontology_format_ui(ont, "mic_disabled_body", wake, "Microphone listening disabled.", body, sizeof(body));
 		cli_notify(title, body);
+	}
+}
+
+static void do_jarvis_toggle(bool quiet)
+{
+	char resp[64] = {0};
+	bool connected = daemon_cmd("JARVIS_TOGGLE", resp, sizeof(resp));
+	if (!connected) {
+		do_jarvis_start(quiet);
+		return;
+	}
+	if (resp[0] == '\0') {
+		if (!daemon_cmd_timeout("JARVIS_TOGGLE", 3, resp, sizeof(resp))) {
+			do_jarvis_start(quiet);
+			return;
+		}
+	}
+	if (strcmp(resp, "ON") == 0) {
+		jarvis_audio_unmute_mic();
+		if (!quiet) {
+			const jarvis_ontology_t *ont = get_cli_ont();
+			char wake[64], title[128], body[256];
+			get_cli_wake_word(ont, wake, sizeof(wake));
+			jarvis_ontology_format_ui(ont, "active_title", wake, "  {Wake} Active", title, sizeof(title));
+			jarvis_ontology_format_ui(ont, "active_body", wake, "Say “{wake}” anytime, or “{wake}, lockdown” to stop.", body, sizeof(body));
+			cli_notify(title, body);
+		}
+	} else if (strcmp(resp, "OFF") == 0) {
+		if (!quiet) {
+			const jarvis_ontology_t *ont = get_cli_ont();
+			char wake[64], title[128], body[256];
+			get_cli_wake_word(ont, wake, sizeof(wake));
+			jarvis_ontology_format_ui(ont, "disabled_title", wake, "  {Wake} Disabled", title, sizeof(title));
+			jarvis_ontology_format_ui(ont, "mic_disabled_body", wake, "Microphone listening disabled.", body, sizeof(body));
+			cli_notify(title, body);
+		}
 	}
 }
 
@@ -1856,8 +1895,7 @@ int main(int argc, char **argv)
 			return 0;
 		}
 		if (strcmp(subcmd, "toggle") == 0 || strcmp(subcmd, "jarvis-toggle") == 0) {
-			if (is_daemon_listening()) do_jarvis_stop(quiet);
-			else do_jarvis_start(quiet);
+			do_jarvis_toggle(quiet);
 			return 0;
 		}
 		if (strcmp(subcmd, "listen") == 0) {

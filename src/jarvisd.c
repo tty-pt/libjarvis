@@ -38,6 +38,7 @@
 #include "jarvis-ren-ipc.h"
 #include "jarvis-tts.h"
 #include "whisper.h"
+#include "jarvis-dsp.h"
 #include "jarvis-stt.h"
 #include "jarvis-dispatch.h"
 #include "jarvis-ipc-srv.h"
@@ -112,8 +113,40 @@ static volatile sig_atomic_t g_cancel_req     = 0;
 static volatile sig_atomic_t cli_stop_req     = 0;
 static volatile sig_atomic_t cli_cancel_req   = 0;
 
-static stl_socket_t g_preempt_cli = STL_INVALID_SOCKET;
-static char         g_preempt_buf[2048];
+static pthread_mutex_t g_state_file_mtx = PTHREAD_MUTEX_INITIALIZER;
+
+static struct {
+	pthread_mutex_t mtx;
+	pthread_cond_t  cond;
+	stl_socket_t    srv;
+	stl_socket_t    pending_cli;
+	char            pending_buf[2048];
+	int             can_preempt_wait;
+} g_ctrl = {
+	.mtx              = PTHREAD_MUTEX_INITIALIZER,
+	.cond             = PTHREAD_COND_INITIALIZER,
+	.srv              = STL_INVALID_SOCKET,
+	.pending_cli      = STL_INVALID_SOCKET,
+	.pending_buf      = {0},
+	.can_preempt_wait = 0
+};
+
+static void
+set_can_preempt_wait(int v)
+{
+	pthread_mutex_lock(&g_ctrl.mtx);
+	g_ctrl.can_preempt_wait = v;
+	pthread_mutex_unlock(&g_ctrl.mtx);
+}
+
+static int
+has_pending_client(void)
+{
+	pthread_mutex_lock(&g_ctrl.mtx);
+	int has = (g_ctrl.pending_cli != STL_INVALID_SOCKET) ? 1 : 0;
+	pthread_mutex_unlock(&g_ctrl.mtx);
+	return has;
+}
 
 static void
 on_sig(int sig)
@@ -213,6 +246,18 @@ notify_osd_async(const char *title, const char *body, int timeout_ms)
 	jarvis_plat_notify_osd(title, body ? body : "", timeout_ms > 0 ? timeout_ms : 4000);
 }
 
+static int
+remove_state_file(const char *path)
+{
+	int removed;
+	if (!path || !*path || strcmp(path, "-") == 0)
+		return 0;
+	pthread_mutex_lock(&g_state_file_mtx);
+	removed = (remove(path) == 0) ? 1 : 0;
+	pthread_mutex_unlock(&g_state_file_mtx);
+	return removed;
+}
+
 static void
 write_state_file(const char *path, const char *prefix, const char *detail, const char *osd_title)
 {
@@ -222,9 +267,12 @@ write_state_file(const char *path, const char *prefix, const char *detail, const
 	if (!path || !*path || strcmp(path, "-") == 0)
 		return;
 	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	pthread_mutex_lock(&g_state_file_mtx);
 	fp = fopen(tmp, "wb");
-	if (!fp)
+	if (!fp) {
+		pthread_mutex_unlock(&g_state_file_mtx);
 		return;
+	}
 	if (detail && *detail)
 		fprintf(fp, "%s:%s\n", prefix, detail);
 	else
@@ -234,6 +282,7 @@ write_state_file(const char *path, const char *prefix, const char *detail, const
 	remove(path);
 #endif
 	rename(tmp, path);
+	pthread_mutex_unlock(&g_state_file_mtx);
 	notify_bar();
 
 	if (osd_title && *osd_title && detail && *detail)
@@ -255,7 +304,7 @@ update_idle_voice_state(const char *state_file)
 		if (g_tts_speaking) {
 			write_state_file(state_file, "tts-speaking", NULL, NULL);
 		} else {
-			remove(state_file);
+			remove_state_file(state_file);
 			notify_bar();
 		}
 		return;
@@ -335,7 +384,7 @@ typedef struct {
 } vad_biquad_t;
 
 static double
-calc_frame_db(const int16_t *samples, size_t n, vad_biquad_t *flt)
+calc_frame_db(const float *samples, size_t n, vad_biquad_t *flt)
 {
 	/* 2nd-order Butterworth HPF fc=130 Hz @ fs=16000 Hz */
 	static const double hp_b0 =  0.9645815294, hp_b1 = -1.9291630588, hp_b2 =  0.9645815294;
@@ -352,7 +401,7 @@ calc_frame_db(const int16_t *samples, size_t n, vad_biquad_t *flt)
 	if (!n)
 		return -100.0;
 	for (i = 0; i < n; i++) {
-		double x = (double)samples[i] / 32768.0;
+		double x = (double)samples[i];
 		double y = x;
 		if (flt) {
 			double h = hp_b0 * x + hp_b1 * flt->hp_x1 + hp_b2 * flt->hp_x2
@@ -516,8 +565,8 @@ calc_ambient_window_locked(int64_t end_f, int win_len, double *out_avg, double *
 		std_dev = 3.5;
 	if (avg < -60.0)
 		avg = -60.0;
-	if (avg > -24.0)
-		avg = -24.0;
+	if (avg > -8.0)
+		avg = -8.0;
 
 	*out_avg = avg;
 	*out_std = std_dev;
@@ -532,8 +581,8 @@ calc_vad_start_db(double amb_avg, double amb_std)
 	double start_db = amb_avg + margin;
 	if (start_db < -44.0)
 		start_db = -44.0;
-	if (start_db > -20.0)
-		start_db = -20.0;
+	if (start_db > -3.0)
+		start_db = -3.0;
 	return start_db;
 }
 
@@ -558,9 +607,13 @@ static void *
 audio_thread_fn(void *arg)
 {
 	jarvis_audio_cap_t *cap = NULL;
-	int16_t raw[FRAME_SAMPLES];
+	int cap_ch = 1;
+	int16_t raw[FRAME_SAMPLES * 2];
+	float clean_pcm[FRAME_SAMPLES];
 	vad_biquad_t vad_flt;
+	jarvis_dsp_t dsp;
 	memset(&vad_flt, 0, sizeof(vad_flt));
+	jarvis_dsp_init(&dsp, SAMPLE_RATE, 1);
 
 	(void)arg;
 	while (running) {
@@ -569,6 +622,7 @@ audio_thread_fn(void *arg)
 		if (!need) {
 			if (cap) {
 				g_audio.pw_open = 0;
+				g_audio.stereo_spatial = 0;
 				pthread_mutex_unlock(&g_audio.mtx);
 				jarvis_audio_cap_close(cap);
 				cap = NULL;
@@ -582,37 +636,55 @@ audio_thread_fn(void *arg)
 		pthread_mutex_unlock(&g_audio.mtx);
 
 		if (!cap) {
-			cap = jarvis_audio_cap_open(SAMPLE_RATE, 1);
+			/* Prefer 2-channel capture for adaptive stereo broadside isolation;
+			 * automatically fall back to 1-channel on strictly mono devices, and
+			 * auto-bypass spatial gating if hardware is mono-summed (L == R).
+			 */
+			cap_ch = 2;
+			cap = jarvis_audio_cap_open(SAMPLE_RATE, 2);
+			if (!cap) {
+				cap_ch = 1;
+				cap = jarvis_audio_cap_open(SAMPLE_RATE, 1);
+			}
 			if (!cap) {
 				stl_sleep_ms(50);
 				continue;
 			}
+			memset(&vad_flt, 0, sizeof(vad_flt));
+			jarvis_dsp_init(&dsp, SAMPLE_RATE, cap_ch);
 			pthread_mutex_lock(&g_audio.mtx);
 			g_audio.pw_open = 1;
+			g_audio.stereo_spatial = 0;
 			pthread_cond_broadcast(&g_audio.cond);
 			pthread_mutex_unlock(&g_audio.mtx);
 		}
 
-		if (jarvis_audio_cap_read(cap, raw, FRAME_SAMPLES) < 0) {
+		if (jarvis_audio_cap_read(cap, raw, (size_t)FRAME_SAMPLES * (size_t)cap_ch) < 0) {
 			jarvis_audio_cap_close(cap);
 			cap = NULL;
 			pthread_mutex_lock(&g_audio.mtx);
 			g_audio.pw_open = 0;
+			g_audio.stereo_spatial = 0;
 			pthread_mutex_unlock(&g_audio.mtx);
 			stl_sleep_ms(20);
 			continue;
 		}
 
-		double db = calc_frame_db(raw, FRAME_SAMPLES, &vad_flt);
+		float near_score = 1.0f;
+		jarvis_dsp_process_frame(&dsp, raw, FRAME_SAMPLES, clean_pcm, &near_score);
+		int stereo_sp = jarvis_dsp_is_stereo_active(&dsp);
+		double db = calc_frame_db(clean_pcm, FRAME_SAMPLES, &vad_flt);
 
 		pthread_mutex_lock(&g_audio.mtx);
 		int slot = (int)(g_audio.total_frames % RING_FRAMES);
 		float *dst = g_audio.pcm + (size_t)slot * FRAME_SAMPLES;
-		for (int i = 0; i < FRAME_SAMPLES; i++)
-			dst[i] = (float)raw[i] / 32768.0f;
+		memcpy(dst, clean_pcm, (size_t)FRAME_SAMPLES * sizeof(float));
 		g_audio.db[slot] = (float)db;
+		g_audio.near_score[slot] = near_score;
+		g_audio.stereo_spatial = stereo_sp;
 		g_audio.is_speech[slot] = (g_audio.env_frames >= 10 &&
-		                           db > g_audio.noise_floor_db + 8.5) ? 1 : 0;
+		                           db > g_audio.noise_floor_db + 8.5 &&
+		                           (!stereo_sp || near_score >= 0.40f)) ? 1 : 0;
 		g_audio.total_frames++;
 
 		/* Sliding-window ambient average tracker:
@@ -1364,8 +1436,8 @@ is_tts_self_echo(const char *heard_text, const char *active_tts_text)
 	return (matched_w * 100 >= total_w * 60) ? 1 : 0;
 }
 
-static void
-jarvis_set_active(int active)
+static int
+jarvis_apply_active(int active, int toggle, int defer_tts_interrupt)
 {
 	char state_file[256], jpid_file[256], apid_file[256];
 	char legacy_state[256], legacy_jpid[256], legacy_apid[256];
@@ -1375,168 +1447,315 @@ jarvis_set_active(int active)
 	jarvis_plat_state_path("dwm-voice", ".state", legacy_state, sizeof(legacy_state));
 	jarvis_plat_state_path("dwm-jarvis", ".pid", legacy_jpid, sizeof(legacy_jpid));
 	jarvis_plat_state_path("dwm-acting", ".pid", legacy_apid, sizeof(legacy_apid));
-	if (active) {
-		g_jarvis_active = 1;
+
+	pthread_mutex_lock(&g_ctrl.mtx);
+	int next = toggle ? !g_jarvis_active : (active ? 1 : 0);
+	g_jarvis_active = next;
+	if (!next) {
+		g_in_followup = 0;
+		g_cancel_req = 1;
+		g_tts_speaking = 0;
+		g_ctrl.can_preempt_wait = 0;
+	}
+	pthread_cond_broadcast(&g_ctrl.cond);
+	pthread_mutex_unlock(&g_ctrl.mtx);
+
+	if (next) {
+		pthread_mutex_lock(&g_state_file_mtx);
 		FILE *fp = fopen(jpid_file, "w");
 		if (fp) {
 			fprintf(fp, "%d\n", (int)getpid());
 			fclose(fp);
 		}
+		pthread_mutex_unlock(&g_state_file_mtx);
 		update_idle_voice_state(state_file);
 	} else {
-		g_jarvis_active = 0;
-		g_in_followup = 0;
-		g_cancel_req = 1;
+		pthread_mutex_lock(&g_op_turn.mtx);
+		if (g_op_turn.active)
+			g_op_turn.was_stopped = 1;
+		pthread_mutex_unlock(&g_op_turn.mtx);
+
+		pthread_mutex_lock(&g_dec.mtx);
 		g_dec.abort_flag = 1;
-		interrupt_tts_and_clear_cache();
+		pthread_cond_broadcast(&g_dec.cond);
+		pthread_mutex_unlock(&g_dec.mtx);
+
+		pthread_mutex_lock(&g_audio.mtx);
+		pthread_cond_broadcast(&g_audio.cond);
+		pthread_mutex_unlock(&g_audio.mtx);
+
+		pthread_mutex_lock(&g_state_file_mtx);
 		remove(jpid_file);
 		remove(apid_file);
 		remove(state_file);
 		remove(legacy_jpid);
 		remove(legacy_apid);
 		remove(legacy_state);
+		pthread_mutex_unlock(&g_state_file_mtx);
 		notify_bar();
+		if (!defer_tts_interrupt)
+			interrupt_tts_and_clear_cache();
 	}
+	return next;
+}
+
+static void
+jarvis_set_active(int active)
+{
+	(void)jarvis_apply_active(active, 0, 0);
+}
+
+static int
+jarvis_toggle_active(int defer_tts_interrupt)
+{
+	return jarvis_apply_active(0, 1, defer_tts_interrupt);
+}
+
+static ssize_t
+read_ctrl_line(stl_socket_t cfd, char *buf, size_t cap)
+{
+	size_t total = 0;
+	while (total + 1 < cap) {
+		ssize_t r = stl_sock_recv(cfd, buf + total, cap - 1 - total, 0);
+		if (r <= 0)
+			break;
+		total += (size_t)r;
+		if (memchr(buf, '\n', total) != NULL)
+			break;
+	}
+	buf[total] = '\0';
+	return (ssize_t)total;
+}
+
+/* Handle fast O(1) control commands directly on the dedicated control thread.
+ * Returns 1 if cfd was handled and closed, 0 if cfd is a session command to queue.
+ */
+static int
+handle_control_cmd(stl_socket_t cfd, char *cbuf)
+{
+	if (strncmp(cbuf, "GET /", 5) == 0 || strncmp(cbuf, "PING", 4) == 0) {
+		const char *ok = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
+		jarvis_plat_write_sock_all(cfd, ok, strlen(ok));
+		stl_sock_close(cfd);
+		return 1;
+	}
+	if (strncmp(cbuf, "STATUS", 6) == 0) {
+		char sbuf[256];
+		pthread_mutex_lock(&g_audio.mtx);
+		int64_t tf = g_audio.total_frames;
+		double ldb = (tf > 0) ? g_audio.db[(tf - 1) % RING_FRAMES] : -100.0;
+		float lns = (tf > 0) ? g_audio.near_score[(tf - 1) % RING_FRAMES] : 1.0f;
+		snprintf(sbuf, sizeof(sbuf),
+		         "STATUS|frames=%lld|nf_db=%.1f|std_db=%.1f|last_db=%.1f|pw_open=%d|in_speech=%d|jarvis=%d|stereo=%d|near=%.2f\n",
+		         (long long)tf, g_audio.noise_floor_db, g_audio.ambient_std_db,
+		         ldb, g_audio.pw_open, g_audio.in_speech_hint, (int)g_jarvis_active,
+		         g_audio.stereo_spatial, lns);
+		pthread_mutex_unlock(&g_audio.mtx);
+		jarvis_plat_write_sock_all(cfd, sbuf, strlen(sbuf));
+		stl_sock_close(cfd);
+		return 1;
+	}
+	if (strncmp(cbuf, "JARVIS_STATUS", 13) == 0) {
+		pthread_mutex_lock(&g_ctrl.mtx);
+		int active = (int)g_jarvis_active;
+		pthread_mutex_unlock(&g_ctrl.mtx);
+		const char *st = active ? "ON\n" : "OFF\n";
+		jarvis_plat_write_sock_all(cfd, st, strlen(st));
+		stl_sock_close(cfd);
+		return 1;
+	}
+	if (strncmp(cbuf, "JARVIS_ON", 9) == 0) {
+		jarvis_set_active(1);
+		jarvis_plat_write_sock_all(cfd, "ON\n", 3);
+		stl_sock_close(cfd);
+		return 1;
+	}
+	if (strncmp(cbuf, "JARVIS_OFF", 10) == 0) {
+		(void)jarvis_apply_active(0, 0, 1);
+		jarvis_plat_write_sock_all(cfd, "OFF\n", 4);
+		stl_sock_close(cfd);
+		interrupt_tts_and_clear_cache();
+		return 1;
+	}
+	if (strncmp(cbuf, "JARVIS_TOGGLE", 13) == 0) {
+		int next = jarvis_toggle_active(1);
+		const char *st = next ? "ON\n" : "OFF\n";
+		jarvis_plat_write_sock_all(cfd, st, strlen(st));
+		stl_sock_close(cfd);
+		if (!next)
+			interrupt_tts_and_clear_cache();
+		return 1;
+	}
+	if (strncmp(cbuf, "TTS_STATE|", 10) == 0) {
+		char *st = cbuf + 10;
+		char *nl = strpbrk(st, "\r\n");
+		if (nl) *nl = '\0';
+		char sf[256];
+		jarvis_plat_state_path("jarvis-voice", ".state", sf, sizeof(sf));
+		if (strcmp(st, "speaking") == 0) {
+			if (g_jarvis_active || is_tts_file_active()) {
+				g_tts_speaking = 1;
+				g_tts_last_active_ms = now_ms();
+				update_idle_voice_state(sf);
+			}
+		} else if (strcmp(st, "idle") == 0) {
+			if (g_tts_speaking)
+				g_tts_last_active_ms = now_ms();
+			g_tts_speaking = 0;
+			update_idle_voice_state(sf);
+		}
+		jarvis_plat_write_sock_all(cfd, "OK\n", 3);
+		stl_sock_close(cfd);
+		return 1;
+	}
+	if (strncmp(cbuf, "TTS_INTERRUPT", 13) == 0) {
+		interrupt_tts_and_clear_cache();
+		jarvis_plat_write_sock_all(cfd, "OK\n", 3);
+		stl_sock_close(cfd);
+		return 1;
+	}
+	if (strncmp(cbuf, "TTS_SPEAK|", 10) == 0) {
+		char *txt = cbuf + 10;
+		char *nl = strpbrk(txt, "\r\n");
+		if (nl) *nl = '\0';
+		if (*txt) {
+			interrupt_tts_and_clear_cache();
+			jarvis_tts_speak_clause("oneshot", txt, 1);
+		}
+		jarvis_plat_write_sock_all(cfd, "OK\n", 3);
+		stl_sock_close(cfd);
+		return 1;
+	}
+	if (strncmp(cbuf, "TTS_NOTIFY|", 11) == 0) {
+		char *payload = cbuf + 11;
+		char *nl = strpbrk(payload, "\r\n");
+		if (nl) *nl = '\0';
+		char *sep = strchr(payload, '|');
+		char def_title[128], wake_buf[64];
+		get_active_wake_word(wake_buf, sizeof(wake_buf));
+		jarvis_ontology_format_ui(get_daemon_ont(), "notify_title", wake_buf,
+		                          "  {Wake}", def_title, sizeof(def_title));
+		const char *title = def_title;
+		const char *msg = payload;
+		if (sep) {
+			*sep = '\0';
+			if (payload[0]) title = payload;
+			msg = sep + 1;
+		}
+		if (*msg) {
+			notify_osd_async(title, msg, 5500);
+			if (!g_audio.in_speech_hint && !is_tts_currently_speaking(NULL, 0))
+				jarvis_tts_speak_clause("notify", msg, 0);
+		}
+		jarvis_plat_write_sock_all(cfd, "OK\n", 3);
+		stl_sock_close(cfd);
+		return 1;
+	}
+	if (strncmp(cbuf, "STOP", 4) == 0) {
+		g_stop_req = 1;
+		pthread_mutex_lock(&g_audio.mtx);
+		pthread_cond_broadcast(&g_audio.cond);
+		pthread_mutex_unlock(&g_audio.mtx);
+		jarvis_plat_write_sock_all(cfd, "OK\n", 3);
+		stl_sock_close(cfd);
+		return 1;
+	}
+	if (strncmp(cbuf, "CANCEL", 6) == 0) {
+		g_cancel_req = 1;
+		pthread_mutex_lock(&g_dec.mtx);
+		g_dec.abort_flag = 1;
+		pthread_cond_broadcast(&g_dec.cond);
+		pthread_mutex_unlock(&g_dec.mtx);
+		pthread_mutex_lock(&g_audio.mtx);
+		pthread_cond_broadcast(&g_audio.cond);
+		pthread_mutex_unlock(&g_audio.mtx);
+		jarvis_plat_write_sock_all(cfd, "OK\n", 3);
+		stl_sock_close(cfd);
+		return 1;
+	}
+	return 0;
+}
+
+/* Dedicated control-plane socket acceptor thread.
+ * Always serves PING, STATUS, JARVIS_TOGGLE, JARVIS_ON, JARVIS_OFF, TTS, STOP, and CANCEL
+ * in <1ms regardless of model loading, Whisper inference, or active ren turns.
+ */
+static void *
+control_thread_fn(void *arg)
+{
+	(void)arg;
+	while (running) {
+		struct pollfd pfd;
+		pfd.fd = g_ctrl.srv;
+		pfd.events = POLLIN;
+		pfd.revents = 0;
+
+		int pr = stl_poll(&pfd, 1, 200);
+		if (pr <= 0 || !(pfd.revents & POLLIN))
+			continue;
+
+		struct sockaddr_in caddr;
+		socklen_t clen = sizeof(caddr);
+		stl_socket_t cfd = stl_sock_accept(g_ctrl.srv, (struct sockaddr *)&caddr, &clen);
+		if (cfd == STL_INVALID_SOCKET)
+			continue;
+
+		stl_sock_set_timeout(cfd, 1000, 1000);
+		char cbuf[2048];
+		ssize_t n = read_ctrl_line(cfd, cbuf, sizeof(cbuf));
+		if (n <= 0) {
+			stl_sock_close(cfd);
+			continue;
+		}
+
+		if (handle_control_cmd(cfd, cbuf))
+			continue;
+
+		if (strncmp(cbuf, "STREAM|", 7) == 0 ||
+		    strncmp(cbuf, "JARVIS_WAIT|", 12) == 0 ||
+		    strncmp(cbuf, "TRANSCRIBE|", 11) == 0) {
+			int should_preempt = 0;
+			int queued = 0;
+			pthread_mutex_lock(&g_ctrl.mtx);
+			if (g_ctrl.pending_cli == STL_INVALID_SOCKET) {
+				g_ctrl.pending_cli = cfd;
+				snprintf(g_ctrl.pending_buf, sizeof(g_ctrl.pending_buf), "%s", cbuf);
+				should_preempt = g_ctrl.can_preempt_wait;
+				queued = 1;
+				pthread_cond_broadcast(&g_ctrl.cond);
+			}
+			pthread_mutex_unlock(&g_ctrl.mtx);
+
+			if (!queued) {
+				stl_sock_close(cfd);
+			} else if (should_preempt) {
+				g_cancel_req = 1;
+				pthread_mutex_lock(&g_dec.mtx);
+				g_dec.abort_flag = 1;
+				pthread_cond_broadcast(&g_dec.cond);
+				pthread_mutex_unlock(&g_dec.mtx);
+				pthread_mutex_lock(&g_audio.mtx);
+				pthread_cond_broadcast(&g_audio.cond);
+				pthread_mutex_unlock(&g_audio.mtx);
+			}
+		} else {
+			stl_sock_close(cfd);
+		}
+	}
+	return NULL;
 }
 
 static void
 poll_control_socket(stl_socket_t srv, stl_socket_t cli, int is_jarvis_idle)
 {
+	(void)srv;
 	if (cli != STL_INVALID_SOCKET && jarvis_plat_sock_peer_closed(cli)) {
 		g_cancel_req = 1;
 		g_dec.abort_flag = 1;
 		return;
 	}
-
-	struct pollfd pfd;
-	pfd.fd = srv;
-	pfd.events = POLLIN;
-	pfd.revents = 0;
-
-	while (stl_poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN)) {
-		struct sockaddr_in caddr;
-		socklen_t clen = sizeof(caddr);
-		stl_socket_t cfd = stl_sock_accept(srv, (struct sockaddr *)&caddr, &clen);
-		if (cfd == STL_INVALID_SOCKET)
-			break;
-
-		char cbuf[2048];
-		ssize_t n = stl_sock_recv(cfd, cbuf, sizeof(cbuf) - 1, 0);
-		if (n <= 0) {
-			stl_sock_close(cfd);
-			continue;
-		}
-		cbuf[n] = '\0';
-
-		if (strncmp(cbuf, "GET /", 5) == 0 || strncmp(cbuf, "PING", 4) == 0) {
-			const char *ok = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
-			jarvis_plat_write_sock_all(cfd, ok, strlen(ok));
-			stl_sock_close(cfd);
-		} else if (strncmp(cbuf, "STATUS", 6) == 0) {
-			char sbuf[256];
-			pthread_mutex_lock(&g_audio.mtx);
-			int64_t tf = g_audio.total_frames;
-			double ldb = (tf > 0) ? g_audio.db[(tf - 1) % RING_FRAMES] : -100.0;
-			snprintf(sbuf, sizeof(sbuf),
-			         "STATUS|frames=%lld|nf_db=%.1f|std_db=%.1f|last_db=%.1f|pw_open=%d|in_speech=%d|jarvis=%d\n",
-			         (long long)tf, g_audio.noise_floor_db, g_audio.ambient_std_db,
-			         ldb, g_audio.pw_open, g_audio.in_speech_hint, (int)g_jarvis_active);
-			pthread_mutex_unlock(&g_audio.mtx);
-			jarvis_plat_write_sock_all(cfd, sbuf, strlen(sbuf));
-			stl_sock_close(cfd);
-		} else if (strncmp(cbuf, "JARVIS_STATUS", 13) == 0) {
-			const char *st = g_jarvis_active ? "ON\n" : "OFF\n";
-			jarvis_plat_write_sock_all(cfd, st, strlen(st));
-			stl_sock_close(cfd);
-		} else if (strncmp(cbuf, "JARVIS_ON", 9) == 0) {
-			jarvis_set_active(1);
-			jarvis_plat_write_sock_all(cfd, "ON\n", 3);
-			stl_sock_close(cfd);
-		} else if (strncmp(cbuf, "JARVIS_OFF", 10) == 0) {
-			jarvis_set_active(0);
-			jarvis_plat_write_sock_all(cfd, "OFF\n", 4);
-			stl_sock_close(cfd);
-		} else if (strncmp(cbuf, "JARVIS_TOGGLE", 13) == 0) {
-			int next = !g_jarvis_active;
-			jarvis_set_active(next);
-			const char *st = next ? "ON\n" : "OFF\n";
-			jarvis_plat_write_sock_all(cfd, st, strlen(st));
-			stl_sock_close(cfd);
-		} else if (strncmp(cbuf, "TTS_STATE|", 10) == 0) {
-			char *st = cbuf + 10;
-			char *nl = strpbrk(st, "\r\n");
-			if (nl) *nl = 0;
-			char sf[256];
-			jarvis_plat_state_path("jarvis-voice", ".state", sf, sizeof(sf));
-			if (strcmp(st, "speaking") == 0) {
-				g_tts_speaking = 1;
-				g_tts_last_active_ms = now_ms();
-				update_idle_voice_state(sf);
-			} else if (strcmp(st, "idle") == 0) {
-				g_tts_speaking = 0;
-				g_tts_last_active_ms = now_ms();
-				update_idle_voice_state(sf);
-			}
-			jarvis_plat_write_sock_all(cfd, "OK\n", 3);
-			stl_sock_close(cfd);
-		} else if (strncmp(cbuf, "TTS_INTERRUPT", 13) == 0) {
-			interrupt_tts_and_clear_cache();
-			jarvis_plat_write_sock_all(cfd, "OK\n", 3);
-			stl_sock_close(cfd);
-		} else if (strncmp(cbuf, "TTS_SPEAK|", 10) == 0) {
-			char *txt = cbuf + 10;
-			char *nl = strpbrk(txt, "\r\n");
-			if (nl) *nl = '\0';
-			if (*txt) {
-				interrupt_tts_and_clear_cache();
-				jarvis_tts_speak_clause("oneshot", txt, 1);
-			}
-			jarvis_plat_write_sock_all(cfd, "OK\n", 3);
-			stl_sock_close(cfd);
-		} else if (strncmp(cbuf, "TTS_NOTIFY|", 11) == 0) {
-			char *payload = cbuf + 11;
-			char *nl = strpbrk(payload, "\r\n");
-			if (nl) *nl = '\0';
-			char *sep = strchr(payload, '|');
-			char def_title[128], wake_buf[64];
-			get_active_wake_word(wake_buf, sizeof(wake_buf));
-			jarvis_ontology_format_ui(get_daemon_ont(), "notify_title", wake_buf,
-			                          "  {Wake}", def_title, sizeof(def_title));
-			const char *title = def_title;
-			const char *msg = payload;
-			if (sep) {
-				*sep = '\0';
-				if (payload[0]) title = payload;
-				msg = sep + 1;
-			}
-			if (*msg) {
-				daemon_notify(title, msg, 1);
-				if (!g_audio.in_speech_hint) {
-					jarvis_tts_speak_clause("notify", msg, 0);
-				}
-			}
-			jarvis_plat_write_sock_all(cfd, "OK\n", 3);
-			stl_sock_close(cfd);
-		} else if (strncmp(cbuf, "STOP", 4) == 0) {
-			g_stop_req = 1;
-			jarvis_plat_write_sock_all(cfd, "OK\n", 3);
-			stl_sock_close(cfd);
-		} else if (strncmp(cbuf, "CANCEL", 6) == 0) {
-			g_cancel_req = 1;
-			g_dec.abort_flag = 1;
-			jarvis_plat_write_sock_all(cfd, "OK\n", 3);
-			stl_sock_close(cfd);
-		} else if (is_jarvis_idle &&
-		           (strncmp(cbuf, "STREAM|", 7) == 0 || strncmp(cbuf, "JARVIS_WAIT|", 12) == 0) &&
-		           g_preempt_cli == STL_INVALID_SOCKET) {
-			g_preempt_cli = cfd;
-			snprintf(g_preempt_buf, sizeof(g_preempt_buf), "%s", cbuf);
-			g_cancel_req = 1;
-			g_dec.abort_flag = 1;
-			break;
-		} else {
-			stl_sock_close(cfd);
-		}
+	if (cli == STL_INVALID_SOCKET && g_ctrl.can_preempt_wait != is_jarvis_idle) {
+		set_can_preempt_wait(is_jarvis_idle);
 	}
 }
 
@@ -1646,6 +1865,8 @@ handle_stream(stl_socket_t srv, stl_socket_t cli, const char *mode, const char *
 
 		while (scan_f < avail_f) {
 			float db = g_audio.db[scan_f % RING_FRAMES];
+			float ns = g_audio.near_score[scan_f % RING_FRAMES];
+			int sp_on = g_audio.stereo_spatial;
 			if (scan_f < ignore_until_f) {
 				scan_f++;
 				continue;
@@ -1655,7 +1876,7 @@ handle_stream(stl_socket_t srv, stl_socket_t cli, const char *mode, const char *
 				double amb_std = g_audio.ambient_std_db;
 				calc_ambient_window_locked(scan_f - consec_voiced, 80, &amb_avg, &amb_std);
 				double eff_start_db = calc_vad_start_db(amb_avg, amb_std);
-				if (db >= eff_start_db) {
+				if (db >= eff_start_db && (!sp_on || ns >= 0.45f)) {
 					consec_voiced++;
 					if (consec_voiced >= 2) {
 						in_speech = 1;
@@ -1682,7 +1903,7 @@ handle_stream(stl_socket_t srv, stl_socket_t cli, const char *mode, const char *
 				double eff_keep_db = calc_vad_keep_db(utter_amb_avg, utter_amb_std,
 				                                      utter_start_db, peak_speech_db);
 
-				if (db >= eff_keep_db) {
+				if (db >= eff_keep_db && (!sp_on || ns >= 0.22f)) {
 					voiced_frames++;
 					silence_frames = 0;
 					last_voiced_f = scan_f;
@@ -1794,8 +2015,18 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 		return 2;
 	}
 
+	pthread_mutex_lock(&g_ctrl.mtx);
 	g_stop_req = 0;
 	g_cancel_req = 0;
+	int entry_abort = (cli == STL_INVALID_SOCKET &&
+	                   (!g_jarvis_active || (!operating_mode && g_ctrl.pending_cli != STL_INVALID_SOCKET)));
+	if (!entry_abort)
+		g_ctrl.can_preempt_wait = (cli == STL_INVALID_SOCKET && !operating_mode) ? 1 : 0;
+	pthread_mutex_unlock(&g_ctrl.mtx);
+	if (entry_abort) {
+		free(wake_pcm);
+		return 130;
+	}
 	decode_reset_session();
 	audio_acquire();
 
@@ -1879,12 +2110,13 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 	if (spec_early_f > 45)
 		spec_early_f = 45;
 
-	while (running && !g_stop_req && !g_cancel_req) {
+	while (running && !g_stop_req && !g_cancel_req && (cli != STL_INVALID_SOCKET || g_jarvis_active)) {
 		if (operating_mode) {
 			pthread_mutex_lock(&g_op_turn.mtx);
 			int op_active = g_op_turn.active;
 			pthread_mutex_unlock(&g_op_turn.mtx);
 			if (!op_active && !wake_confirmed && (!in_speech || tts_was_active_in_utter)) {
+				set_can_preempt_wait(0);
 				decode_reset_session();
 				audio_release(WARM_HOLD_MS);
 				free(wake_pcm);
@@ -1893,7 +2125,7 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 		}
 
 		poll_control_socket(srv, cli, (!operating_mode) && (!wake_confirmed || waiting_post_wake));
-		if (g_stop_req || g_cancel_req)
+		if (g_stop_req || g_cancel_req || (cli == STL_INVALID_SOCKET && !g_jarvis_active))
 			break;
 
 		wait_next_audio_frame(scan_f + 1, 20);
@@ -2025,6 +2257,8 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 
 		while (scan_f < avail_f) {
 			float db = g_audio.db[scan_f % RING_FRAMES];
+			float ns = g_audio.near_score[scan_f % RING_FRAMES];
+			int sp_on = g_audio.stereo_spatial;
 
 			if (scan_f < chime_ignore_until_f) {
 				scan_f++;
@@ -2041,7 +2275,7 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 				 * are captured immediately from the first consonant.
 				 */
 				double eff_start_db = calc_vad_start_db(amb_avg, amb_std) - 1.0;
-				if (db >= eff_start_db) {
+				if (db >= eff_start_db && (!sp_on || ns >= 0.36f)) {
 					consec_voiced++;
 					if (consec_voiced >= 2) {
 						waiting_post_wake = 0;
@@ -2070,7 +2304,7 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 				double amb_std = g_audio.ambient_std_db;
 				calc_ambient_window_locked(scan_f - consec_voiced, 80, &amb_avg, &amb_std);
 				double eff_start_db = calc_vad_start_db(amb_avg, amb_std);
-				if (db >= eff_start_db) {
+				if (db >= eff_start_db && (!sp_on || ns >= 0.45f)) {
 					consec_voiced++;
 					if (consec_voiced >= 2) {
 						in_speech = 1;
@@ -2110,7 +2344,8 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 						recent_sum += g_audio.db[rf % RING_FRAMES];
 					double recent_avg = recent_sum / 20.0;
 					if (db >= recent_avg + 5.5 &&
-					    g_audio.db[(scan_f - 1) % RING_FRAMES] >= recent_avg + 4.5) {
+					    g_audio.db[(scan_f - 1) % RING_FRAMES] >= recent_avg + 4.5 &&
+					    (!sp_on || ns >= 0.45f)) {
 						speech_start_f = (scan_f > preroll_f) ? (scan_f - preroll_f) : 0;
 						cmd_start_f = speech_start_f;
 						voiced_frames = 2;
@@ -2135,7 +2370,7 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 				double eff_keep_db = calc_vad_keep_db(utter_amb_avg, utter_amb_std,
 				                                      utter_start_db, peak_speech_db);
 
-				if (db >= eff_keep_db) {
+				if (db >= eff_keep_db && (!sp_on || ns >= 0.22f)) {
 					voiced_frames++;
 					silence_frames = 0;
 					last_voiced_f = scan_f;
@@ -2172,6 +2407,7 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 					update_idle_voice_state(state_file);
 					continue;
 				}
+				set_can_preempt_wait(0);
 				restore_speaker_after_command(NULL);
 				decode_reset_session();
 				audio_release(WARM_HOLD_MS);
@@ -2250,8 +2486,10 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 					int w_tok = cont_wake_check ? 16 : 28;
 					int wake_all_silent = 0;
 					run_whisper_slice(ctx_wake, n_threads, wake_pcm, n_samp,
-					                  lang, wake_prompt, w_tok, 1, 0, 0,
+					                  lang, wake_prompt, w_tok, 1, 0, 1,
 					                  heard, sizeof(heard), &wake_all_silent);
+					if (g_cancel_req || (cli == STL_INVALID_SOCKET && !g_jarvis_active))
+						break;
 					decoded_wake_voiced_f = snap_voiced_f;
 					if (pause_wake_check)
 						decoded_wake_paused = 1;
@@ -2279,7 +2517,9 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 					double speech_cont_db = (peak_speech_db - 9.0 > chk_keep_db) ? (peak_speech_db - 9.0) : chk_keep_db;
 					int v_during = 0;
 					for (int64_t f = end_f; f < cur_tf; f++) {
-						if (g_audio.db[f % RING_FRAMES] >= speech_cont_db)
+						int sl = (int)(f % RING_FRAMES);
+						if (g_audio.db[sl] >= speech_cont_db &&
+						    (!g_audio.stereo_spatial || g_audio.near_score[sl] >= 0.30f))
 							v_during++;
 					}
 					if (v_during >= 3)
@@ -2564,13 +2804,16 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 					                          lang, eff_prompt, 0);
 
 					pthread_mutex_lock(&g_dec.mtx);
-					while ((g_dec.busy || g_dec.has_job) && running && !g_cancel_req)
+					while ((g_dec.busy || g_dec.has_job) && running && !g_cancel_req &&
+					       (cli != STL_INVALID_SOCKET || g_jarvis_active))
 						pthread_cond_wait(&g_dec.cond, &g_dec.mtx);
 					if (g_dec.has_result) {
 						snprintf(final_raw, sizeof(final_raw), "%s", g_dec.result_text);
 						g_dec.has_result = 0;
 					}
 					pthread_mutex_unlock(&g_dec.mtx);
+					if (g_cancel_req || (cli == STL_INVALID_SOCKET && !g_jarvis_active))
+						break;
 				}
 
 				/* Check if the user resumed speaking to clarify while the final decode
@@ -2584,7 +2827,9 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 				int v_after = 0;
 				double resume_db = (peak_speech_db - 9.5 > chk_keep_db) ? (peak_speech_db - 9.5) : chk_keep_db;
 				for (int64_t f = scan_f; f < cur_tf; f++) {
-					if (g_audio.db[f % RING_FRAMES] >= resume_db)
+					int sl = (int)(f % RING_FRAMES);
+					if (g_audio.db[sl] >= resume_db &&
+					    (!g_audio.stereo_spatial || g_audio.near_score[sl] >= 0.30f))
 						v_after++;
 				}
 				if (v_after >= 3 && cmd_len_f < max_utter_frames)
@@ -2707,10 +2952,12 @@ handle_jarvis_wait_ex(stl_socket_t srv, stl_socket_t cli, struct whisper_context
 		}
 	}
 
-	if (g_cancel_req) {
+	set_can_preempt_wait(0);
+
+	if (g_cancel_req || (cli == STL_INVALID_SOCKET && !g_jarvis_active)) {
 		restore_speaker_after_command(NULL);
 		decode_reset_session();
-		audio_release(g_preempt_cli != STL_INVALID_SOCKET ? WARM_HOLD_MS : 2000L);
+		audio_release(has_pending_client() ? WARM_HOLD_MS : 2000L);
 		free(wake_pcm);
 		if (cli != STL_INVALID_SOCKET)
 			jarvis_plat_write_sock_all(cli, "CANCELLED\n", 10);
@@ -2970,8 +3217,8 @@ run_inprocess_jarvis_turn(stl_socket_t srv, struct whisper_context *ctx_wake, in
 	*io_next_followup = 0;
 
 	if (!g_jarvis_active) {
-		remove(state_file);
-		notify_bar();
+		if (remove_state_file(state_file))
+			notify_bar();
 		return;
 	}
 
@@ -3115,7 +3362,7 @@ run_inprocess_jarvis_turn(stl_socket_t srv, struct whisper_context *ctx_wake, in
 			pthread_mutex_unlock(&g_op_turn.mtx);
 
 			if (!g_jarvis_active) {
-				remove(state_file);
+				remove_state_file(state_file);
 				notify_bar();
 				return;
 			}
@@ -3265,136 +3512,8 @@ serve_client_request(stl_socket_t srv, stl_socket_t cli, char *buf,
                      struct whisper_context *ctx_main,
                      struct whisper_context *ctx_wake, int n_threads)
 {
-	if (strncmp(buf, "GET /", 5) == 0 || strncmp(buf, "PING", 4) == 0) {
-		const char *ok = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
-		jarvis_plat_write_sock_all(cli, ok, strlen(ok));
-		stl_sock_close(cli);
+	if (handle_control_cmd(cli, buf))
 		return;
-	}
-	if (strncmp(buf, "STATUS", 6) == 0) {
-		char sbuf[256];
-		pthread_mutex_lock(&g_audio.mtx);
-		int64_t tf = g_audio.total_frames;
-		double ldb = (tf > 0) ? g_audio.db[(tf - 1) % RING_FRAMES] : -100.0;
-		snprintf(sbuf, sizeof(sbuf),
-		         "STATUS|frames=%lld|nf_db=%.1f|std_db=%.1f|last_db=%.1f|pw_open=%d|in_speech=%d|jarvis=%d\n",
-		         (long long)tf, g_audio.noise_floor_db, g_audio.ambient_std_db,
-		         ldb, g_audio.pw_open, g_audio.in_speech_hint, (int)g_jarvis_active);
-		pthread_mutex_unlock(&g_audio.mtx);
-		jarvis_plat_write_sock_all(cli, sbuf, strlen(sbuf));
-		stl_sock_close(cli);
-		return;
-	}
-	if (strncmp(buf, "JARVIS_STATUS", 13) == 0) {
-		const char *st = g_jarvis_active ? "ON\n" : "OFF\n";
-		jarvis_plat_write_sock_all(cli, st, strlen(st));
-		stl_sock_close(cli);
-		return;
-	}
-	if (strncmp(buf, "JARVIS_ON", 9) == 0) {
-		jarvis_set_active(1);
-		jarvis_plat_write_sock_all(cli, "ON\n", 3);
-		stl_sock_close(cli);
-		return;
-	}
-	if (strncmp(buf, "JARVIS_OFF", 10) == 0) {
-		jarvis_set_active(0);
-		jarvis_plat_write_sock_all(cli, "OFF\n", 4);
-		stl_sock_close(cli);
-		return;
-	}
-	if (strncmp(buf, "JARVIS_TOGGLE", 13) == 0) {
-		int next = !g_jarvis_active;
-		jarvis_set_active(next);
-		const char *st = next ? "ON\n" : "OFF\n";
-		jarvis_plat_write_sock_all(cli, st, strlen(st));
-		stl_sock_close(cli);
-		return;
-	}
-	if (strncmp(buf, "TTS_STATE|", 10) == 0) {
-		char *st = buf + 10;
-		char *nl = strpbrk(st, "\r\n");
-		if (nl) *nl = '\0';
-		char sf[256];
-		jarvis_plat_state_path("jarvis-voice", ".state", sf, sizeof(sf));
-		if (strcmp(st, "speaking") == 0) {
-			g_tts_speaking = 1;
-			g_tts_last_active_ms = now_ms();
-			update_idle_voice_state(sf);
-		} else if (strcmp(st, "idle") == 0) {
-			g_tts_speaking = 0;
-			g_tts_last_active_ms = now_ms();
-			update_idle_voice_state(sf);
-		}
-		jarvis_plat_write_sock_all(cli, "OK\n", 3);
-		stl_sock_close(cli);
-		return;
-	}
-	if (strncmp(buf, "TTS_INTERRUPT", 13) == 0) {
-		interrupt_tts_and_clear_cache();
-		jarvis_plat_write_sock_all(cli, "OK\n", 3);
-		stl_sock_close(cli);
-		return;
-	}
-	if (strncmp(buf, "TTS_SPEAK|", 10) == 0) {
-		char *txt = buf + 10;
-		char *nl = strpbrk(txt, "\r\n");
-		if (nl)
-			*nl = '\0';
-		if (*txt) {
-			interrupt_tts_and_clear_cache();
-			jarvis_tts_speak_clause("oneshot", txt, 1);
-		}
-		jarvis_plat_write_sock_all(cli, "OK\n", 3);
-		stl_sock_close(cli);
-		return;
-	}
-	if (strncmp(buf, "TTS_NOTIFY|", 11) == 0) {
-		char *rest = buf + 11;
-		char *nl = strpbrk(rest, "\r\n");
-		if (nl)
-			*nl = '\0';
-		char *sep = strchr(rest, '|');
-		char def_title[128], wake_buf[64];
-		get_active_wake_word(wake_buf, sizeof(wake_buf));
-		jarvis_ontology_format_ui(get_daemon_ont(), "notify_title", wake_buf,
-		                          "  {Wake}", def_title, sizeof(def_title));
-		const char *title = def_title;
-		const char *msg = rest;
-		char title_buf[128] = {0};
-		if (sep) {
-			size_t tlen = (size_t)(sep - rest);
-			if (tlen > 0 && tlen < sizeof(title_buf)) {
-				memcpy(title_buf, rest, tlen);
-				title_buf[tlen] = '\0';
-				title = title_buf;
-			}
-			msg = sep + 1;
-		}
-		if (*msg) {
-			notify_osd_async(title, msg, 5500);
-			if (!is_tts_currently_speaking(NULL, 0))
-				jarvis_tts_speak_clause("notify", msg, 2);
-		}
-		jarvis_plat_write_sock_all(cli, "OK\n", 3);
-		stl_sock_close(cli);
-		return;
-	}
-	if (strncmp(buf, "STOP", 4) == 0) {
-		g_stop_req = 1;
-		pthread_cond_broadcast(&g_audio.cond);
-		jarvis_plat_write_sock_all(cli, "OK\n", 3);
-		stl_sock_close(cli);
-		return;
-	}
-	if (strncmp(buf, "CANCEL", 6) == 0) {
-		g_cancel_req = 1;
-		g_dec.abort_flag = 1;
-		pthread_cond_broadcast(&g_audio.cond);
-		jarvis_plat_write_sock_all(cli, "OK\n", 3);
-		stl_sock_close(cli);
-		return;
-	}
 
 	char *nl = strpbrk(buf, "\r\n");
 	if (nl)
@@ -3593,49 +3712,14 @@ main(int argc, char *argv[])
 #endif
 
 	init_daemon_runtime();
-	if (start_jarvis)
-		jarvis_set_active(1);
-
-	ggml_backend_load_all();
-	whisper_log_set(quiet_log, NULL);
-
-	struct whisper_context_params cparams = whisper_context_default_params();
-	cparams.use_gpu = true;
-	cparams.flash_attn = true;
-
-	struct whisper_context *ctx_main = whisper_init_from_file_with_params(main_model_path, cparams);
-	if (!ctx_main) {
-		fprintf(stderr, "jarvisd: failed to load main model %s\n", main_model_path);
-		jarvis_plat_singleton_release(inst_lock);
-		return 1;
-	}
-
-	struct whisper_context *ctx_wake = NULL;
-	if (wake_model_path && *wake_model_path && strcmp(wake_model_path, main_model_path) != 0 &&
-	    jarvis_plat_is_readable(wake_model_path)) {
-		ctx_wake = whisper_init_from_file_with_params(wake_model_path, cparams);
-	}
-	if (!ctx_wake)
-		ctx_wake = ctx_main;
-
-	g_dec.ctx = ctx_main;
-	g_dec.n_threads = n_threads;
-	g_dec.pcm = malloc((size_t)MAX_UTTER_FRAMES * FRAME_SAMPLES * sizeof(float));
-	if (!g_dec.pcm) {
-		whisper_free(ctx_main);
-		if (ctx_wake != ctx_main)
-			whisper_free(ctx_wake);
-		jarvis_plat_singleton_release(inst_lock);
-		return 1;
-	}
 
 	stl_sock_init();
 	stl_socket_t srv = stl_sock_create(AF_INET, SOCK_STREAM, 0);
 	if (srv == STL_INVALID_SOCKET) {
-		free(g_dec.pcm);
-		whisper_free(ctx_main);
-		if (ctx_wake != ctx_main)
-			whisper_free(ctx_wake);
+		if (g_daemon_ont) {
+			jarvis_ontology_destroy(g_daemon_ont);
+			g_daemon_ont = NULL;
+		}
 		jarvis_plat_singleton_release(inst_lock);
 		return 1;
 	}
@@ -3654,7 +3738,87 @@ main(int argc, char *argv[])
 
 	if (stl_sock_bind(srv, (struct sockaddr *)&addr, sizeof(addr)) < 0 || stl_sock_listen(srv, 16) < 0) {
 		stl_sock_close(srv);
-		free(g_dec.pcm);
+		if (g_daemon_ont) {
+			jarvis_ontology_destroy(g_daemon_ont);
+			g_daemon_ont = NULL;
+		}
+		jarvis_plat_singleton_release(inst_lock);
+		return 1;
+	}
+
+	g_ctrl.srv = srv;
+	if (start_jarvis)
+		jarvis_set_active(1);
+
+	pthread_t ctrl_tid;
+	if (pthread_create(&ctrl_tid, NULL, control_thread_fn, NULL) != 0) {
+		if (g_jarvis_active)
+			jarvis_set_active(0);
+		stl_sock_close(srv);
+		if (g_daemon_ont) {
+			jarvis_ontology_destroy(g_daemon_ont);
+			g_daemon_ont = NULL;
+		}
+		jarvis_plat_singleton_release(inst_lock);
+		return 1;
+	}
+
+	ggml_backend_load_all();
+	whisper_log_set(quiet_log, NULL);
+
+	struct whisper_context_params cparams = whisper_context_default_params();
+	cparams.use_gpu = true;
+	cparams.flash_attn = true;
+
+	struct whisper_context *ctx_main = whisper_init_from_file_with_params(main_model_path, cparams);
+	if (!ctx_main) {
+		fprintf(stderr, "jarvisd: failed to load main model %s\n", main_model_path);
+		running = 0;
+		if (g_jarvis_active)
+			jarvis_set_active(0);
+		pthread_join(ctrl_tid, NULL);
+		pthread_mutex_lock(&g_ctrl.mtx);
+		if (g_ctrl.pending_cli != STL_INVALID_SOCKET) {
+			stl_sock_close(g_ctrl.pending_cli);
+			g_ctrl.pending_cli = STL_INVALID_SOCKET;
+		}
+		pthread_mutex_unlock(&g_ctrl.mtx);
+		stl_sock_close(srv);
+		if (g_daemon_ont) {
+			jarvis_ontology_destroy(g_daemon_ont);
+			g_daemon_ont = NULL;
+		}
+		jarvis_plat_singleton_release(inst_lock);
+		return 1;
+	}
+
+	struct whisper_context *ctx_wake = NULL;
+	if (wake_model_path && *wake_model_path && strcmp(wake_model_path, main_model_path) != 0 &&
+	    jarvis_plat_is_readable(wake_model_path)) {
+		ctx_wake = whisper_init_from_file_with_params(wake_model_path, cparams);
+	}
+	if (!ctx_wake)
+		ctx_wake = ctx_main;
+
+	g_dec.ctx = ctx_main;
+	g_dec.n_threads = n_threads;
+	g_dec.pcm = malloc((size_t)MAX_UTTER_FRAMES * FRAME_SAMPLES * sizeof(float));
+	if (!g_dec.pcm) {
+		running = 0;
+		if (g_jarvis_active)
+			jarvis_set_active(0);
+		pthread_join(ctrl_tid, NULL);
+		pthread_mutex_lock(&g_ctrl.mtx);
+		if (g_ctrl.pending_cli != STL_INVALID_SOCKET) {
+			stl_sock_close(g_ctrl.pending_cli);
+			g_ctrl.pending_cli = STL_INVALID_SOCKET;
+		}
+		pthread_mutex_unlock(&g_ctrl.mtx);
+		stl_sock_close(srv);
+		if (g_daemon_ont) {
+			jarvis_ontology_destroy(g_daemon_ont);
+			g_daemon_ont = NULL;
+		}
 		whisper_free(ctx_main);
 		if (ctx_wake != ctx_main)
 			whisper_free(ctx_wake);
@@ -3663,7 +3827,7 @@ main(int argc, char *argv[])
 	}
 
 	/* Warmup both contexts (128 frames) so threadpool and arena buffers are hot */
-	{
+	if (running) {
 		float warm_pcm[3200] = {0};
 		const char *ont_lang = jarvis_ontology_get_lang(get_daemon_ont());
 		if (!ont_lang || !*ont_lang)
@@ -3678,7 +3842,7 @@ main(int argc, char *argv[])
 		wp.temperature_inc = 0.0f;
 		wp.language = whisper_is_multilingual(ctx_wake) ? ont_lang : "en";
 		whisper_full(ctx_wake, wp, warm_pcm, 3200);
-		if (ctx_main != ctx_wake) {
+		if (running && ctx_main != ctx_wake) {
 			wp.language = whisper_is_multilingual(ctx_main) ? ont_lang : "en";
 			whisper_full(ctx_main, wp, warm_pcm, 3200);
 		}
@@ -3694,53 +3858,68 @@ main(int argc, char *argv[])
 		stl_socket_t cli = STL_INVALID_SOCKET;
 		char buf[2048];
 
-		if (g_preempt_cli != STL_INVALID_SOCKET) {
-			cli = g_preempt_cli;
-			g_preempt_cli = STL_INVALID_SOCKET;
-			snprintf(buf, sizeof(buf), "%s", g_preempt_buf);
+		pthread_mutex_lock(&g_ctrl.mtx);
+		if (!g_jarvis_active)
+			next_followup = 0;
+		while (running && g_ctrl.pending_cli == STL_INVALID_SOCKET && !g_jarvis_active) {
+			struct timespec ts;
+			jarvis_clock_realtime(&ts);
+			ts.tv_nsec += 200L * 1000000L;
+			if (ts.tv_nsec >= 1000000000L) {
+				ts.tv_sec += 1;
+				ts.tv_nsec -= 1000000000L;
+			}
+			pthread_cond_timedwait(&g_ctrl.cond, &g_ctrl.mtx, &ts);
+		}
+		if (!running) {
+			pthread_mutex_unlock(&g_ctrl.mtx);
+			break;
+		}
+		if (g_ctrl.pending_cli != STL_INVALID_SOCKET) {
+			cli = g_ctrl.pending_cli;
+			g_ctrl.pending_cli = STL_INVALID_SOCKET;
+			snprintf(buf, sizeof(buf), "%s", g_ctrl.pending_buf);
+		}
+		int active_now = (int)g_jarvis_active;
+		pthread_mutex_unlock(&g_ctrl.mtx);
+
+		if (cli != STL_INVALID_SOCKET) {
 			serve_client_request(srv, cli, buf, ctx_main, ctx_wake, n_threads);
 			continue;
 		}
 
-		if (g_jarvis_active) {
+		if (active_now) {
 			run_inprocess_jarvis_turn(srv, ctx_wake, n_threads, &next_followup);
 			continue;
 		}
-
-		next_followup = 0;
-		struct sockaddr_in cli_addr;
-		socklen_t cli_len = sizeof(cli_addr);
-		cli = stl_sock_accept(srv, (struct sockaddr *)&cli_addr, &cli_len);
-		if (cli == STL_INVALID_SOCKET) {
-#ifdef _WIN32
-			if (running && WSAGetLastError() == WSAEINTR)
-				continue;
-#else
-			if (running && errno == EINTR)
-				continue;
-#endif
-			break;
-		}
-		ssize_t n = stl_sock_recv(cli, buf, sizeof(buf) - 1, 0);
-		if (n <= 0) {
-			stl_sock_close(cli);
-			continue;
-		}
-		buf[n] = '\0';
-
-		serve_client_request(srv, cli, buf, ctx_main, ctx_wake, n_threads);
 	}
 
 	running = 0;
 	if (g_jarvis_active)
 		jarvis_set_active(0);
+	pthread_mutex_lock(&g_ctrl.mtx);
+	pthread_cond_broadcast(&g_ctrl.cond);
+	pthread_mutex_unlock(&g_ctrl.mtx);
+	pthread_join(ctrl_tid, NULL);
+
+	pthread_mutex_lock(&g_ctrl.mtx);
+	if (g_ctrl.pending_cli != STL_INVALID_SOCKET) {
+		stl_sock_close(g_ctrl.pending_cli);
+		g_ctrl.pending_cli = STL_INVALID_SOCKET;
+	}
+	pthread_mutex_unlock(&g_ctrl.mtx);
+
 	if (g_daemon_ont) {
 		jarvis_ontology_destroy(g_daemon_ont);
 		g_daemon_ont = NULL;
 	}
+	pthread_mutex_lock(&g_dec.mtx);
 	g_dec.abort_flag = 1;
-	pthread_cond_broadcast(&g_audio.cond);
 	pthread_cond_broadcast(&g_dec.cond);
+	pthread_mutex_unlock(&g_dec.mtx);
+	pthread_mutex_lock(&g_audio.mtx);
+	pthread_cond_broadcast(&g_audio.cond);
+	pthread_mutex_unlock(&g_audio.mtx);
 	pthread_join(audio_tid, NULL);
 	pthread_join(decode_tid, NULL);
 

@@ -151,31 +151,111 @@ jarvis_stt_apply_preemphasis_and_agc(const float *pcm, int n_samples)
 	}
 
 	double total_rms = sqrt(sum_sq / (double)n_samples);
+	/* Compute per-20ms-frame RMS envelope for self-referenced downward expansion
+	 * and active speech RMS measurement (works identically on any mic/gain).
+	 */
+	const int flen = 320;
+	int n_frames = n_samples / flen;
 	double active_sq = 0.0;
 	int active_n = 0;
 	float frame_thresh = peak * 0.08f;
 	if (frame_thresh < 0.008f)
 		frame_thresh = 0.008f;
-	for (int base = 0; base + 320 <= n_samples; base += 320) {
+
+	float *f_rms_arr = (n_frames >= 4) ? malloc((size_t)n_frames * sizeof(float)) : NULL;
+	float peak_frame_rms = 0.0f;
+
+	for (int f = 0; f < n_frames; f++) {
+		int base = f * flen;
 		double f_sq = 0.0;
-		for (int k = 0; k < 320; k++) {
+		for (int k = 0; k < flen; k++) {
 			float v = buf[base + k];
 			f_sq += (double)v * (double)v;
 		}
-		double f_rms = sqrt(f_sq / 320.0);
-		if (f_rms >= (double)frame_thresh) {
+		float f_rms = (float)sqrt(f_sq / (double)flen);
+		if (f_rms_arr)
+			f_rms_arr[f] = f_rms;
+		if (f_rms > peak_frame_rms)
+			peak_frame_rms = f_rms;
+		if (f_rms >= frame_thresh) {
 			active_sq += f_sq;
-			active_n += 320;
+			active_n += flen;
 		}
 	}
+
+	/* Estimate quiet-frame floor (20th percentile of 20ms frame RMS) */
+	float floor_frame_rms = 0.0f;
+	if (f_rms_arr && n_frames >= 4) {
+		float *sorted = malloc((size_t)n_frames * sizeof(float));
+		if (sorted) {
+			memcpy(sorted, f_rms_arr, (size_t)n_frames * sizeof(float));
+			for (int i = 1; i < n_frames; i++) {
+				float key = sorted[i];
+				int j = i - 1;
+				while (j >= 0 && sorted[j] > key) {
+					sorted[j + 1] = sorted[j];
+					j--;
+				}
+				sorted[j + 1] = key;
+			}
+			floor_frame_rms = sorted[(n_frames * 20) / 100];
+			free(sorted);
+		}
+	}
+
+	/* Soft downward expander (relative to utterance peak):
+	 * When near-field speech stands out clearly over inter-word background
+	 * (peak_frame_rms >= 2.2x floor_frame_rms), smoothly attenuate quiet
+	 * inter-word frames (>14 dB below speech peak) so background talkers
+	 * between the user's words are not boosted into Whisper.
+	 */
+	if (f_rms_arr && n_frames >= 6 && peak_frame_rms > 0.012f &&
+	    peak_frame_rms > floor_frame_rms * 2.2f) {
+		float knee_rms = peak_frame_rms * 0.20f; /* -14 dB below speech peak */
+		float prev_g = 1.0f;
+		for (int f = 0; f < n_frames; f++) {
+			/* 1-frame lookahead prevents clipping plosive/consonant onsets */
+			float env = f_rms_arr[f];
+			if (f + 1 < n_frames && f_rms_arr[f + 1] > env)
+				env = f_rms_arr[f + 1];
+			float target_g = 1.0f;
+			if (env < knee_rms && knee_rms > 1e-6f) {
+				float r = env / knee_rms;
+				target_g = 0.15f + 0.85f * r * sqrtf(r);
+			}
+			/* Fast attack (open immediately), smooth release (~55ms) */
+			float cur_g = (target_g > prev_g)
+			            ? (0.25f * prev_g + 0.75f * target_g)
+			            : (0.65f * prev_g + 0.35f * target_g);
+			int base = f * flen;
+			float step = (cur_g - prev_g) / (float)flen;
+			for (int k = 0; k < flen; k++)
+				buf[base + k] *= (prev_g + step * (float)k);
+			prev_g = cur_g;
+		}
+		for (int i = n_frames * flen; i < n_samples; i++)
+			buf[i] *= prev_g;
+	}
+	free(f_rms_arr);
+
 	double rms = (active_n >= 1600) ? sqrt(active_sq / (double)active_n) : total_rms;
+
+	/* Dynamic-range-aware AGC cap:
+	 * Avoid boosting flat steady background noise by +14 dB into hallucinations;
+	 * modulated speech (even quiet mics) still receives full up-to-5.0x gain.
+	 */
+	float max_gain = 5.0f;
+	if (n_frames >= 6 && floor_frame_rms > 1e-4f &&
+	    peak_frame_rms < floor_frame_rms * 1.6f && peak < 0.08f) {
+		max_gain = 1.5f;
+	}
 
 	if (peak > 0.010f && rms > 0.0020) {
 		float gain_peak = 0.78f / peak;
 		float gain_rms = (float)(0.11 / rms);
 		float gain = (gain_rms < gain_peak) ? gain_rms : gain_peak;
-		if (gain > 5.0f)
-			gain = 5.0f;
+		if (gain > max_gain)
+			gain = max_gain;
 		if (gain < 0.85f)
 			gain = 0.85f;
 		if (fabsf(gain - 1.0f) > 0.05f) {

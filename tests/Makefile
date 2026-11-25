@@ -7,7 +7,7 @@ ifeq (${SYS},Unix)
 LDFLAGS += -rdynamic -Wl,-rpath,${CURDIR}/../lib -Wl,-rpath,${CURDIR}/../../libstele/lib -Wl,-rpath,${CURDIR}/../../axil-auren/lib -Wl,-rpath,${CURDIR}/../../libxylem/lib
 endif
 
-all: test_jarvis test_ren_mods test_tts test_seams
+all: test_jarvis test_ren_mods test_tts test_seams test_dsp
 
 TEST_SYS_LIBS :=
 ifeq (${SYS},Unix)
@@ -36,7 +36,11 @@ test_tts: test_tts.c ../src/jarvis-tts.c ../src/jarvis-tts.h ../lib/libjarvis.$(
 test_seams: test_seams.c ../lib/libjarvis.$(SO)
 	$(CC) $(CFLAGS) -I../src -o $@ test_seams.c $(LDFLAGS) -ljarvis -lstele $(if $(filter Unix,$(SYS)),-lpthread) $(if $(filter Windows,$(SYS)),-lws2_32) -lm
 
+test_dsp: test_dsp.c ../src/jarvis-dsp.c ../src/jarvis-dsp.h ../src/jarvis-stt.c ../src/jarvis-stt.h
+	$(CC) $(CFLAGS) -I../src -o $@ test_dsp.c ../src/jarvis-dsp.c ../src/jarvis-stt.c $(if $(filter Unix,$(SYS)),-lpthread) -lm
+
 test: all
+	LD_LIBRARY_PATH=../lib:../../libstele/lib:../../axil-auren/lib:../../libxylem/lib:${HOME}/.local/lib:$${LD_LIBRARY_PATH:-} ./test_dsp
 	LD_LIBRARY_PATH=../lib:../../libstele/lib:../../axil-auren/lib:../../libxylem/lib:${HOME}/.local/lib:$${LD_LIBRARY_PATH:-} ./test_seams
 	LD_LIBRARY_PATH=../lib:../../libstele/lib:../../axil-auren/lib:../../libxylem/lib:${HOME}/.local/lib:$${LD_LIBRARY_PATH:-} ./test_jarvis
 	LD_LIBRARY_PATH=../lib:../../libstele/lib:../../axil-auren/lib:../../libxylem/lib:${HOME}/.local/lib:$${LD_LIBRARY_PATH:-} ./test_ren_mods
@@ -58,4 +62,4 @@ test: all
 	@echo "[PASS] bin/jarvis CLI smoke tests passed!"
 
 clean:
-	rm -f test_jarvis test_ren_mods test_tts test_seams mock_adapter.so *.o
+	rm -f test_jarvis test_ren_mods test_tts test_seams test_dsp mock_adapter.so *.o
