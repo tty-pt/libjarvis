@@ -361,6 +361,26 @@ static __attribute__((unused)) void x11_core_get_mouse_location(int *out_x, int 
 	XCloseDisplay(dpy);
 }
 
+static bool x11_core_is_dwm(Display *dpy, Window root)
+{
+	Atom check_atom = XInternAtom(dpy, "_NET_SUPPORTING_WM_CHECK", False);
+	Atom actual_type;
+	int actual_format;
+	unsigned long nitems = 0, bytes_after;
+	unsigned char *prop = NULL;
+	Window wm_win = 0;
+
+	if (XGetWindowProperty(dpy, root, check_atom, 0, 1, False, XA_WINDOW,
+	                       &actual_type, &actual_format, &nitems, &bytes_after, &prop) == Success && prop) {
+		if (nitems > 0) wm_win = *(Window *)prop;
+		XFree(prop);
+	}
+	if (!wm_win) return false;
+	char wm_name[64] = {0};
+	x11_core_get_win_title(dpy, wm_win, wm_name, sizeof(wm_name));
+	return strcasecmp(wm_name, "dwm") == 0;
+}
+
 static bool x11_core_focus_ewmh(const char *wid_str, double timeout_sec)
 {
 	if (!wid_str || !*wid_str) return false;
@@ -369,21 +389,53 @@ static bool x11_core_focus_ewmh(const char *wid_str, double timeout_sec)
 	Display *dpy = XOpenDisplay(NULL);
 	if (!dpy) return false;
 	Window root = DefaultRootWindow(dpy);
-	Atom net_active = XInternAtom(dpy, "_NET_ACTIVE_WINDOW", False);
+	bool is_dwm = x11_core_is_dwm(dpy, root);
 	XEvent ev;
 	memset(&ev, 0, sizeof(ev));
-	ev.xclient.type = ClientMessage;
-	ev.xclient.window = w;
-	ev.xclient.message_type = net_active;
-	ev.xclient.format = 32;
-	ev.xclient.data.l[0] = 2; /* pager / automation */
-	ev.xclient.data.l[1] = CurrentTime;
-	XSendEvent(dpy, root, False, SubstructureRedirectMask | SubstructureNotifyMask, &ev);
-	XRaiseWindow(dpy, w);
-	XSetInputFocus(dpy, w, RevertToParent, CurrentTime);
+	if (is_dwm) {
+		/* dwm ignores _NET_ACTIVE_WINDOW (only marks urgent); use _DWM_CMD DWM_CMD_FOCUS_WIN (12) */
+		Atom dwm_cmd = XInternAtom(dpy, "_DWM_CMD", False);
+		ev.xclient.type = ClientMessage;
+		ev.xclient.window = root;
+		ev.xclient.message_type = dwm_cmd;
+		ev.xclient.format = 32;
+		ev.xclient.data.l[0] = 12; /* DWM_CMD_FOCUS_WIN */
+		ev.xclient.data.l[1] = (long)w;
+		XSendEvent(dpy, root, False, SubstructureRedirectMask | SubstructureNotifyMask, &ev);
+	} else {
+		Atom net_active = XInternAtom(dpy, "_NET_ACTIVE_WINDOW", False);
+		ev.xclient.type = ClientMessage;
+		ev.xclient.window = w;
+		ev.xclient.message_type = net_active;
+		ev.xclient.format = 32;
+		ev.xclient.data.l[0] = 2; /* pager / automation */
+		ev.xclient.data.l[1] = CurrentTime;
+		XSendEvent(dpy, root, False, SubstructureRedirectMask | SubstructureNotifyMask, &ev);
+		XRaiseWindow(dpy, w);
+		XSetInputFocus(dpy, w, RevertToParent, CurrentTime);
+	}
 	XFlush(dpy);
 	XCloseDisplay(dpy);
-	return x11_core_wait_focused(wid_str, timeout_sec);
+	bool ok = x11_core_wait_focused(wid_str, timeout_sec);
+	if (ok && is_dwm) {
+		double deadline = x11_core_now_sec() + 0.20;
+		int wx = -1, wy = 0, ww = 0, wh = 0;
+		while (x11_core_now_sec() < deadline) {
+			x11_core_get_geometry(wid_str, &wx, &wy, &ww, &wh);
+			if (wx >= 0) break;
+			usleep(15000);
+		}
+		if (ww > 0 && wh > 0) {
+			Display *wdpy = XOpenDisplay(NULL);
+			if (wdpy) {
+				XWarpPointer(wdpy, None, w, 0, 0, 0, 0, ww / 2, wh / 2);
+				XFlush(wdpy);
+				XCloseDisplay(wdpy);
+			}
+		}
+		usleep(35000);
+	}
+	return ok;
 }
 
 static __attribute__((unused)) bool x11_core_close_ewmh(const char *wid_str)

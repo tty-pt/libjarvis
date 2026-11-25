@@ -60,11 +60,27 @@ static bool extract_json_int(const char *json, const char *key, int *out_val)
 static int ff_call_window_tool(const char *arg, char **out)
 {
 	char *res = NULL;
-	int rc = ren_call_tool("x11_windows", arg, &res);
-	if (rc != 0 && (!res || strcmp(res, "Error: unknown tool") == 0)) {
-		free(res);
-		res = NULL;
+	int rc;
+	if (arg && strncasecmp(arg, "focus ", 6) == 0) {
 		rc = ren_call_tool("window", arg, &res);
+		if (rc != 0) {
+			char *fb = NULL;
+			int fb_rc = ren_call_tool("x11_windows", arg, &fb);
+			if (fb_rc == 0 || (fb && strcmp(fb, "Error: unknown tool") != 0)) {
+				free(res);
+				res = fb;
+				rc = fb_rc;
+			} else {
+				free(fb);
+			}
+		}
+	} else {
+		rc = ren_call_tool("x11_windows", arg, &res);
+		if (rc != 0 && (!res || strcmp(res, "Error: unknown tool") == 0)) {
+			free(res);
+			res = NULL;
+			rc = ren_call_tool("window", arg, &res);
+		}
 	}
 	if (out)
 		*out = res;
@@ -111,6 +127,11 @@ static bool ren_ff_get_geometry(void *ud, int *x, int *y, int *w, int *h)
 	char *out = NULL;
 	int rc = ff_call_window_tool("focused", &out);
 	if (rc != 0 || !out) {
+		free(out);
+		return false;
+	}
+	char cls[128] = {0};
+	if (extract_json_str(out, "class", cls, sizeof(cls)) && !ff_is_browser_name(cls)) {
 		free(out);
 		return false;
 	}

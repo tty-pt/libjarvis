@@ -84,7 +84,22 @@ static void test_firefox_core_url_read_and_interrupt(void)
 	assert(ff_point_in_viewport(1100, 400, true, 800, 33, 796, 863, true, 1600, 900));
 	assert(!ff_point_in_viewport(-5, 100, false, 0, 0, 0, 0, true, 1600, 900));
 
-	printf("  [PASS] URL match, offset pagination, cooperative wait abort, and viewport bounds passed!\n");
+	/* 5. Unfocused native-action role eligibility (semantic controls only; inputs/rows use focus+click) */
+	assert(ff_role_supports_unfocused_action("link"));
+	assert(ff_role_supports_unfocused_action("button"));
+	assert(ff_role_supports_unfocused_action("push button"));
+	assert(ff_role_supports_unfocused_action("toggle button"));
+	assert(ff_role_supports_unfocused_action("page tab"));
+	assert(ff_role_supports_unfocused_action("menu item"));
+	assert(ff_role_supports_unfocused_action("check box"));
+	assert(ff_role_supports_unfocused_action("radio button"));
+	assert(!ff_role_supports_unfocused_action("entry"));
+	assert(!ff_role_supports_unfocused_action("combo box"));
+	assert(!ff_role_supports_unfocused_action("table row"));
+	assert(!ff_role_supports_unfocused_action("list item"));
+	assert(!ff_role_supports_unfocused_action(NULL));
+
+	printf("  [PASS] URL match, offset pagination, cooperative wait abort, viewport bounds, and unfocused action roles passed!\n");
 }
 
 static void test_load_all_ren_modules(void)
@@ -321,9 +336,53 @@ static void test_load_all_ren_modules(void)
 	printf("  [PASS] All 6 ren-*.so plugins load cleanly and validate tool calls!\n");
 }
 
+static int g_mock_wm_focus_calls = 0;
+static int g_mock_x11_focused_calls = 0;
+
+static int mock_wm_window_tool(const char *args, char **out_result)
+{
+	if (args && strncasecmp(args, "focus ", 6) == 0) {
+		g_mock_wm_focus_calls++;
+		*out_result = strdup("focused fakewin");
+		return 0;
+	}
+	*out_result = strdup("Error: usage: window <close | focus <target>>");
+	return -1;
+}
+
+static int mock_x11_windows_tool(const char *args, char **out_result)
+{
+	if (args && strcasecmp(args, "focused") == 0) {
+		g_mock_x11_focused_calls++;
+		*out_result = strdup("{\"id\":\"0x00001234\",\"pid\":0,\"class\":\"gnome-calculator\",\"title\":\"Calculator\",\"x\":100,\"y\":100,\"w\":300,\"h\":400,\"sw\":1920,\"sh\":1080}");
+		return 0;
+	}
+	*out_result = strdup("Error: failed to focus via EWMH");
+	return -1;
+}
+
+static void test_window_tool_routing_precedence(void)
+{
+	printf("Running test_window_tool_routing_precedence...\n");
+	g_mock_wm_focus_calls = 0;
+	g_mock_x11_focused_calls = 0;
+	ren_register_tool("x11_windows", "mock x11_windows", mock_x11_windows_tool);
+	ren_register_tool("window", "mock wm window", mock_wm_window_tool);
+
+	char *out = NULL;
+	/* @fakewin triggers focused query (must hit x11_windows) + focus (must hit WM window tool) */
+	int rc = ren_call_tool("read_window", "@fakewin inspect", &out);
+	assert(rc == 0);
+	assert(g_mock_x11_focused_calls >= 2);
+	assert(g_mock_wm_focus_calls == 1);
+	free(out);
+	printf("  [PASS] Focus routed via WM window tool first while focused queries stayed on x11_windows!\n");
+}
+
 int main(void)
 {
 	test_firefox_core_url_read_and_interrupt();
 	test_load_all_ren_modules();
+	test_window_tool_routing_precedence();
 	return 0;
 }

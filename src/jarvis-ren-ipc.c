@@ -81,6 +81,42 @@ static int mod_exists(const char *mod_name, const char *ext)
 	return 0;
 }
 
+#if !defined(__APPLE__) && !defined(_WIN32)
+static void detect_unix_wm_mod(char *wm_mod, size_t cap)
+{
+	const char *hypr = getenv("HYPRLAND_INSTANCE_SIGNATURE");
+	if (hypr && *hypr) {
+		snprintf(wm_mod, cap, "ren-hyprland");
+		return;
+	}
+	const char *sway = getenv("SWAYSOCK");
+	if (sway && *sway) {
+		snprintf(wm_mod, cap, "ren-sway");
+		return;
+	}
+	static const char *const ENV_KEYS[] = {
+		"XDG_CURRENT_DESKTOP", "DESKTOP_SESSION", "WINDOWMANAGER", NULL
+	};
+	for (size_t i = 0; ENV_KEYS[i]; i++) {
+		const char *v = getenv(ENV_KEYS[i]);
+		if (!v || !*v) continue;
+		if (strcasestr(v, "hyprland")) {
+			snprintf(wm_mod, cap, "ren-hyprland");
+			return;
+		}
+		if (strcasestr(v, "sway") || strcasestr(v, "i3")) {
+			snprintf(wm_mod, cap, "ren-sway");
+			return;
+		}
+		if (strcasestr(v, "dwm")) {
+			snprintf(wm_mod, cap, "ren-dwm");
+			return;
+		}
+	}
+	snprintf(wm_mod, cap, "ren-desktop");
+}
+#endif
+
 int jarvis_ren_resolve_mods(const char *wm_hint, const char *rc_mods,
                             char *out_csv, size_t cap)
 {
@@ -102,21 +138,21 @@ int jarvis_ren_resolve_mods(const char *wm_hint, const char *rc_mods,
 #elif defined(_WIN32)
 		snprintf(wm_mod, sizeof(wm_mod), "ren-win32");
 #else
-		snprintf(wm_mod, sizeof(wm_mod), "ren-desktop");
+		detect_unix_wm_mod(wm_mod, sizeof(wm_mod));
 #endif
 	}
 
 #ifdef __APPLE__
 	const char *cands[] = {
-		wm_mod, "ren-macos", "ren-reflex", "ren-firefox", "ren-desktop", "ren-jarvis", "ren-mm", NULL
+		"ren-macos", wm_mod, "ren-reflex", "ren-firefox", "ren-desktop", "ren-jarvis", "ren-mm", NULL
 	};
 #elif defined(_WIN32)
 	const char *cands[] = {
-		wm_mod, "ren-win32", "ren-reflex", "ren-firefox", "ren-desktop", "ren-jarvis", "ren-mm", NULL
+		"ren-win32", wm_mod, "ren-reflex", "ren-firefox", "ren-desktop", "ren-jarvis", "ren-mm", NULL
 	};
 #else
 	const char *cands[] = {
-		wm_mod, "ren-reflex", "ren-x11", "ren-firefox", "ren-desktop", "ren-jarvis", "ren-mm", NULL
+		"ren-reflex", "ren-x11", wm_mod, "ren-firefox", "ren-desktop", "ren-jarvis", "ren-mm", NULL
 	};
 #endif
 

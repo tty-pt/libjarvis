@@ -190,6 +190,73 @@ int main(void)
 	assert(jarvis_ren_resolve_mods("x11", NULL, mods_csv, sizeof(mods_csv)) == 0);
 	assert(strstr(mods_csv, "ren-jarvis") != NULL);
 
+	/* Auto-detect WM and enforce ren-x11 -> wm_mod load order (last-writer-wins) */
+	{
+		char ren_dir[320], f_x11[360], f_dwm[360], f_sway[360], f_hypr[360];
+		const char *ext = stl_so_ext();
+		snprintf(ren_dir, sizeof(ren_dir), "%s/lib/ren", local_dir);
+		assert(stl_mkdir_p(ren_dir) == 0);
+		snprintf(f_x11, sizeof(f_x11), "%s/ren-x11.%s", ren_dir, ext);
+		snprintf(f_dwm, sizeof(f_dwm), "%s/ren-dwm.%s", ren_dir, ext);
+		snprintf(f_sway, sizeof(f_sway), "%s/ren-sway.%s", ren_dir, ext);
+		snprintf(f_hypr, sizeof(f_hypr), "%s/ren-hyprland.%s", ren_dir, ext);
+		const char *dummy_mods[] = { f_x11, f_dwm, f_sway, f_hypr, NULL };
+		for (size_t i = 0; dummy_mods[i]; i++) {
+			FILE *fp = fopen(dummy_mods[i], "wb");
+			assert(fp != NULL);
+			fputs("so", fp);
+			fclose(fp);
+		}
+
+		const char *wm_env_keys[] = {
+			"HYPRLAND_INSTANCE_SIGNATURE", "SWAYSOCK",
+			"XDG_CURRENT_DESKTOP", "DESKTOP_SESSION", "WINDOWMANAGER", NULL
+		};
+		char *saved_wm[5] = {0};
+		for (size_t i = 0; wm_env_keys[i]; i++) {
+			const char *v = getenv(wm_env_keys[i]);
+			saved_wm[i] = v ? strdup(v) : NULL;
+			stl_unsetenv(wm_env_keys[i]);
+		}
+
+		stl_setenv("XDG_CURRENT_DESKTOP", "dwm", 1);
+		assert(jarvis_ren_resolve_mods(NULL, NULL, mods_csv, sizeof(mods_csv)) == 0);
+		const char *p_x11 = strstr(mods_csv, "ren-x11");
+		const char *p_dwm = strstr(mods_csv, "ren-dwm");
+		assert(p_x11 != NULL && p_dwm != NULL && p_dwm > p_x11);
+
+		assert(jarvis_ren_resolve_mods("dwm", NULL, mods_csv, sizeof(mods_csv)) == 0);
+		p_x11 = strstr(mods_csv, "ren-x11");
+		p_dwm = strstr(mods_csv, "ren-dwm");
+		assert(p_x11 != NULL && p_dwm != NULL && p_dwm > p_x11);
+
+		stl_setenv("SWAYSOCK", "/tmp/fake-sway.sock", 1);
+		assert(jarvis_ren_resolve_mods(NULL, NULL, mods_csv, sizeof(mods_csv)) == 0);
+		p_x11 = strstr(mods_csv, "ren-x11");
+		const char *p_sway = strstr(mods_csv, "ren-sway");
+		assert(p_x11 != NULL && p_sway != NULL && p_sway > p_x11);
+
+		stl_setenv("HYPRLAND_INSTANCE_SIGNATURE", "fake-sig", 1);
+		assert(jarvis_ren_resolve_mods(NULL, NULL, mods_csv, sizeof(mods_csv)) == 0);
+		p_x11 = strstr(mods_csv, "ren-x11");
+		const char *p_hypr = strstr(mods_csv, "ren-hyprland");
+		assert(p_x11 != NULL && p_hypr != NULL && p_hypr > p_x11);
+
+		for (size_t i = 0; wm_env_keys[i]; i++) {
+			if (saved_wm[i]) {
+				stl_setenv(wm_env_keys[i], saved_wm[i], 1);
+				free(saved_wm[i]);
+			} else {
+				stl_unsetenv(wm_env_keys[i]);
+			}
+		}
+		for (size_t i = 0; dummy_mods[i]; i++) unlink(dummy_mods[i]);
+		rmdir(ren_dir);
+		char lib_dir[300];
+		snprintf(lib_dir, sizeof(lib_dir), "%s/lib", local_dir);
+		rmdir(lib_dir);
+	}
+
 	char sock_ep[320];
 	snprintf(sock_ep, sizeof(sock_ep), "unix:%s/ren-seam.sock", tmpdir);
 	stl_setenv("JARVIS_REN_SOCK", sock_ep + 5, 1);

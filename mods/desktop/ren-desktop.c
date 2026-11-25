@@ -107,11 +107,27 @@ static bool desktop_find_new_window(
 static int desktop_call_window_tool(const char *arg, char **out)
 {
 	char *res = NULL;
-	int rc = ren_call_tool("x11_windows", arg, &res);
-	if (rc != 0 && (!res || strcmp(res, "Error: unknown tool") == 0)) {
-		free(res);
-		res = NULL;
+	int rc;
+	if (arg && strncasecmp(arg, "focus ", 6) == 0) {
 		rc = ren_call_tool("window", arg, &res);
+		if (rc != 0) {
+			char *fb = NULL;
+			int fb_rc = ren_call_tool("x11_windows", arg, &fb);
+			if (fb_rc == 0 || (fb && strcmp(fb, "Error: unknown tool") != 0)) {
+				free(res);
+				res = fb;
+				rc = fb_rc;
+			} else {
+				free(fb);
+			}
+		}
+	} else {
+		rc = ren_call_tool("x11_windows", arg, &res);
+		if (rc != 0 && (!res || strcmp(res, "Error: unknown tool") == 0)) {
+			free(res);
+			res = NULL;
+			rc = ren_call_tool("window", arg, &res);
+		}
 	}
 	if (out)
 		*out = res;

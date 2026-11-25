@@ -1276,6 +1276,46 @@ static __attribute__((unused)) void firefox_core_ensure_entry_focused(const fire
 	firefox_core_ensure_editable_focused(ops, NULL, NULL, 0);
 }
 
+static __attribute__((unused)) bool ff_role_supports_unfocused_action(const char *role)
+{
+	if (!role) return false;
+	return strcmp(role, "button") == 0 ||
+	       strcmp(role, "push button") == 0 ||
+	       strcmp(role, "toggle button") == 0 ||
+	       strcmp(role, "link") == 0 ||
+	       strcmp(role, "page tab") == 0 ||
+	       strcmp(role, "menu item") == 0 ||
+	       strcmp(role, "check box") == 0 ||
+	       strcmp(role, "radio button") == 0;
+}
+
+#if !defined(__APPLE__) && !defined(_WIN32)
+static bool ff_try_native_action(
+	void *node, const char *role, const char *label,
+	char *out_msg, size_t out_sz)
+{
+	if (!node || !g_ff_atspi.get_action_iface || !g_ff_atspi.action_do) return false;
+	void *act = g_ff_atspi.get_action_iface(node);
+	if (!act) return false;
+	void *nerr = NULL;
+	int na = g_ff_atspi.action_get_n ? g_ff_atspi.action_get_n(act, &nerr) : 1;
+	bool did = false;
+	if (na > 0) {
+		void *aerr = NULL;
+		did = (g_ff_atspi.action_do(act, 0, &aerr) != 0);
+	}
+	g_ff_atspi.g_unref(act);
+	if (did) {
+		ff_sleep_ms(90);
+		if (out_msg && out_sz > 0) {
+			snprintf(out_msg, out_sz, "activated [%s] '%.64s' via native action",
+			         role ? role : "", label ? label : "");
+		}
+	}
+	return did;
+}
+#endif
+
 static __attribute__((unused)) bool firefox_core_click_element(
 	const firefox_core_ops_t *ops,
 	const char *query, int btn,
@@ -1290,7 +1330,6 @@ static __attribute__((unused)) bool firefox_core_click_element(
 	return a11y_core_browser_click(&aops, query, btn, out_role, role_sz, out_msg, out_sz);
 #else
 	if (!query || !*query || !ff_ensure_atspi_loaded()) return false;
-	if (ops && ops->focus_browser) ops->focus_browser(ops->ud);
 	void *desktop = g_ff_atspi.get_desktop(0);
 	if (!desktop) return false;
 
@@ -1324,6 +1363,30 @@ static __attribute__((unused)) bool firefox_core_click_element(
 		snprintf(out_role, role_sz, "%s", ctx.best_role);
 	}
 
+	bool focused = !(ops && ops->is_browser_focused) || ops->is_browser_focused(ops->ud);
+	if (!focused && btn == 1 && ff_role_supports_unfocused_action(ctx.best_role)) {
+		if (ff_try_native_action(ctx.best_node, ctx.best_role, ctx.best_label, out_msg, out_sz)) {
+			if (ctx.best_node && g_ff_atspi.g_unref) g_ff_atspi.g_unref(ctx.best_node);
+			return true;
+		}
+	}
+
+	if (!focused && ops && ops->focus_browser) {
+		if (ops->focus_browser(ops->ud)) {
+			ff_sleep_ms(40);
+			focused = !(ops->is_browser_focused) || ops->is_browser_focused(ops->ud);
+			if (focused && ctx.best_node) {
+				int ncx = 0, ncy = 0;
+				bool nin_vp = false;
+				if (ff_get_node_center_checked(ctx.best_node, ops, &ncx, &ncy, &nin_vp)) {
+					ctx.best_cx = ncx;
+					ctx.best_cy = ncy;
+					ctx.best_in_vp = nin_vp;
+				}
+			}
+		}
+	}
+
 	if (!ctx.best_in_vp) {
 		if (ctx.best_node && g_ff_atspi.get_component_iface && g_ff_atspi.comp_scroll_to) {
 			void *comp = g_ff_atspi.get_component_iface(ctx.best_node);
@@ -1341,27 +1404,10 @@ static __attribute__((unused)) bool firefox_core_click_element(
 				}
 			}
 		}
-		if (!ctx.best_in_vp && ctx.best_node && g_ff_atspi.get_action_iface && g_ff_atspi.action_do) {
-			void *act = g_ff_atspi.get_action_iface(ctx.best_node);
-			if (act) {
-				void *nerr = NULL;
-				int na = g_ff_atspi.action_get_n ? g_ff_atspi.action_get_n(act, &nerr) : 1;
-				bool did = false;
-				if (na > 0) {
-					void *aerr = NULL;
-					did = (g_ff_atspi.action_do(act, 0, &aerr) != 0);
-				}
-				g_ff_atspi.g_unref(act);
-				if (did) {
-					ff_sleep_ms(90);
-					if (out_msg && out_sz > 0) {
-						snprintf(out_msg, out_sz, "activated [%s] '%.64s' via native action",
-						         ctx.best_role, ctx.best_label);
-					}
-					if (ctx.best_node && g_ff_atspi.g_unref) g_ff_atspi.g_unref(ctx.best_node);
-					return true;
-				}
-			}
+		if (!ctx.best_in_vp && btn == 1 &&
+		    ff_try_native_action(ctx.best_node, ctx.best_role, ctx.best_label, out_msg, out_sz)) {
+			if (ctx.best_node && g_ff_atspi.g_unref) g_ff_atspi.g_unref(ctx.best_node);
+			return true;
 		}
 		if (!ctx.best_in_vp) {
 			if (out_msg && out_sz > 0) {
@@ -1378,6 +1424,11 @@ static __attribute__((unused)) bool firefox_core_click_element(
 		if (ops->focus_browser) ops->focus_browser(ops->ud);
 		ff_sleep_ms(40);
 		if (!ops->is_browser_focused(ops->ud)) {
+			if (btn == 1 &&
+			    ff_try_native_action(ctx.best_node, ctx.best_role, ctx.best_label, out_msg, out_sz)) {
+				if (ctx.best_node && g_ff_atspi.g_unref) g_ff_atspi.g_unref(ctx.best_node);
+				return true;
+			}
 			if (out_msg && out_sz > 0) {
 				snprintf(out_msg, out_sz, "Error: browser window lost focus before click");
 			}
