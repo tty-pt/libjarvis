@@ -2,6 +2,34 @@
 
 All notable changes to `libjarvis` (`@tty-pt/jarvis`) are documented in this file.
 
+## [Unreleased]
+
+### Added
+- **STT / VAD / DSP / KWS / Streaming Overhaul — Phases 0–5 (`src/`, `data/ontology.json`, `ROADMAP.md`, `Makefile`, `tests/`)**:
+  - **Phase 0 (Accuracy & Hygiene)**: removed keyword-list prompt leakage, enforced safe `audio_ctx` floor and greedy default, hardened hallucination filters, and removed stale `src/whisper.h` (`0a0a885`).
+  - **Phase 1 (Neural VAD, Low-Latency Capture & Echo Guard)**: added Silero neural VAD (`src/jarvis-vad.{h,c}`), 20 ms float32 native capture across Linux/macOS/Windows (`src/jarvis-audio-{linux,macos,win32}.*`) with PipeWire/Pulse AEC support, raw `pw-record` capture, beam search + temperature fallback, and wake-word-free VAD/follow-up/steering gating during TTS + drain cooldown (`374d378`, `9efdf8e`, `0a0a885`).
+  - **Phase 2 (Front-End DSP)**: decoupled ASR PCM from destructive spatial gating, added 110 Hz high-pass, off-axis-safe GCC-PHAT delay alignment / stereo magnitude coherence telemetry, adaptive downward expander + atomic toggle (`64d26e0`), and conditional RNNoise (`src/jarvis-dsp.{h,c}`, `0a0a885`).
+  - **Phase 3 (Multi-Backend STT & Hardware Profile)**: added `jarvis_stt_backend_t` (`src/jarvis-stt-backend.h`) with Whisper (`src/jarvis-stt-whisper.c`) and Parakeet-TDT-0.6B-v3 (`src/jarvis-stt-parakeet.c`) backends, hardware profile calibration (`CPU` / `iGPU` / `fast GPU`), and portable `JARVIS_BACKEND` (`auto|metal|cuda|vulkan|cpu`) build matrix (`0a0a885`).
+  - **Phase 4 (Neural KWS, Adaptive Endpointing & PTT)**: added Silero-gated wake, sub-millisecond ONNX KWS (`src/jarvis-kws.{h,c}`), locale-driven `continuation_tokens` adaptive endpointing, and push-to-talk (PTT) support (`0a0a885`).
+  - **Phase 5 (Real-Time Streaming & Long-Form Dictation)**: added word-level timestamps across Whisper/Parakeet, standalone LocalAgreement-2 sliding-window streaming engine (`src/jarvis-stream.{h,c}`), regional dialect `dictation_seed` with base-then-region locale inheritance in `data/ontology.json`, and unlimited-duration `handle_stream` integration in `src/jarvisd.c` (`0a0a885`).
+  - **Test Suites (`tests/`)**: added 5 new unit suites (`tests/test_vad.c`, `tests/test_kws.c`, `tests/test_stream.c`, `tests/test_stt_backend.c`, `tests/test_dsp.c`) and expanded `tests/test_jarvis.c`, `tests/test_tts.c`, `tests/test_ren_mods.c`, and `tests/test_seams.c` (`0a0a885`, `d6d0582`).
+- **Cross-Platform Parity & Desktop/Browser Accessibility (`src/`, `mods/`)**:
+  - Added macOS (`src/jarvis-platform-macos.m`, `src/jarvis-audio-macos.m`, `mods/macos/ren-macos.m`, `mods/desktop/ax_core.{h,m}`) and Windows (`src/jarvis-platform-win32.c`, `src/jarvis-audio-win32.c`, `mods/win32/ren-win32.c`, `mods/desktop/uia_core.{h,c}`) backends via OS seams and `libstele` IPC (`b84591b`), unified browser accessibility bridge (`mods/desktop/a11y_core.h`, `5c6f17f`), macOS/Windows TTS/media/doctor/AX parity (`94d30e5`), and Win32 UTF-8/`VkKeyScanW`/clipboard/PATH/doctor + macOS process-tree fixes (`673162f`).
+  - Added AT-SPI2 `ui` tool (`mods/desktop/atspi_core.h`, `mods/desktop/ren-desktop.c`), `read_window`, PID-resolved `tmux` capture (`0127987`, `e227868`), `dwm` auto-focus routing (`mods/x11/x11_core.h`, `src/jarvis-ren-ipc.c`), and focus-free AT-SPI2 clicks (`mods/firefox/firefox_core.h`, `mods/firefox/ren-firefox.c`, `d6d0582`).
+  - Added earcon chime, toggle-cancel in `listen`, and `pull-class` for `ren` (`22767f3`).
+
+### Changed
+- **Modularized `jarvisd` Subsystems (`src/`)**:
+  - Extracted audio STT (`src/jarvis-stt.{c,h}`), IPC server (`src/jarvis-ipc-srv.{c,h}`), dispatch (`src/jarvis-dispatch.{c,h}`), and `ren` IPC routing (`src/jarvis-ren-ipc.{c,h}`) out of `src/jarvisd.c` (`a4ec682`, `0666e47`).
+- **Default Models & State Path Normalization (`src/jarvis.c`, `src/jarvisd.c`)**:
+  - Prioritized large Whisper models by default and exposed Raquel/`large-v3-turbo` in menu/setup (`a0cbafe`).
+  - Normalized `jarvis_plat_state_path()` prefixes (removing duplicate trailing hyphens across `jarvis-voice`, `jarvis-listen`, `jarvis-chime`, `jarvis-done`, `jarvis-tts-active`, `jarvis-acting`, and legacy `dwm-*` state/PID paths) (`968f0f7`).
+
+### Fixed
+- **Post-Wake, Follow-Up & Endpointing Stability (`src/jarvisd.c`, `src/jarvis-tts.c`, `Makefile`)**:
+  - Tuned default conversational follow-up (`10 s`) and configurable `post_wake_timeout_ms` (`10 s` default), wake-ack drain timing, and trailing-soft endpointing outside PTT (`bff950a`).
+  - Probed venv `edge_tts` in `doctor` with `DESTDIR` support (`e74d2a6`) and retried empty Edge-TTS PCM with `FD_CLOEXEC` and silence padding trim (`f7f4305`).
+
 ## [1.2.0] - 2026-11-23
 
 ### Added
